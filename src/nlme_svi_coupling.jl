@@ -218,9 +218,8 @@ end
 # coupling leaves a unit's sparse globals out of its columns: they keep their
 # sites, and the unit stays coupled to the globals stepped on the minibatch
 # estimate. Called before the first iteration, while every V_i is still zero.
-_brm_svi_uncouple_sparse!(coupling, ::Nothing) = coupling
-_brm_svi_uncouple_sparse!(::Nothing, sites) = nothing
-function _brm_svi_uncouple_sparse!(coupling, sites::_BRMSVISites)
+_brm_svi_uncouple_sparse!(coupling, sites) = coupling    # no coupling or no sparse global
+function _brm_svi_uncouple_sparse!(coupling::NamedTuple, sites::_BRMSVISites)
     for i in eachindex(coupling.columns)
         all(iszero, coupling.V[i]) || error("brm_svi_fit: internal: a sparse global " *
             "left a unit's coupling after its first step")

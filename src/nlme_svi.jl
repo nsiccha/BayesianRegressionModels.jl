@@ -1214,14 +1214,15 @@ function _brm_svi_run(rng, q, c, t)
         copy(t.ownership.work) :
         [Float64(length(t.units[i]) + length(t.plan.footprints[i])) for i in 1:N]
     sampler = _brm_svi_unit_sampler(c.unit_sampling, work)
+    # Before anything sized by the coupling (the stationarity iterates) is built.
+    sites = _brm_svi_sites(t, c.batch_size, sampler.probabilities)
+    _brm_svi_uncouple_sparse!(_brm_svi_coupling(q), sites)
     sampling = (; method=c.unit_sampling, work, probabilities=sampler.probabilities,
         visits=zeros(Int, N), draws=zeros(Int, N))
     if _brm_svi_stationarity_enabled(c)
         sampling = merge(sampling, (; stationarity=_brm_svi_stationarity_state(q, c)))
     end
     entropy = [_brm_svi_unit_entropy(q, i) for i in 1:N]
-    sites = _brm_svi_sites(t, c.batch_size, sampler.probabilities)
-    _brm_svi_uncouple_sparse!(_brm_svi_coupling(q), sites)
     _BRMSVIRun(rng, q, _brm_svi_adam(q, c.lr_global), 0, Float64[],
         _BRMSVIWindow[], 0, nothing, false,
         sampler, sampling, 0, zeros(Int, N), entropy, sum(entropy), sites)
