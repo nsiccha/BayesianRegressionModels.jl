@@ -269,7 +269,10 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
     @test sort(coupled.diagnostics.sparse_globals.coordinates) ==
         sort(coupled.diagnostics.globals[cb.positions])
     units = coupled.diagnostics.coupling.units
-    @test all(u -> length(u.rows) == 7, units)              # each window's innovations
+    # Each window's 7 innovations; a station's first and last window also own the
+    # end boundary only they read (`Normal(0, 30)`, so a coupled row as well).
+    @test sort(unique(length(u.rows) for u in units)) == [7, 8]
+    @test count(u -> length(u.rows) == 8, units) == 4
     @test !any(u -> any(in(cb.positions), u.columns), units) # no boundary column
     @test median(cb.r) > 0.9
     @test sqrt(mean(abs2, cb.z ./ cb.r)) < 1.0
