@@ -12,6 +12,40 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.329
+
+- `adaptive_centering_problem(rk::RKBRMI, ...)` adapts HSGP basis weights, as
+  the SBBRMI wrapper does, after the random-effect cells. This is on by default;
+  the new keyword `hsgp = false` leaves every weight in its emitted frame. Each
+  weight is one cell, `c = 0` being its standardized draw, at the spectral scale
+  RK's program computes (`<declaration>.spectral_scale`). Covered:
+  - squared-exponential terms, isotropic or not, with a fitted or fixed domain;
+  - periodic terms;
+  - grouped `by = g` terms, one block per level;
+  - known or bounded hyperparameters.
+
+  A grouped term whose levels are correlated (`cor =`) or scaled per level (a
+  hyper-predictor), and a term whose SD or length scale is a model value, keep
+  their emitted frame. A model with an HSGP and no random-effect block now
+  adapts instead of raising. Measured with 6 seeds each
+  (`research/adaptive_centering/rk_families.jl`):
+  - motorcycle data, `hsgp(times; k=20)`: minimum bulk ESS 77-175 → 314-502,
+    with no divergences, in 6 of 6 seeds;
+  - a panel of 4 group curves, `hsgp(x; k=10, by=g)`: higher in 4 of 6 seeds,
+    lower in 2.
+
+  **Breaking (results):** a default RKBRMI fit of a model with such an HSGP
+  term now samples in different coordinates. Pass `hsgp = false` for the
+  0.2.328 wrapper.
+- `adaptive_centering_cells` describes HSGP basis-weight cells (`family = :hsgp`)
+  on both backends: an RKBRMI's unless `hsgp = false` (the new keyword), and an
+  SBBRMI's, which raised before. Each cell has its own compiled `target` and
+  `scale = (; spectrum, sigma, length_scales, omega2, harmonic)`; the docstring
+  states the map. An SBBRMI whose wrapper also adapts grouped HSGP level cells
+  still raises.
+- The RK `:hsgp` coordinate record names the term's fitted interval (`fit`),
+  from which the cells read the basis frequencies.
+
 ## 0.2.328
 
 - **A fresh `brm_svi_fit` now learns its centering once exploration's opening
