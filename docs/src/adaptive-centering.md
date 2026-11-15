@@ -63,7 +63,13 @@ WarmupHMC samples the wrapped problem. Its completion-based workflow runs
 independent chains; a fit receipt must report any omitted chains.
 
 Inspect `adaptive_centering_blocks` and `adaptive_centering_controls` to
-relate controls to model quantities. The wrapper exposes a grid from zero
+relate controls to model quantities. `adaptive_centering_cells(model)` lists
+every random-effect cell as plain data, in the wrapper's cell order: what it is
+centred on (population coefficient, factor levels, containing cells), the
+earlier terms it conditions on, and each block's scales, correlation and
+mixing. Its docstring states the map those rows define, so code outside BRM
+can rebuild the wrapper's exact map and Jacobian, for example in another
+language. The wrapper exposes a grid from zero
 to one per supported cell. A position loss measures scale variation in
 candidate frames; a gradient loss measures position–gradient dependence.
 A pilot-based choice requires a fresh fit, while online adaptation updates
