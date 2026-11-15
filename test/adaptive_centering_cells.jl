@@ -16,7 +16,9 @@
 # nested in a band (containing cells), a cdar walk passing through, and the
 # derived-scale blocks of BRM 0.2.311 (Student-t, known scales and correlation,
 # bounded scales, stratified blocks, factor-level locations, and a Student-t
-# unit nested in an ordinary band through the joint wrapper); on
+# unit nested in an ordinary band through the joint wrapper), and those of
+# 0.2.313 (multi-membership blocks; R2D2-scaled blocks, whose shares are
+# stick-breaking simplex atoms); on
 # SBBRMI, factor levels and crossed containing groupings, a Student-t block
 # nested in an ordinary one beside a centred block with known SDs and
 # correlation (the joint derived-scale wrapper), and an R2D2 block whose scales
@@ -51,6 +53,16 @@ function log_simplex(y, entry)
     z[entry] - (m + log(sum(exp.(z .- m))))
 end
 
+# `log(simplex[entry])` of ReactiveKernelsPPL's stick-breaking simplex of the
+# `N` free values `u`: break fractions `z_i = σ(u_i + log(N + 1 - i))`, entry
+# `j <= N` is `z_j * prod(1 - z_i for i < j)`, entry `N + 1` the remaining stick.
+function log_stick(u, entry)
+    N = length(u)
+    z = [logistic(u[i] + log(N + 1 - i)) for i in 1:N]
+    rest = sum(log1p(-z[i]) for i in 1:entry-1; init=zero(eltype(u)))
+    entry <= N ? rest + log(z[entry]) : rest
+end
+
 function log_scale(spec, x)
     acc = spec.constant
     for a in spec.linear
@@ -61,7 +73,8 @@ function log_scale(spec, x)
         acc -= a.log_weight * softplus(-v) + a.log1m_weight * softplus(v)
     end
     for a in spec.simplex
-        acc += a.weight * log_simplex(x[a.coordinates], a.entry)
+        acc += a.weight * (a.transform === :stick_breaking ?
+            log_stick(x[a.coordinates], a.entry) : log_simplex(x[a.coordinates], a.entry))
     end
     for a in spec.bounded
         v = x[a.coordinate]
@@ -414,6 +427,39 @@ function sb_parity(model; kwargs...)
     check_parity(model, problem, names; kwargs...), names
 end
 
+@stestset "RKBRMI: multi-membership blocks, centred on 0" begin
+    df = panel(; seed=25)
+    shift(v) = "g" * lpad(mod1(parse(Int, String(v)[2:end]) + 1, 12), 2, '0')
+    data = merge(df, (; g=string.(df.g), h=shift.(string.(df.g)), x=0.5 .* df.t))
+    _, plan, _ = rk_parity(@brm data begin
+        mu ~ 1 + t + x + (1 + x | mm(g, h))
+        effect(mu, Intercept) ~ Normal(100, 50)
+        y ~ Normal(mu, se)
+    end)
+    b = only(plan.blocks)
+    @test b.group == (:g, :h) && b.n_terms == 2 && length(b.correlation.free) == 1
+    @test all(c -> c.location.coefficient == 0 && isempty(c.location.containers),
+              plan.cells)
+end
+
+@stestset "RKBRMI: R2D2-scaled blocks read stick-breaking shares" begin
+    df = panel(; seed=27)
+    data = merge(df, (; x=0.5 .* df.t))
+    _, plan, names = rk_parity(@brm data begin
+        sigma ~ Exponential(1.0)
+        mu ~ 1 + x + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=sigma)
+        y ~ Normal(mu, se)
+    end)
+    b = only(plan.blocks)
+    for s in b.log_scales
+        @test names[only(s.linear).coordinate] == "sigma"
+        @test only(s.unit).log_weight == 0.5 && only(s.unit).log1m_weight == -0.5
+        @test only(s.simplex).transform === :stick_breaking
+    end
+end
+
 @stestset "SBBRMI: factor levels and crossed containing groupings" begin
     rng = Xoshiro(17)
     NP = 30
@@ -476,6 +522,7 @@ end
     plan, names = sb_parity(model)
     b = only(plan.blocks)
     @test all(s -> !isempty(s.unit) && !isempty(s.simplex), b.log_scales)
+    @test all(s -> all(a -> a.transform === :stan, s.simplex), b.log_scales)
 end
 
 @stestset "SBBRMI: a wrapper that also adapts S2Z contrasts raises" begin

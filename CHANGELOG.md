@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.313
+
+- `adaptive_centering_problem(rk::RKBRMI, problem, backend)` and
+  `adaptive_centering_blocks(rk)` cover two more block families (todo
+  `0nsdowt`); both passed through unadapted before:
+  - multi-membership blocks (`(1 | mm(a, b))`, slopes included): one cell per
+    joint level of the member columns, centred on 0 as on SBBRMI;
+  - R2D2-scaled blocks (`sd(...) ~ r2d2(...)`): an `R2D2AdaptiveCenteringBlock`
+    whose margin `k` has log scale `log(reference) + (log R2 - log(1 - R2)) / 2 +
+    log(phi[j]) / 2`, read from RK's `R2`, its shares and the reference (a
+    constant, a data scalar or a sampled positive scale); a margin outside a
+    partial ICC statement reads its own sampled scale.
+- `adaptive_centering_cells` describes those blocks too. A simplex scale atom
+  now names its transform: `transform = :stan` (an SBBRMI's R2D2 shares, as
+  before) or `:stick_breaking` (an RKBRMI's, ReactiveKernelsPPL's simplex).
+
 ## 0.2.312
 
 - `adaptive_centering_cells(model[, unc_names]) -> (; blocks, cells)` describes
