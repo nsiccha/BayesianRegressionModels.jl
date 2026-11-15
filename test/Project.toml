@@ -441,4 +441,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.246 / RKPPL 0.1.187: RKPPL admits WarmupHMC 0.3.
 # RK 0.1.251 / RKPPL 0.1.195: a failed ODE solve is a typed NumericalFailure,
 # which RKPPL's sampler targets answer with -Inf.
-rev = "4950e55bd4b4d8cd7c20f696e115a60af5e18d21"
+# RK 0.1.262 / RKPPL 0.1.201: a computed vector, a cell local per group
+# included, as Ordinal thresholds; Statistics.mean in JAX.
+rev = "912fbdba843e16869938316e1ba8907f12383861"

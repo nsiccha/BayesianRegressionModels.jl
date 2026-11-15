@@ -2281,6 +2281,137 @@ StanBlocks.@deffun begin
     end
 end
 
+# `y_min ~ coarsened(Ordinal(structure, link, eta, thresholds[, d]); upper =
+# y_max)` over thresholds the model gives (snag ordinal-explicit-149b4a5f): the
+# inclusive range of category codes `lo..hi`, `log P(lo <= Y <= hi)`, from
+# `brm_ordinal_range_lpmf` with no threshold effects. Both ends are codes
+# 1:(k + 1), as the explicit form's response is; equal codes are an exact
+# observation. A code outside them, or an upper code below its lower one, is a
+# data error, checked on every row; a cumulative vector that is not strictly
+# increasing gives -Inf, as `brm_ordinal_explicit` does. Predictive draws are
+# single categories from the uncoarsened law.
+StanBlocks.@deffun begin
+    @stanonly brm_ordinal_explicit_range_codes(lo::int, hi::int, k::int)::int = begin
+        checked_lo = brm_ordinal_explicit_code(lo, k)
+        checked_hi = brm_ordinal_explicit_code(hi, k)
+        if hi < lo
+            reject("brm_ordinal_explicit_range: an upper category code is below its row's lower code; coarsened evidence over explicit thresholds observes codes lo <= hi in 1:(length(thresholds) + 1)")
+        end
+        1
+    end
+    @lhs @lpxf brm_ordinal_explicit_range_lpmf(lo::int, hi::int, eta::real,
+                                               thresholds::vector[k],
+                                               discrimination::real, structure::int,
+                                               link::int)::real = begin
+        checked = brm_ordinal_explicit_range_codes(lo, hi, k)
+        if brm_ordinal_explicit_ordered(thresholds, structure) == 0
+            negative_infinity()
+        else
+            brm_ordinal_range_lpmf(lo, hi, eta, thresholds, discrimination, structure,
+                link, rep_vector(0., k))
+        end
+    end
+    @lhs brm_ordinal_explicit_range_lpmf(lo::int[n], hi::int[n], eta::vector[n],
+                                         thresholds::vector[k],
+                                         discrimination::vector[n], structure::int,
+                                         link::int)::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_ordinal_explicit_range_lpmf(lo[i], hi[i], eta[i], thresholds,
+                discrimination[i], structure, link)
+        end
+        rv
+    end
+    @lhs brm_ordinal_explicit_range_lpmf(lo::int[n], hi::int[n], eta::vector[n],
+                                         thresholds::vector[k],
+                                         discrimination::real, structure::int,
+                                         link::int)::real = begin
+        brm_ordinal_explicit_range_lpmf(lo, hi, eta, thresholds,
+            rep_vector(discrimination, n), structure, link)
+    end
+    @lhs brm_ordinal_explicit_range_lpmf(lo::int[n], hi::int[n], eta::real,
+                                         thresholds::vector[k],
+                                         discrimination::vector[n], structure::int,
+                                         link::int)::real = begin
+        brm_ordinal_explicit_range_lpmf(lo, hi, rep_vector(eta, n), thresholds,
+            discrimination, structure, link)
+    end
+    @lhs brm_ordinal_explicit_range_lpmf(lo::int[n], hi::int[n], eta::real,
+                                         thresholds::vector[k],
+                                         discrimination::real, structure::int,
+                                         link::int)::real = begin
+        brm_ordinal_explicit_range_lpmf(lo, hi, rep_vector(eta, n), thresholds,
+            rep_vector(discrimination, n), structure, link)
+    end
+
+    brm_ordinal_explicit_range_lpmfs(lo::int, hi::int, eta::real,
+                                     thresholds::vector[k], discrimination::real,
+                                     structure::int, link::int)::real = begin
+        brm_ordinal_explicit_range_lpmf(lo, hi, eta, thresholds, discrimination,
+            structure, link)
+    end
+    brm_ordinal_explicit_range_lpmfs(lo::int[n], hi::int[n], eta::vector[n],
+                                     thresholds::vector[k],
+                                     discrimination::vector[n], structure::int,
+                                     link::int)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_explicit_range_lpmf(lo[i], hi[i], eta[i], thresholds,
+                discrimination[i], structure, link)
+        end
+        rv
+    end
+    brm_ordinal_explicit_range_lpmfs(lo::int[n], hi::int[n], eta::vector[n],
+                                     thresholds::vector[k], discrimination::real,
+                                     structure::int, link::int)::vector[n] = begin
+        brm_ordinal_explicit_range_lpmfs(lo, hi, eta, thresholds,
+            rep_vector(discrimination, n), structure, link)
+    end
+    brm_ordinal_explicit_range_lpmfs(lo::int[n], hi::int[n], eta::real,
+                                     thresholds::vector[k],
+                                     discrimination::vector[n], structure::int,
+                                     link::int)::vector[n] = begin
+        brm_ordinal_explicit_range_lpmfs(lo, hi, rep_vector(eta, n), thresholds,
+            discrimination, structure, link)
+    end
+    brm_ordinal_explicit_range_lpmfs(lo::int[n], hi::int[n], eta::real,
+                                     thresholds::vector[k], discrimination::real,
+                                     structure::int, link::int)::vector[n] = begin
+        brm_ordinal_explicit_range_lpmfs(lo, hi, rep_vector(eta, n), thresholds,
+            rep_vector(discrimination, n), structure, link)
+    end
+
+    brm_ordinal_explicit_range_rng(hi::int, eta::real, thresholds::vector[k],
+                                   discrimination::real, structure::int,
+                                   link::int)::int = begin
+        brm_ordinal_explicit_rng(eta, thresholds, discrimination, structure, link)
+    end
+    brm_ordinal_explicit_range_rng(int[n], hi::int[n], eta::vector[n],
+                                   thresholds::vector[k], discrimination::vector[n],
+                                   structure::int, link::int)::int[n] = begin
+        brm_ordinal_explicit_rng(int[n], eta, thresholds, discrimination, structure,
+            link)
+    end
+    brm_ordinal_explicit_range_rng(int[n], hi::int[n], eta::vector[n],
+                                   thresholds::vector[k], discrimination::real,
+                                   structure::int, link::int)::int[n] = begin
+        brm_ordinal_explicit_rng(int[n], eta, thresholds, discrimination, structure,
+            link)
+    end
+    brm_ordinal_explicit_range_rng(int[n], hi::int[n], eta::real,
+                                   thresholds::vector[k], discrimination::vector[n],
+                                   structure::int, link::int)::int[n] = begin
+        brm_ordinal_explicit_rng(int[n], eta, thresholds, discrimination, structure,
+            link)
+    end
+    brm_ordinal_explicit_range_rng(int[n], hi::int[n], eta::real,
+                                   thresholds::vector[k], discrimination::real,
+                                   structure::int, link::int)::int[n] = begin
+        brm_ordinal_explicit_rng(int[n], eta, thresholds, discrimination, structure,
+            link)
+    end
+end
+
 # Hurdle-Poisson lpmf, pointwise log-pmf, and generated-quantities RNG.
 # The positive component is a Poisson conditioned on Y > 0, so its log-pmf
 # subtracts `poisson_lccdf(0 | lambda)`. Predictive draws use exact rejection
@@ -17494,9 +17625,13 @@ function _sb_lik_family!(stmts, target, ::typeof(coarsened), args, kwargs::Named
     plan = _brm_response_modifier_plan(coarsened, args, kwargs; prefix="sbimpl")
     base = plan.base
     base_args = getargs(base)
+    length(base_args) in (4, 5) &&
+        return _sb_coarsened_explicit!(stmts, target, plan, data)
     length(base_args) == 3 || error(
-        "sbimpl: `Ordinal($target)` expects exactly three positional arguments " *
-        "`(structure, link, eta)`, got $(length(base_args))")
+        "sbimpl: `coarsened(Ordinal($target))` takes `(structure, link, eta)` with " *
+        "thresholds BRM allocates, or `(structure, link, eta, thresholds[, " *
+        "discrimination])` with thresholds the model gives; got " *
+        "$(length(base_args)) positional arguments")
     lower = _sb_ordinal_observed(target, data)
     upper = _brm_coarsened_upper_labels(plan.upper, data)
     prepared_response = _brm_response_levels(target, lower; prefix="sbimpl")
@@ -17579,6 +17714,21 @@ end
 # vector it passes.
 function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
                          args::Union{NTuple{4,Any},NTuple{5,Any}}, kwargs::NamedTuple, data)
+    law = _sb_ordinal_explicit_law(target, args, kwargs, data)
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `Ordinal` expects an observed outcome vector for `$target`, " *
+        "got $(typeof(raw))")
+    data[target] = _brm_ordinal_codes(target, raw; prefix="sbimpl")
+    # The family is BRM's own binding (as in a cell), not a name the caller's
+    # model module must export.
+    push!(stmts, Expr(:call, :~, target, Expr(:call, brm_ordinal_explicit, law...)))
+end
+
+# An explicit-threshold `Ordinal`'s Stan arguments: eta, thresholds,
+# discrimination (the fifth argument or `discrimination=`, one by default) and
+# the structure and link codes, shared by an exact response and a coarsened one.
+function _sb_ordinal_explicit_law(target, args, kwargs::NamedTuple, data)
     structure_raw, link_raw, eta_raw, thresholds_raw = args
     structure = _sb_ordinal_structure_code(structure_raw)
     link = _sb_ordinal_link_code(link_raw)
@@ -17591,18 +17741,29 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
     length(args) == 5 && haskey(kwargs, :discrimination) && error(
         "sbimpl: `Ordinal($target)` got its discrimination twice, as the fifth " *
         "argument and as `discrimination=`")
-    raw = get(data, target, nothing)
-    raw isa AbstractVector || error(
-        "sbimpl: `Ordinal` expects an observed outcome vector for `$target`, " *
-        "got $(typeof(raw))")
-    data[target] = _brm_ordinal_codes(target, raw; prefix="sbimpl")
     discrimination = _sb_ordinal_discrimination_expr(
         length(args) == 5 ? args[5] : get(kwargs, :discrimination, 1.0), data)
-    # The family is BRM's own binding (as in a cell), not a name the caller's
-    # model module must export.
-    push!(stmts, Expr(:call, :~, target, Expr(:call, brm_ordinal_explicit,
-        _sb_scalar_expr(eta_raw, data), _sb_scalar_expr(thresholds_raw, data),
-        discrimination, structure, link)))
+    (_sb_scalar_expr(eta_raw, data), _sb_scalar_expr(thresholds_raw, data),
+     discrimination, structure, link)
+end
+
+# `y_min ~ coarsened(Ordinal(structure, link, eta, thresholds[, d]); upper =
+# y_max)`: both columns hold category codes 1:(length(thresholds) + 1), as the
+# explicit form's response does, so no level table codes them and an
+# unobserved category stays in the model. Each row's upper code must not be
+# below its lower one (refused here, naming the row); a code beyond the
+# thresholds is refused by the Stan program's data check.
+function _sb_coarsened_explicit!(stmts, target, plan, data)
+    law = _sb_ordinal_explicit_law(target, Tuple(getargs(plan.base)),
+        getkwargs(plan.base), data)
+    lower = _sb_ordinal_observed(target, data)
+    upper_name = name(plan.upper)
+    lo, hi = _brm_coarsened_explicit_codes(target, lower,
+        _brm_coarsened_upper_labels(plan.upper, data), upper_name; prefix="sbimpl")
+    data[target] = lo
+    data[upper_name] = hi
+    push!(stmts, Expr(:call, :~, target,
+        Expr(:call, brm_ordinal_explicit_range, upper_name, law...)))
 end
 _sb_lik_family!(_, target, ::Type{<:Ordinal}, args, ::NamedTuple, _) = error(
     "sbimpl: `Ordinal($target)` takes `(structure, link, eta)` with thresholds BRM " *

@@ -828,8 +828,8 @@ end
 # estimate. `problems` holds the first pair that was not finite, if any; the
 # worker's global buffers are zero again at `touched` on return. Under learned
 # centering every draw is the centered term (src/nlme_svi_centering.jl), and
-# `centered` holds the controls' gradient averaged over the draws and every
-# draw's adjoints, each weighted 1/d where a pair's are weighted 1
+# `centered` holds the controls' gradient averaged over the draws and the sum of
+# every draw's adjoints, each draw weighted 1/d where a pair's are weighted 1
 # (`_brm_svi_centering_batch_gradient`).
 function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
         centering=nothing, frame=nothing, zmean=q.M[i])
@@ -838,7 +838,7 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
     gg₊, gg₋ = _brm_svi_global_buffers(work, D)
     gz₊, gz₋ = zeros(d), zeros(d)
     value, gz, gg, W = 0.0, zeros(d), zeros(length(touched)), zeros(d, d)
-    gc, adjoints = nothing, Any[]
+    gc, adjoint = nothing, nothing
     problem = nothing
     for k in 1:d
         δ = U' \ view(E, :, k)
@@ -855,7 +855,11 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
                 g, z₋, plan, work)
             gc = something(gc, zero(gc₊))
             gc .+= (gc₊ .+ gc₋) ./ 2d
-            push!(adjoints, a₊, a₋)
+            if adjoint === nothing
+                adjoint = _brm_svi_adjoint_add!(a₊, a₋)
+            else
+                _brm_svi_adjoint_add!(_brm_svi_adjoint_add!(adjoint, a₊), a₋)
+            end
         end
         problem = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
             (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g),
@@ -871,7 +875,8 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
     end
     S = (W * E' .+ E * W') ./ 2d
     centered = centering === nothing ? nothing :
-        (; gc=something(gc, Float64[]), adjoints=Tuple(adjoints), weight=1 / d)
+        (; gc=something(gc, Float64[]), adjoints=adjoint === nothing ? () : (adjoint,),
+           weight=1 / d)
     (; value, gg, gz, S, problem, centered)
 end
 
@@ -1314,6 +1319,9 @@ function _brm_svi_run(rng, q, c, t)
         copy(t.ownership.work) :
         [Float64(length(t.units[i]) + length(t.plan.footprints[i])) for i in 1:N]
     sampler = _brm_svi_unit_sampler(c.unit_sampling, work)
+    # Before anything sized by the coupling (the stationarity iterates) is built.
+    sites = _brm_svi_sites(t, c.batch_size, sampler.probabilities)
+    _brm_svi_uncouple_sparse!(_brm_svi_coupling(q), sites)
     sampling = (; method=c.unit_sampling, work, probabilities=sampler.probabilities,
         visits=zeros(Int, N), draws=zeros(Int, N))
     if _brm_svi_stationarity_enabled(c)
@@ -1322,8 +1330,7 @@ function _brm_svi_run(rng, q, c, t)
     entropy = [_brm_svi_unit_entropy(q, i) for i in 1:N]
     _BRMSVIRun(rng, q, _brm_svi_adam(q, c.lr_global), 0, Float64[],
         _BRMSVIWindow[], 0, nothing, false,
-        sampler, sampling, 0, zeros(Int, N), entropy, sum(entropy),
-        _brm_svi_sites(t, c.batch_size, sampler.probabilities))
+        sampler, sampling, 0, zeros(Int, N), entropy, sum(entropy), sites)
 end
 
 # The share of a window's iterations left out at each end of its statistics.

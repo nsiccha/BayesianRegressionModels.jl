@@ -130,6 +130,85 @@ end
     check_centered_terms(m; kinds=(:ranef, :vector))
 end
 
+# Beside `z` (law scale `tau`, a global), each unit owns an element of `w`, whose law
+# reads no coordinate: centring `w` could only rescale it by a fixed factor.
+svi_constant_law_model(data) = @brm data begin
+    sigma ~ Exponential(1)
+    tau ~ Exponential(1)
+    z[1:ncoeff] .~ Normal(0.4, tau)
+    w[1:ncoeff] .~ Normal(0.0, 2.0)
+    mu ~ 1 + (1 | unit | subject)
+    @plate for i in eachindex(mu)
+        y[i] ~ Normal(mu[i] .+ z[c1[i]] .+ w[c2[i]] .* x[i], sigma)
+    end
+end
+
+# Snag learned-centerin-1fc668a4: on a window toy whose units own `e .~ Normal(0, 1)`
+# innovations, every element was a cell, so linear coupling held no unit row.
+@stestset "a vector whose law reads no estimated coordinate is coupled, not centred" begin
+    m = brm_nlme_model(RKBRMI(svi_constant_law_model(svi_owned_data())); ad_backend=NLME_AD)
+    t = BRM_._brm_svi_target(m)
+    plan = BRM_._brm_svi_centering_plan(t, LearnedCentering())
+    @test !plan.constant_laws
+    names = m.view.coordinates
+    for (i, cells) in enumerate(plan.cells)
+        @test sort([c.kind for c in cells]) == [:ranef, :vector]
+        @test only(c.declaration for c in cells if c.kind === :vector) === :z
+        # The unit's `w` element is a coupled row, its `z` element and intercept are not.
+        rows = BRM_._brm_svi_coupling_rows(merge(t, (; centering=plan)), i)
+        @test sort(String.(names[t.units[i][rows]])) == ["w.$(2i)"]
+    end
+    # One row per unit, as for a law that reads a unit coordinate.
+    rows = [r for r in plan.uncentered if r.kind === :vector]
+    @test all(r -> r.declaration === :w, rows)
+    @test sort(String.(reduce(vcat, [r.coordinates for r in rows]))) == sort(["w.$(2i)" for i in 1:6])
+    @test all(r -> occursin("read no estimated coordinate", r.reason), rows)
+    check_centered_terms(m; kinds=(:ranef, :vector))
+
+    # A state saved before the rule carries no `constant_laws`: it keeps centring `w`.
+    legacy = BRM_._brm_svi_saved_centering((; start=0.5, step=0.05))
+    @test legacy.constant_laws
+    @test !BRM_._brm_svi_saved_centering((; start=0.5, step=0.05, constant_laws=false)).constant_laws
+    old = BRM_._brm_svi_centering_plan(t, legacy)
+    @test old.ncells == plan.ncells .+ 1
+    @test all(cells -> count(c -> c.kind === :vector, cells) == 2, old.cells)
+    @test !any(r -> r.kind === :vector, old.uncentered)
+    @test all(i -> isempty(BRM_._brm_svi_coupling_rows(merge(t, (; centering=old)), i)),
+        eachindex(t.units))
+
+    # A default fit couples every unit's `w` row; every report row names its kind,
+    # block, declaration and level, `nothing` where the row has none.
+    options = (; batch_size=3, max_iterations=60, ndraws=10)
+    fit = brm_svi_fit(m; rng=Xoshiro(41), options...)
+    @test all(u -> length(u.rows) == 1, fit.diagnostics.coupling.units)
+    report = fit.diagnostics.centering
+    for r in Iterators.flatten((report.cells, report.uncentered))
+        @test all(f -> hasproperty(r, f), (:kind, :block, :declaration, :level))
+    end
+    @test all(r -> r.kind !== :vector || (r.block === nothing && r.declaration === :z),
+        report.cells)
+    @test all(r -> r.kind !== :ranef || (r.declaration === nothing && r.block !== nothing),
+        report.cells)
+    @test any(r -> r.kind === :vector && r.declaration === :w, report.uncentered)
+    @test fit.diagnostics.q.centering.constant_laws === false
+
+    # An optimizer checkpoint written before the rule (no `constant_laws` in its
+    # controls) resumes with its constant-law cells, bit for bit.
+    whole = brm_svi_fit(m; rng=Xoshiro(42), options..., centering=legacy)
+    part = brm_svi_fit(m; rng=Xoshiro(42), options..., centering=legacy, stop_after=25)
+    @test length.(whole.diagnostics.q.centering.x) == old.ncells
+    s = brm_svi_optimizer_checkpoint(part)
+    unsaved(q) = q === nothing ? nothing :
+        merge(q, (; centering=Base.structdiff(q.centering, NamedTuple{(:constant_laws,)})))
+    run = BRM_._BRMSVIRun((f in (:q, :average) ? unsaved(getfield(s.run, f)) :
+        getfield(s.run, f) for f in fieldnames(typeof(s.run)))...)
+    @test !hasproperty(run.q.centering, :constant_laws)
+    older = BRM_.BRMSVIOptimizerState(s.format, s.identity, s.previous, s.controls, run)
+    resumed = brm_svi_resume(m, older; ndraws=10)
+    @test resumed.draws == whole.draws
+    @test resumed.diagnostics.q.centering.x == whole.diagnostics.q.centering.x
+end
+
 # A device grouping crossed with the subjects (`shared_groups`): each subject's
 # rows read a device of its own, except the subjects in `shared`, whose rows all
 # read "dshared".
@@ -564,7 +643,7 @@ end
     initial = brm_svi_fit(svi_stream_model(data); rng=Xoshiro(32), max_iterations=300,
         ndraws=0, batch_size=2)
     saved = brm_svi_checkpoint(initial)
-    @test saved.layout.centering == (; start=0.5, step=0.05)
+    @test saved.layout.centering == (; start=0.5, step=0.05, constant_laws=false)
     @test all(u -> count(!isnan, u.centering) == 1, values(saved.units))
     io = IOBuffer()
     serialize(io, saved)

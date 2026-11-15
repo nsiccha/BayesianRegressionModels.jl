@@ -1012,8 +1012,9 @@ function _brm_response_modifier_plan(wrapper, args, kwargs::NamedTuple;
             "response column holds each row's lowest category")
         base = only(args)
         base isa ExprColumn && getf(base) === Ordinal || error(
-            "$prefix: `coarsened` supports an `Ordinal(structure, link, eta)` " *
-            "base; got `$(base isa ExprColumn ? nameof(getf(base)) : typeof(base))`")
+            "$prefix: `coarsened` supports an `Ordinal(structure, link, eta)` or " *
+            "`Ordinal(structure, link, eta, thresholds[, discrimination])` base; got " *
+            "`$(base isa ExprColumn ? nameof(getf(base)) : typeof(base))`")
         upper = _brm_normalize_response_bound(kwargs.upper)
         upper isa NamedColumn && parent(upper) isa DataColumn || error(
             "$prefix: `coarsened` `upper` must name an observed data column of " *
@@ -1151,6 +1152,29 @@ function _brm_coarsened_codes(target::Symbol, levels, lower::AbstractVector,
         lo[row] <= hi[row] || error(
             "$prefix: `coarsened` response `$target` row $row: upper category " *
             "`$label` precedes the lower category `$(levels[lo[row]])`")
+    end
+    (lo, hi)
+end
+
+# Both endpoints of coarsened evidence over an explicit-threshold `Ordinal`
+# (snag ordinal-explicit-149b4a5f): category codes 1:K, K =
+# length(thresholds) + 1, exactly as the explicit form's response holds them
+# (`_brm_ordinal_codes`), so there is no level table and every category the
+# thresholds define stays in the model. No row's upper code may be below its
+# lower one; a code beyond K is the evaluated program's data check, since the
+# thresholds the model gives fix K.
+function _brm_coarsened_explicit_codes(target::Symbol, lower::AbstractVector,
+                                       upper::AbstractVector, upper_name;
+                                       prefix="BRM")
+    length(upper) == length(lower) || error(
+        "$prefix: `coarsened` response `$target` has $(length(lower)) rows but " *
+        "its `upper` column `$upper_name` has $(length(upper))")
+    lo = _brm_ordinal_codes(target, lower; prefix)
+    hi = _brm_ordinal_codes(Symbol(upper_name), upper; prefix)
+    for row in eachindex(lo, hi)
+        lo[row] <= hi[row] || error(
+            "$prefix: `coarsened` response `$target` row $row: upper category code " *
+            "$(hi[row]) is below the lower code $(lo[row])")
     end
     (lo, hi)
 end

@@ -92,11 +92,14 @@ end
         trial == 2 && fill!(c, 1.0)
         y, μ, ℓ, _ = forward(f, g, u, c, f.frame)
         gy, gg, gc = F_y(g, y), F_g(g, y), zeros(6)
-        adjoint = BRM._BRMSVICenteringAdjoint(f.frame)
+        adjoint = BRM._BRMSVICenteringAdjoint(f.frame, f.inst, f.ncells)
         BRM._brm_svi_unit_centering_backward!(gy, gc, adjoint, y, μ, ℓ, f.inst, c, f.frame)
-        for (k, v) in adjoint.globals
-            gg[k] += v
-        end
+        # The batch's mapping of the per-cell adjoints: block locations onto the
+        # globals, vector cells onto their law ports' cotangents.
+        Ā = [zero(A) for A in f.frame.A]
+        cot = Any[zeros(3), 0.0]
+        BRM._brm_svi_adjoint_terms!(Ā, cot, gg, adjoint, 1.0)
+        @test Ā == adjoint.A
         @test gy ≈ fd(x -> target(f, g, x, c, f.frame), u) rtol = 1e-6 atol = 1e-8
         @test gc ≈ fd(x -> target(f, g, u, x, f.frame), c) rtol = 1e-6 atol = 1e-8
         @test gg ≈ fd(x -> target(f, x, u, c, f.frame), g) rtol = 1e-6 atol = 1e-8
@@ -113,15 +116,40 @@ end
                 (2ε) rtol = 1e-6 atol = 1e-8
         end
         # The vector ports' adjoints, summed by (port, element).
-        port = zeros(4)   # mean[1:3], scale
-        for (p, j, v) in adjoint.ports
-            port[p == 1 ? j : 4] += v
-        end
+        port = [cot[1]; cot[2]]   # mean[1:3], scale
         mean0, scale0 = f.frame.values
         @test port[1:3] ≈ fd(x -> target(f, g, u, c, (; f.frame.A, values=(x, scale0))), mean0) rtol = 1e-6 atol = 1e-8
         @test port[4] ≈ only(fd(x -> target(f, g, u, c, (; f.frame.A, values=(mean0, x[1]))),
             [scale0])) rtol = 1e-6 atol = 1e-8
     end
+end
+
+@testset "learned centering: a unit's draws' adjoints add before the batch maps them" begin
+    # The batch maps one summed adjoint per unit (`_brm_svi_adjoint_add!`), not one
+    # per draw: the same chain terms, by linearity, at the cost of one map per unit.
+    rng = Xoshiro(12)
+    f = fixture()
+    g = randn(rng, 2)
+    adjoints = map(1:4) do _
+        u, c = randn(rng, f.d), rand(rng, 6)
+        y, μ, ℓ, _ = forward(f, g, u, c, f.frame)
+        a = BRM._BRMSVICenteringAdjoint(f.frame, f.inst, f.ncells)
+        BRM._brm_svi_unit_centering_backward!(F_y(g, y), zeros(6), a, y, μ, ℓ, f.inst, c, f.frame)
+        a
+    end
+    mapped(as, w) = begin
+        Ā, cot, gl = [zero(A) for A in f.frame.A], Any[zeros(3), 0.0], zeros(2)
+        foreach(a -> BRM._brm_svi_adjoint_terms!(Ā, cot, gl, a, w), as)
+        (; Ā, cot, gl)
+    end
+    each = mapped(adjoints, 0.37)
+    summed = reduce(BRM._brm_svi_adjoint_add!, deepcopy(adjoints))
+    once = mapped((summed,), 0.37)
+    @test once.Ā ≈ each.Ā rtol = 1e-12
+    @test once.cot[1] ≈ each.cot[1] rtol = 1e-12
+    @test once.cot[2] ≈ each.cot[2] rtol = 1e-12
+    @test once.gl ≈ each.gl rtol = 1e-12
+    @test any(!iszero, once.gl) && any(!iszero, once.cot[1]) && !iszero(once.cot[2])
 end
 
 @testset "learned centering: the shared primitive's scalar map" begin
@@ -192,7 +220,14 @@ end
             (; layout=(; centering=(; start=0.2, step=0.03))), keyword)
         @test inherited.start == 0.2
         @test inherited.step == 0.03
+        # A state saved before constant-law vectors left the cells keeps centring them.
+        @test inherited.constant_laws
+        saved = BRM._brm_svi_resolve_centering(
+            (; layout=(; centering=(; start=0.2, step=0.03, constant_laws=false))), keyword)
+        @test !saved.constant_laws
     end
+    @test !BRM._brm_svi_resolve_centering(nothing, missing).constant_laws
+    @test !LearnedCentering(; start=0.3).constant_laws
 end
 
 @testset "Gaussian population width: weak, strong and unbalanced groups" begin
