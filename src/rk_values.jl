@@ -276,10 +276,18 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         # Shared R2D2M2 budgets derive the scales in the main block; the
         # component still owns its correlation factor and draws.
         tau = _rk_ast_fresh_name(string(draws, "_tau"), taken)
-        _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
+        r2d2 = _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
             predictors, population_priors; stem_base=draws)
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             _rk_bucket_eta(bucket), (); scale_value=tau)
+        # Read by adaptive centring alone (`_RK_ADAPTIVE_RECORD_KINDS`): each
+        # margin's derived scale (`_rk_ast_ranef_r2d2!`).
+        _rk_coordinate_record!(coordinates, merge((; kind=:r2d2_ranef,
+            group=grouping.form === :plain ? bucket.group : Tuple(grouping.columns),
+            form=grouping.form, columns=Tuple(grouping.columns), id=bucket.id,
+            margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
+            z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L"), r2d2),
+            _rk_joins_columns(grouping) ? (; joint_columns=grouping.columns) : (;)))
     else
         priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         # Known values (`sd(...) = value`, `cor(:, ID) = R`) are inputs: a known
@@ -299,9 +307,14 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         # its sampled scales (`nothing` at a known margin) and records which
         # values are known. `scale_priors` are the laws emitted for the
         # margins' scales, in margin order (a known scale's is its number).
-        grouping.form === :plain &&
-            _rk_coordinate_record!(coordinates, merge((; kind=:ranef,
-                group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
+        # A multi-membership block's record (`:mm_ranef`) is read by adaptive
+        # centring alone (`_RK_ADAPTIVE_RECORD_KINDS`); its rows are the joint
+        # levels of its member columns.
+        grouping.form in (:plain, :mm) &&
+            _rk_coordinate_record!(coordinates, merge((;
+                kind=grouping.form === :plain ? :ranef : :mm_ranef,
+                group=grouping.form === :plain ? bucket.group : Tuple(grouping.columns),
+                id=bucket.id, bucket_kind=bucket.kind,
                 margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
                 scale=Symbol(draws, ".tau"),
                 scales=known ?
