@@ -77,7 +77,8 @@ const _BRM_SVI_COLLAPSED_HALVINGS = 20    # step halvings before a non-finite st
 # copy or a serialized run starts empty and factors P again from its stored values.
 mutable struct _BRMSVIFactorCache
     factor::Any
-    _BRMSVIFactorCache() = new(nothing)
+    logsd::Vector{Float64}
+    _BRMSVIFactorCache() = new(nothing, Float64[])
 end
 Base.deepcopy_internal(::_BRMSVIFactorCache, ::IdDict) = _BRMSVIFactorCache()
 Serialization.serialize(s::Serialization.AbstractSerializer, ::_BRMSVIFactorCache) =
@@ -425,38 +426,54 @@ function _brm_svi_collapsed_solve!(sites::_BRMSVICollapsedSites, t, q)
         Δ ./= 2
     end
     applied || (sites.skipped += 1)
-    q.ρ[globals] .= log.(sqrt.(SelectedInversion.selinv_diag(F)))
+    sites.cache.logsd = log.(sqrt.(SelectedInversion.selinv_diag(F)))
+    q.ρ[globals] .= sites.cache.logsd
     sites.logdet = logdet(F)
     sites.cache.factor = F
     q
 end
 
+# Rebuild both parts of the workspace after a copy or serialized checkpoint.
+function _brm_svi_collapsed_cached_factor!(sites::_BRMSVICollapsedSites)
+    F = sites.cache.factor
+    if F === nothing
+        F, _ = _brm_svi_collapsed_factor(sites)
+        F === nothing && return nothing
+        sites.cache.logsd = log.(sqrt.(SelectedInversion.selinv_diag(F)))
+        sites.cache.factor = F
+    end
+    F
+end
+
 # The draw of the sparse globals from their joint factor, in place in `g`, from the
 # same standard normals `ε` the diagonal draw used; returns the standard normals the
 # coupling reads, the sparse globals' deviations in units of their marginal sds.
+# Polishing averages the log sds in q. Retain the precision factor's correlations
+# while scaling its draws to those reported marginals; during iteration the scales
+# agree exactly, so this multiplier is one. No dense covariance is formed.
 # Before the first solve the diagonal draw stands.
 _brm_svi_sparse_draw!(g, ε, sites, q) = ε
 function _brm_svi_sparse_draw!(g, ε, sites::_BRMSVICollapsedSites, q)
     sites.solves == 0 && return ε
-    F = sites.cache.factor
-    if F === nothing
-        F, _ = _brm_svi_collapsed_factor(sites)
-        F === nothing && return ε
-        sites.cache.factor = F
-    end
+    F = _brm_svi_collapsed_cached_factor!(sites)
+    F === nothing && return ε
     globals = sites.base.globals
     x = F.UP \ ε[globals]
+    x .*= exp.(view(q.ρ, globals) .- sites.cache.logsd)
     g[globals] .= view(q.μ, globals) .+ x
     noise = copy(ε)
     noise[globals] .= x ./ exp.(view(q.ρ, globals))
     noise
 end
 
-# What the joint factor changes in the global factor's entropy: -log det P / 2 in
-# place of the sparse globals' Σ log s.
+# The joint factor's entropy correction is half the log determinant of its
+# correlation matrix, unchanged when polishing averages the marginal log scales.
 _brm_svi_sparse_entropy(sites, q) = 0.0
-_brm_svi_sparse_entropy(sites::_BRMSVICollapsedSites, q) = sites.solves == 0 ? 0.0 :
-    -sites.logdet / 2 - sum(i -> q.ρ[i], sites.base.globals; init=0.0)
+function _brm_svi_sparse_entropy(sites::_BRMSVICollapsedSites, q)
+    sites.solves == 0 && return 0.0
+    F = _brm_svi_collapsed_cached_factor!(sites)
+    F === nothing ? 0.0 : -logdet(F) / 2 - sum(sites.cache.logsd)
+end
 
 # Under linear coupling, each probed batch unit's slope on its sparse globals is
 # -H_zz⁻¹ H_zg per unit of the global's deviation (the coupling reads the sparse

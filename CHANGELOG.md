@@ -27,7 +27,9 @@ instead of failing at run time.
   its conditioning sets. Each iteration takes one sparse-Cholesky Newton step
   for `m`, draws from `P`'s factor, and gets the marginal sds by selected
   inversion. Readers stay coupled to their sparse globals, with the slope from
-  the same curvature.
+  the same curvature. Polished results average the means and marginal log
+  scales, retaining the last joint factor's correlations; their draws use
+  those averaged scales.
 
   The default `:sites` is unchanged, and its fits are bit-identical. Where the
   data pin a sparse global only together with its readers' coordinates (a slow

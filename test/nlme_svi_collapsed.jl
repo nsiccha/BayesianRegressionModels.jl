@@ -256,6 +256,35 @@ end
     @test s2.pull_sum .- Matrix(s2.sum) * q2.μ ≈ Gp .+ Λ * (g0 .- q2.μ)
 end
 
+@stestset "collapsed draws keep polished marginal scales and joint correlations" begin
+    t = (; globals=[1, 2, 3], units=[[4]], touched=[[1, 2]])
+    sites = BRM._brm_svi_collapsed_sites(BRM._brm_svi_sites(t, 1, [0.5]), t)
+    P = [4.0 1.5; 1.5 2.0]
+    nonzeros(sites.sum) .= vec(P)
+    sites.solves = 1
+    # Polishing can return different marginal scales from the last joint solve.
+    # Feeding an orthonormal noise basis recovers the draw covariance exactly.
+    q = (; μ=[0.4, -0.2, 0.7], ρ=log.([3.0, 0.5, 2.0]), Β=zeros(3, 0))
+    function draws(sites)
+        mapreduce(hcat, eachcol(Matrix{Float64}(I, 3, 3))) do ε
+            g = q.μ .+ exp.(q.ρ) .* ε
+            BRM._brm_svi_sparse_draw!(g, ε, sites, q)
+            g .- q.μ
+        end
+    end
+    A = draws(sites)
+    covariance = A * A'
+    Σ = inv(P)
+    R = Σ ./ sqrt.(diag(Σ) * diag(Σ)')
+    D = Diagonal(exp.(q.ρ[1:2]))
+    @test covariance[1:2, 1:2] ≈ D * R * D
+    @test diag(covariance) ≈ exp.(2 .* q.ρ)
+    @test covariance[3, :] ≈ [0.0, 0.0, 4.0]
+    @test BRM._brm_svi_sparse_entropy(sites, q) ≈ logdet(R) / 2
+    io = IOBuffer(); serialize(io, sites); seekstart(io)
+    @test draws(deserialize(io)) == A
+end
+
 @stestset "sparse_globals refusals" begin
     m = svi_collapsed_nlme()
     @test_throws ArgumentError brm_svi_fit(m; SVI_COLLAPSED_OPT..., max_iterations=2,

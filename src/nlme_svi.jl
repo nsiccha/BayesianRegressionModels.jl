@@ -2156,13 +2156,15 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   precision is the global term's curvature plus the summed sites. Each
   iteration takes one sparse-Cholesky Newton step for its mean; the same
   factor supplies draws, entropy and marginal sds by selected inversion.
+  Polished results average means and marginal log scales, retaining the
+  correlations of the last joint precision factor.
   Readers stay coupled to their sparse globals, with their slope from the same
   curvature. Where the data pin a
   sparse global only together with its readers' coordinates (a slow field
   beside fast window states, a boundary beside a window's path), the default
   crawls along that ridge. With fixed hyperparameters and Gaussian terms,
-  the sparse globals' means and marginal sds are exact once every dense
-  orthogonal-design reader has supplied its site. The readers' own factors
+  each sparse-global solve gives exact means and marginal sds once every
+  dense orthogonal-design reader has supplied its site. The readers' own factors
   still take their bounded local steps and can need further visits.
   A unit without a whole curvature (a structured unit, or
   `unit_curvature = :pair`) gives a joint site conditional
