@@ -26,7 +26,7 @@ Run it with
   type are concrete on the domain, data and `by` paths. A negative control
   checks that the removed runtime-rank index array is still detected.
 - **Errors.** Its argument errors name the axis and the count.
-- **JavaScript.** With ReactiveKernels 0.1.281+ and Node on the PATH, a kernel
+- **JavaScript.** With ReactiveKernels 0.1.289+ and Node on the PATH, a kernel
   that computes the basis, its spectral weights, its length-scale floors and a
   field through `ReactiveKernels.js_source` agrees with native `prepare` under
   `js_run`. This includes a moved slice and the errors native raises: a value

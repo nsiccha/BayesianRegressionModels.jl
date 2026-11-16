@@ -64,6 +64,7 @@ include("nlme_svi_sampling.jl")
 include("nlme_svi_workspace.jl")
 include("nlme_svi_units.jl")
 include("nlme_svi_sites.jl")
+include("nlme_svi_collapsed.jl")
 include("nlme_svi_centering.jl")
 include("nlme_svi_coupling.jl")
 include("nlme_svi_stationarity.jl")
@@ -1174,12 +1175,15 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
+    # Under `sparse_globals = :collapsed` the sparse globals draw from their joint
+    # factor, from the same ε (src/nlme_svi_collapsed.jl).
+    noise = _brm_svi_sparse_draw!(g, ε, sites, q)
     # Linear coupling: each batch unit's mean at this draw of the globals
     # (src/nlme_svi_coupling.jl).
     coupling = _brm_svi_coupling(q)
     ζs = coupling === nothing ? nothing :
-        [_brm_svi_coupling_noise(coupling, i, ε, η) for i in batch]
-    _brm_svi_field_prepare!(rng, t, q, g, batch, ε, η)
+        [_brm_svi_coupling_noise(coupling, i, noise, η) for i in batch]
+    _brm_svi_field_prepare!(rng, t, q, g, batch, noise, η)
     P, gP = _brm_svi_global_term(t, g)
     draws = [_brm_svi_unit_draws(rng, q, i, curvature) for i in batch]
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
@@ -1200,6 +1204,10 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
                                    frame, positive_part)
     end
     centered = Vector{Any}(nothing, length(batch))
+    # `sparse_globals = :collapsed`: each batch unit's site over its sparse globals
+    # with its own coordinates integrated out (src/nlme_svi_collapsed.jl).
+    collapsed = sites isa _BRMSVICollapsedSites
+    probes = collapsed ? Vector{Any}(nothing, length(batch)) : nothing
     use_baseline = coupling_baseline && coupling !== nothing &&
         any(i -> !isempty(coupling.V[i]), batch)
     baselines = use_baseline ? [zeros(length(t.units[i])) for i in batch] : nothing
@@ -1222,6 +1230,10 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             terms[k] = (; r.value, r.gg, r.gz, gd=Float64[])
             curvatures[k] = r.S
             centered[k] = r.centered
+            if collapsed && !isempty(sites.slots[i]) && r.problem === nothing
+                probes[k] = _brm_svi_collapsed_probe(sites, t, q, i, g, zmean, plan, work, D,
+                    r.S, r.gg[sites.base.entries[i]] ./ 2, r.gz; centering, frame)
+            end
             return
         end
         gg₊, gg₋ = _brm_svi_global_buffers(work, D)
@@ -1247,6 +1259,10 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             gg₊[p] = gg₋[p] = 0.0
         end
         terms[k] = (; value=(v₊ + v₋) / 2, gg, gz=(gz₊ .+ gz₋) ./ 2, gd=(gz₊ .- gz₋) ./ 2)
+        if collapsed && !isempty(sites.slots[i]) && problems[k] === nothing
+            probes[k] = _brm_svi_collapsed_probe(sites, t, q, i, g, zmean, plan, work, D,
+                nothing, gg[sites.base.entries[i]] ./ 2, terms[k].gz; centering, frame)
+        end
     end
     # Before anything changes q or the optimizer.
     _brm_svi_check_finite(t, g, P, gP, problems; center=q.μ)
@@ -1274,6 +1290,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             weights, chain)
     end
     _brm_svi_update_sites!(sites, t, q, g, ε, batch, terms, site_step, site_scale)
+    collapsed && _brm_svi_collapsed_update!(sites, q, batch, probes, β)
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_add_site_gradient!(_brm_svi_global_gradient(q, w, ε, η), sites, q)
     # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
@@ -1284,6 +1301,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_bound_sd!(q, _brm_svi_sd_prior_of(t), sd_bound)
+    collapsed && _brm_svi_collapsed_solve!(sites, t, q)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         # The coupling steps with the factor it was drawn from, before that moves.
         if coupling !== nothing
@@ -1298,6 +1316,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
                 rank=structured_rank) :
             _brm_svi_unit_step_full!(q, batch[k], terms[k].gz, S, β; positive=positive_part)
     end
+    collapsed && _brm_svi_collapsed_couple!(sites, coupling, q, t, batch, probes)
     # The controls move while exploring; settling and polishing step q in one fixed
     # frame, which polishing averages.
     centering === nothing || whiten || _brm_svi_control_steps!(q, batch, centered)
@@ -1357,7 +1376,7 @@ mutable struct _BRMSVIRun{Q}
     averaged_through::Vector{Int}
     unit_entropy::Vector{Float64}
     entropy_sum::Float64
-    sites::Union{Nothing,_BRMSVISites}
+    sites::Union{Nothing,_BRMSVISites,_BRMSVICollapsedSites}
 end
 
 _brm_svi_adam(q, lr) = _BRMSVIAdam(length(_brm_svi_global_vector(q)), lr)
@@ -1370,7 +1389,13 @@ function _brm_svi_run(rng, q, c, t)
     sampler = _brm_svi_unit_sampler(c.unit_sampling, work)
     # Before anything sized by the coupling (the stationarity iterates) is built.
     sites = _brm_svi_sites(t, c.batch_size, sampler.probabilities)
-    _brm_svi_uncouple_sparse!(_brm_svi_coupling(q), sites)
+    if _brm_svi_sparse_mode(c) === :collapsed && sites !== nothing
+        # Readers stay coupled to their sparse globals (src/nlme_svi_collapsed.jl).
+        sites = _brm_svi_collapsed_sites(sites, t; refresh=c.window)
+        _brm_svi_collapsed_check_centering(sites, t, q, _brm_svi_centering(t))
+    else
+        _brm_svi_uncouple_sparse!(_brm_svi_coupling(q), sites)
+    end
     sampling = (; method=c.unit_sampling, work, probabilities=sampler.probabilities,
         visits=zeros(Int, N), draws=zeros(Int, N))
     if _brm_svi_stationarity_enabled(c)
@@ -1486,7 +1511,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
         stationarity=true, coupling_baseline=true, coupling_warmup=true,
-        exploration_drift=stationarity, unit_reoptimize=0)
+        exploration_drift=stationarity, unit_reoptimize=0, sparse_globals=:sites)
     B = min(batch_size, N)
     W = window === nothing ? max(cld(N, B), 100) : window
     # A default iterate-gated run may need more than 100 windows, especially
@@ -1499,7 +1524,8 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
        trend_skip=patience, stationarity, budget_polish=stationarity,
-       coupling_baseline, coupling_warmup, exploration_drift, unit_reoptimize)
+       coupling_baseline, coupling_warmup, exploration_drift, unit_reoptimize,
+       sparse_globals)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1631,7 +1657,8 @@ function _brm_svi_advance!(run, t, c)
         run.sampling.visits[i] += 1
         run.sampling.draws[i] += batch.multiplicities[k]
     end
-    run.unit_gradient_calls += sum(i -> _brm_svi_unit_calls(q, i, c), batch.indices; init=0)
+    run.unit_gradient_calls += sum(i -> _brm_svi_unit_calls(q, i, c), batch.indices; init=0) +
+        _brm_svi_collapsed_calls(run.sites, t, batch.indices)
     value = try
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
             scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
@@ -1655,7 +1682,8 @@ function _brm_svi_advance!(run, t, c)
         run.unit_entropy[i] = entropy
     end
     push!(run.trace, value + run.entropy_sum +
-        _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2)
+        _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 +
+        _brm_svi_sparse_entropy(run.sites, q))
     run.iteration = it
     polishing || _brm_svi_record_iterates!(run, batch.indices, c)
     polished = false
@@ -1853,7 +1881,7 @@ function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
        elbo_windows_trimmed=[w.center for w in run.windows],
        clipped_steps=run.adam.clipped,
        elbo=isempty(run.trace) ? nothing : last(run.trace),
-       draws=_brm_svi_draws(copy(run.rng), t, q, draws))
+       draws=_brm_svi_draws(copy(run.rng), t, q, draws; sites=run.sites))
 end
 
 # The approximation a run currently stands for: its raw iterate, or while and
@@ -1916,17 +1944,18 @@ end
 # unit's mean is the one at that column's draw of the globals; under learned
 # centering each unit's draw of its learned coordinates is mapped back to the
 # packed ones at that column's globals.
-function _brm_svi_draws(rng, t, q, n)
+function _brm_svi_draws(rng, t, q, n; sites=nothing)
     U = repeat(t.m.unit, 1, n)
     centering = _brm_svi_centering(t)
     coupling = _brm_svi_coupling(q)
     for j in 1:n
         ε, η = randn(rng, length(q.μ)), randn(rng, size(q.Β, 2))
         g = _brm_svi_draw_global(q, ε, η)
+        noise = _brm_svi_sparse_draw!(g, ε, sites, q)
         U[t.globals, j] .= g
         frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
         for (i, block) in enumerate(t.units)
-            ζ = coupling === nothing ? nothing : _brm_svi_coupling_noise(coupling, i, ε, η)
+            ζ = coupling === nothing ? nothing : _brm_svi_coupling_noise(coupling, i, noise, η)
             u = _brm_svi_coupled_mean(coupling, q, i, ζ) .+
                 _brm_svi_unit_offset(q, i, _brm_svi_unit_noise(rng, q.U[i]))
             U[block, j] .= centering === nothing ? u :
@@ -2115,6 +2144,32 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   reaches the optimum. Each step costs the unit's 2d evaluations again (counted
   in `unit_gradient_calls`). It needs `unit_curvature = :orthogonal`; units on
   the single pair and structured units are not re-optimized.
+- `sparse_globals` — how the globals few units read (expected readers per
+  batch below one: a window's boundary state, a read-pair `gmrf` field state, a
+  separator; `diagnostics.sparse_globals` lists them) take their step.
+  `:sites`, the default, steps each on one diagonal site per reader, measured
+  with the reader's coordinates held at its factor. `:collapsed` gives each
+  reader one joint site over all the sparse globals it reads with its own
+  coordinates integrated out (the Schur complement of the curvature the
+  orthogonal design estimates, plus 2k unit evaluations for its k sparse
+  globals). The sparse globals take a joint Gaussian factor whose sparse
+  precision is the global term's curvature plus the summed sites. Each
+  iteration takes one sparse-Cholesky Newton step for its mean; the same
+  factor supplies draws, entropy and marginal sds by selected inversion.
+  Polished results average means and marginal log scales, retaining the
+  correlations of the last joint precision factor.
+  Readers stay coupled to their sparse globals, with their slope from the same
+  curvature. Where the data pin a
+  sparse global only together with its readers' coordinates (a slow field
+  beside fast window states, a boundary beside a window's path), the default
+  crawls along that ridge. With fixed hyperparameters and Gaussian terms,
+  each sparse-global solve gives exact means and marginal sds once every
+  dense orthogonal-design reader has supplied its site. The readers' own factors
+  still take their bounded local steps and can need further visits.
+  A unit without a whole curvature (a structured unit, or
+  `unit_curvature = :pair`) gives a joint site conditional
+  on its factor. It refuses learned centering whose cells read a sparse global
+  as a location or scale, and `laplace`.
 - `separator` — defaults to `:auto` in explicitly connected mode and `:none`
   otherwise. Automatic promotion uses bounded structural trials if a unit
   exceeds `max_unit_coordinates=4096` or `max_unit_work=1_000_000`, with at
@@ -2377,6 +2432,10 @@ brm_svi_fit(x; kwargs...) = _brm_svi_initial_fit(nothing, x; kwargs...)
 brm_svi_fit(save::Function, x; kwargs...) = _brm_svi_initial_fit(save, x; kwargs...)
 function _brm_svi_initial_fit(save, x; laplace=nothing, kwargs...)
     laplace === nothing && return _brm_svi_fit(save, x, nothing; kwargs...)
+    get(kwargs, :sparse_globals, :sites) === :sites || throw(ArgumentError(
+        "brm_svi_fit: sparse_globals = :collapsed updates the minibatch engine's sparse " *
+        "globals from their readers' sites; laplace=GaussianBlockLaplace() integrates " *
+        "its certified coordinates instead, so pass only one of them"))
     get(kwargs, :centering, nothing) === nothing || throw(ArgumentError(
         "brm_svi_fit: learned centering moves the minibatch engine's unit factors; " *
         "laplace=GaussianBlockLaplace() integrates them instead, so pass only one of them"))
@@ -2395,8 +2454,10 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         patience=10, min_windows=40, polish_windows=20,
         settle_windows=nothing, centering=missing, coupling=missing,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=nothing, stationarity=true,
-        unit_reoptimize=0, kwargs...)
+        unit_reoptimize=0, sparse_globals=:sites, kwargs...)
     stationarity isa Bool || throw(ArgumentError("brm_svi_fit: stationarity must be a Bool"))
+    sparse_globals in (:sites, :collapsed) || throw(ArgumentError(
+        "brm_svi_fit: sparse_globals must be :sites or :collapsed, got $(repr(sparse_globals))"))
     unit_reoptimize isa Integer && unit_reoptimize >= 0 || throw(ArgumentError(
         "brm_svi_fit: unit_reoptimize must be a nonnegative integer (0: off), got " *
         repr(unit_reoptimize)))
@@ -2436,7 +2497,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             steps..., polish_lr, window, patience, min_windows, polish_windows,
             settle_windows, unit_curvature, sd_bound, trend_windows, stationarity,
-            unit_reoptimize=Int(unit_reoptimize),
+            unit_reoptimize=Int(unit_reoptimize), sparse_globals,
             unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))
@@ -2555,7 +2616,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                             observe_every=something(snapshot_every, c.window))
                     end
                     seconds, _brm_run_phase(phases.draws) do _
-                        _brm_svi_draws(copy(run.rng), t, _brm_svi_result_q(run), ndraws)
+                        _brm_svi_draws(copy(run.rng), t, _brm_svi_result_q(run), ndraws;
+                            sites=run.sites)
                     end
                 end
                 optimizing = false
