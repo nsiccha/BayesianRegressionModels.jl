@@ -862,7 +862,7 @@ function check_level_rows(plan)
     end
 end
 
-@stestset "RKBRMI: remaining grouped HSGP level rows" begin
+@stestset "RKBRMI: grouped HSGP level rows" begin
     for brmi in level_models()
         _, plan, _ = rk_parity(brmi; hsgp_levels=true)
         check_level_rows(plan)
@@ -873,14 +873,14 @@ end
     @test all(b -> b.family !== :hsgp || b.kind === :levels, plan.blocks)
 end
 
-@stestset "SBBRMI: remaining grouped HSGP level rows" begin
+@stestset "SBBRMI: grouped HSGP level rows" begin
     for brmi in level_models()
         plan, _ = sb_parity(SBBRMI(brmi; mod=@__MODULE__, total_groups=()))
         check_level_rows(plan)
     end
 end
 
-@stestset "SBBRMI: remaining exact totals, column designs and mixed families" begin
+@stestset "SBBRMI: exact totals, column designs and mixed families" begin
     rng = Xoshiro(40)
     g = repeat(1:6; inner=6)
     h = repeat(1:3, 12)
@@ -897,8 +897,9 @@ end
                 y ~ Normal(mu, 0.7)
             end), [2, 2]),
             (@brm(data, begin
-                mu ~ 1 + (1 | g) + (1 | h) + hsgp(x; k=2)
-                y ~ Normal(mu, 0.7)
+                mu ~ 1 + (1 | h) + hsgp(x; k=2)
+                log(sigma) ~ 1 + (1 | g)
+                y ~ Normal(mu, sigma)
             end), [1]))
         model = SBBRMI(brmi; mod=@__MODULE__, total_groups=[:g])
         plan, _ = sb_parity(model)
@@ -911,7 +912,7 @@ end
     end
 end
 
-@stestset "SBBRMI: remaining S2Z endpoint and group frames" begin
+@stestset "SBBRMI: S2Z endpoint and group frames" begin
     data = (; g=repeat(1:4; inner=4), x=repeat([-0.9, -0.2, 0.5, 0.8], 4),
               y=randn(Xoshiro(41), 16))
     brmi = @brm data begin
@@ -930,4 +931,18 @@ end
             @test_throws r"interior centering weights" adaptive_centering_cells(interior, names)
         end
     end
+end
+
+@stestset "SBBRMI: exact totals precede S2Z cells" begin
+    data = (; g=repeat(1:6; inner=6), h=repeat(1:3, 12),
+              y=randn(Xoshiro(42), 36))
+    brmi = @brm data begin
+        mu ~ 1 + (1 | g)
+        log(sigma) ~ 1 + (1 | h)
+        y ~ Normal(mu, sigma)
+    end
+    model = SBBRMI(brmi; mod=@__MODULE__, total_groups=[:g], s2z_groups=[:h], s2z_rho=1.0)
+    plan, _ = sb_parity(model)
+    @test [b.kind for b in plan.blocks] == [:total, :s2z]
+    @test [c.block for c in plan.cells] == vcat(fill(1, 6), fill(2, 2))
 end
