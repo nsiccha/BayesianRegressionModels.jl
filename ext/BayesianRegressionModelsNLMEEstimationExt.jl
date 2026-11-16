@@ -388,6 +388,27 @@ function _population_objective(x, context, subjects, full, ntheta)
     sum(values[subjects])
 end
 
+# Enzyme compiles every shadow accumulation of a reverse pass as an atomic
+# update whenever the process has more than one default-pool thread, whether or
+# not another thread can reach the shadow (reactivekernels-use §7an). An atomic
+# update rounds the multiply and the add separately where a plain one may fuse
+# them, so this serial gradient differed in its last bits between a one-thread
+# and a four-thread process, which changed a seeded SAEM fit (snag
+# event-kernel-pop-1ec6dab9), and every update paid a compare-and-swap. The
+# derivative's shadows are its own: DifferentiationInterface allocates the
+# gradient of the fresh `vcat(θ, σ)`, and every other argument is a `Constant`.
+# So a mode that leaves the choice to Enzyme takes plain updates, as RK's
+# prepared operators do. Enzyme still keeps atomic updates in code that starts
+# or waits for a task, and a mode that chose either way is kept. Only an Enzyme
+# with the switch (`set_atomic_add`, the dogfood line) defines the method.
+_owned_shadow_backend(backend) = backend
+@static if isdefined(Enzyme, :set_atomic_add)
+    _owned_shadow_backend(backend::AutoEnzyme{<:Enzyme.ReverseMode,A}) where {A} =
+        Enzyme.atomic_add(backend.mode) === nothing ?
+            AutoEnzyme(; mode=Enzyme.set_atomic_add(backend.mode, false),
+                function_annotation=A) : backend
+end
+
 function NE._saem_population_value_gradient(::NE.BatchedEvaluation,
         m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     length(θ) == length(m.theta) || throw(DimensionMismatch(
@@ -395,7 +416,8 @@ function NE._saem_population_value_gradient(::NE.BatchedEvaluation,
     length(σ) == length(m.sigma) || throw(DimensionMismatch(
         "σ has length $(length(σ)), expected $(length(m.sigma))"))
     full = _batch_eta(m, subjects, H)
-    DI.value_and_gradient(_population_objective, NE.ad_backend(m), vcat(θ, σ),
+    DI.value_and_gradient(_population_objective,
+        _owned_shadow_backend(NE.ad_backend(m)), vcat(θ, σ),
         DI.Constant(_population_context(m)), DI.Constant(subjects),
         DI.Constant(full), DI.Constant(length(θ)))
 end
