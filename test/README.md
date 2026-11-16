@@ -22,8 +22,9 @@ Run it with
   `_brm_apply_hsgp` tensored in `CartesianIndices(k)` order. This covers one to
   three axes, `k` as an integer, vector or tuple, and a fixed `domain` or a
   data-derived `c`.
-- **Type stability.** Every slot and SSA value of its keyword body is concrete
-  on the domain, data and `by` paths.
+- **Type stability.** The keyword body's argument and local slots and return
+  type are concrete on the domain, data and `by` paths. A negative control
+  checks that the removed runtime-rank index array is still detected.
 - **Errors.** Its argument errors name the axis and the count.
 - **JavaScript.** With ReactiveKernels 0.1.274+ and Node on the PATH, a kernel
   that computes the basis, its spectral weights, its length-scale floors and a

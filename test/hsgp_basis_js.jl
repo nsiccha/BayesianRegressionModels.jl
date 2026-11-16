@@ -60,23 +60,35 @@ const SHAPES = [
     end
 end
 
-# Every slot and SSA value of the keyword body is concrete, a constant, a type,
-# `Union{}` (a throw) or a union of concrete types (a loop's `iterate`).
+# Arguments, local storage and the return type must be concrete. Unoptimized
+# SSA includes control-flow nodes and unused call results annotated `Any`;
+# those annotations do not describe values stored by the computation.
 function stable_type(t)
     t = Core.Compiler.widenconst(t)
     t === Union{} || isconcretetype(t) || t <: Type ||
         (t isa Union && all(isconcretetype, Base.uniontypes(t)))
+end
+function unstable_local_types(f, args)
+    ci, result = only(code_typed(f, args; optimize = false))
+    [t for t in vcat(ci.slottypes, [result]) if !stable_type(t)]
 end
 function unstable_types(axes_, kw)
     m = which(Prep.hsgp_basis, Tuple{map(typeof, axes_)...})
     body = Base.bodyfunction(m)
     full = merge((; k = 20, c = 1.5, domain = nothing, by = nothing), kw)
     args = Tuple{map(typeof, values(full))..., typeof(Prep.hsgp_basis), map(typeof, axes_)...}
-    ci, = only(code_typed(body, args; optimize = false))
-    [t for t in vcat(ci.slottypes, ci.ssavaluetypes) if !stable_type(t)]
+    unstable_local_types(body, args)
+end
+
+# This is the removed runtime-rank construction. The local-storage check must
+# still detect its abstract index array even though the returned count is Int.
+function dynamic_cartesian_count(k::Vector{Int})
+    idx = vec(collect(CartesianIndices(Tuple(k))))
+    length(idx)
 end
 
 @stestset "hsgp_basis is type-stable on the domain, data and by paths" begin
+    @test !isempty(unstable_local_types(dynamic_cartesian_count, Tuple{Vector{Int}}))
     g = repeat(["a", "b", "c"], 10)
     for (label, axes_, kw, _, _) in SHAPES
         @test (@inferred Prep.hsgp_basis(axes_...; kw...)) isa Tuple{Matrix{Float64},Matrix{Float64}}
