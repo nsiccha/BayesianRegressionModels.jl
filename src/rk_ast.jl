@@ -2456,7 +2456,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
-            hsgp_stmts, locals = _rk_ast_value_hsgp(defs, term, taken, bindings)
+            hsgp_stmts, locals, fit = _rk_ast_value_hsgp(defs, term, taken, bindings)
             append!(stmts, hsgp_stmts)
             # An HSGP component owns its hyperparameters and basis weights
             # under its id. A grouped or hyper-predicted term (`grouped`) also
@@ -2464,7 +2464,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             # the NLME view and the Stan transport read; `level_correlation`
             # marks a `cor=` that couples its levels. `spectral` is the local
             # holding the weights' spectral scales (modes, or levels × modes),
-            # the value `<declaration>.<spectral>` of the program.
+            # the value `<declaration>.<spectral>` of the program. `fit` is the
+            # fitted value holding the term's automatic interval (`nothing` for
+            # a fixed domain or a periodic basis), which adaptive centring reads
+            # the basis frequencies from (src/rk_adaptive_centering.jl).
             _rk_coordinate_record!(coordinates, (; kind=:hsgp,
                 declaration=term.options.id, predictor=predictor.name,
                 axes=Tuple(term.columns),
@@ -2474,7 +2477,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 levels=get(term.options, :group_levels, nothing),
                 level_correlation=get(term.options, :level_cor, nothing) !== nothing,
                 spectral=isnothing(locals) ? :spectral_scale : locals.spectral,
-                locals))
+                fit, locals))
             hyper_plans = get(term.options, :hyper_plans, ())
             rho = isnothing(locals) ? _rk_hsgp_length_carriers(term) : locals.scales.length_scale
             sigma = isnothing(locals) ? :sigma : locals.scales.sd

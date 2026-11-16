@@ -522,8 +522,10 @@ function _rk_hsgp_length_carriers(term)
     axes == 1 ? :rho_iso : Tuple(Symbol(:rho_, j) for j in 1:axes)
 end
 
-# The term's statements, and the sampled block locals of a grouped or
-# hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one).
+# The term's statements, the sampled block locals of a grouped or
+# hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one),
+# and the name of its fitted interval (`_rk_ast_hsgp_fit!`; `nothing` when it
+# has none).
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     stmts = Expr[]
     term = _rk_ast_hsgp_settings!(stmts, term, taken)
@@ -534,6 +536,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     floor_read = options.rho_truncated || get(options, :rho_floor_named, false) ||
         any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
     floors = nothing
+    fit = nothing
     if periodic
         # The periodic basis is prepared data; its effect reads the matrix and
         # harmonic frequencies, computed by an explicit RK graph.
@@ -571,7 +574,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         call, locals = _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent,
             taken, bindings)
         push!(stmts, Expr(:call, :~, options.id, call))
-        return stmts, locals
+        return stmts, locals, fit
     end
     axes = _rk_hsgp_length_axes(term)
     rho_priors = [_rk_ast_hsgp_rho_prior(options, floors, axes == 1 ? nothing : j,
@@ -584,7 +587,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, inputs, floors,
         rho_priors, sigma_prior, value, extent; scales, truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
-    stmts, nothing
+    stmts, nothing, fit
 end
 
 # The term's size and settings as fitted values of the program, from its
