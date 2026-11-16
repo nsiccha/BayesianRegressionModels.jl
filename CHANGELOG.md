@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.328
+## 0.2.329
 
 - Model views place a callable's documentation in the report's outline (snag
   `brm-model-view-c-623a1e28`). The "Callable documentation" disclosures embed
@@ -27,6 +27,45 @@ instead of failing at run time.
   1.3.1 and DynamicObjects 0.5.21, which it requires, and to Treebars 0.1.7,
   which DynamicObjects 0.5.21 requires. The docstrings themselves are
   unchanged.
+
+## 0.2.328
+
+- **A fresh `brm_svi_fit` now learns its centering once exploration's opening
+  transient has passed** (snag `brm-svi-fit-stop-517ddc65`, decision `1j8dh1w`).
+  `LearnedCentering(; delay=true)`, the new default:
+  - explores with its cells in their packed coordinates, the plain
+    factorization, until exploration's ELBO test first reads flat (the trend
+    test that ends exploration, without waiting for its drift gate);
+  - then starts each control at `start` and carries each unit's factor into its
+    learned coordinates at the global factor's mean, so q's density over the
+    packed coordinates is unchanged;
+  - then explores on, with the stopping test reading only the windows since.
+
+  Grouped HSGP weights are not deferred. `delay=false` keeps the earlier
+  behaviour. `diagnostics.centering.activation_window` names the window: `0`
+  when nothing was deferred, `nothing` when the fit ended first. Optimizer
+  checkpoints and streaming states keep the behaviour they were saved with.
+
+  **Why.** At fixed learned coordinates, a cell's coefficient on its location
+  is `1 - c s^(1 - c)`, which is negative for a scale above e (4.4 at
+  `c = 0.43`). Exploration's opening transient can carry a block's sd that far
+  while the units' other effects are still unfitted, and a centred cell there
+  can be trapped. On a public 32-unit AR(1) panel (`atanh(phi) ~ 1 + (1 | unit)`,
+  every unit's true phi 0.6), data seed 2 took `sd(phi, unit)` to 6.7. The
+  default fit then sent `phi_Intercept` to -7.8 and later -12, and the sd to
+  48-157. Its ELBO stayed about 600 nats below the plain fit's, and it stopped
+  at iteration 22,335 with `BRMSVINonfiniteError`: a draw put `atanh(phi)` past
+  19, where `tanh` rounds to 1. With the delay the same fit runs on: at 40,000
+  iterations, phi 0.600 and sd 0.017.
+
+  **Calibration of the 0.2.282 fixtures** (`test/nlme_svi_default_centering.jl`),
+  population sd as a ratio to NUTS's: strong 0.864 (immediate centring 0.96),
+  weak 0.975 (0.88), unbalanced 0.913 (0.91); the plain fit's strong ratio is
+  0.113.
+
+  **Behaviour change.** A fresh default fit's draws differ from 0.2.324's.
+  Exploration runs at least one more stopping test after it centres, so it
+  explores for longer.
 
 ## 0.2.327
 

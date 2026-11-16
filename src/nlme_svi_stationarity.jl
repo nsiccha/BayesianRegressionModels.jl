@@ -200,6 +200,16 @@ function _brm_svi_stationarity_explored!(run, c)
     h.next_check = run.iteration + c.window * (c.patience + 1)
 end
 
+# A deferred fit's centering moved its centred units' factors into new
+# coordinates (`_brm_svi_activate_centering!`): their histories restart. The
+# globals' do not, since the globals did not move, and the drift gate reads them.
+function _brm_svi_stationarity_restart_units!(run, c)
+    _brm_svi_stationarity_enabled(c) || return
+    h = _brm_svi_stationarity_state(run)
+    h.units = [_BRMSVIIterates(size(u.values, 1)) for u in h.units]
+    nothing
+end
+
 # ── Exploration's drift gate ─────────────────────────────────────────────────
 #
 # Exploration's ELBO test cannot see a slow climb once many units share a batch,

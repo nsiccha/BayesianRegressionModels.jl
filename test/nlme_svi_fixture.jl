@@ -22,6 +22,7 @@ svi_same_centering(a, b) = hasproperty(a, :centering) == hasproperty(b, :centeri
     (!hasproperty(a, :centering) ||
         all(n -> isequal(getfield(a.centering, n), getfield(b.centering, n)),
             (:start, :step, :x, :positions)) &&
+        isequal(get(a.centering, :active, nothing), get(b.centering, :active, nothing)) &&
         length(a.centering.opt) == length(b.centering.opt) &&
         all(svi_same_adam.(a.centering.opt, b.centering.opt)))
 svi_same_run(a, b) = svi_same_adam(a.adam, b.adam) && svi_same_q(a.q, b.q) &&
