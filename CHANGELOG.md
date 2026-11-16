@@ -21,7 +21,7 @@ instead of failing at run time.
   `CartesianIndices` of a runtime tuple.
 - A `ReactiveKernels` kernel that calls `hsgp_basis(x...; k, domain)`,
   `hsgp_sqrt_spd` and `hsgp_rho_floors` now translates through
-  `ReactiveKernels.js_source` (ReactiveKernels 0.1.274 or later), errors
+  `ReactiveKernels.js_source` (ReactiveKernels 0.1.281 or later), errors
   included, so a page can recompute the basis when a slider moves the domain.
 - Its argument errors name the axis and the count instead of printing the
   arguments: `axes have different lengths (axis 1 has 30 values, axis 2 has
@@ -29,7 +29,10 @@ instead of failing at run time.
 - A bare `domain = (lo, hi)` with two or more axes now raises an
   `ArgumentError` ("takes one (lo, hi) pair per axis") instead of a
   `BoundsError`.
-- The test env pins ReactiveKernels 0.1.274 (`43b5aff7d`).
+- The ReactiveKernels compatibility floor is 0.1.281 and the test environment
+  pins its landed commit `8186d52e`. This includes JavaScript tuple length,
+  nested tuple literals, numeric vector `fill!`, and keyword-local snapshots;
+  the nested ReactiveKernelsPPL package is 0.1.204.
 
 ## 0.2.331
 

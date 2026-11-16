@@ -1,5 +1,5 @@
 # `StatisticalPreparation.hsgp_basis` is type-stable on every path and
-# translates through `ReactiveKernels.js_source` (RK 0.1.274+), so a browser
+# translates through `ReactiveKernels.js_source` (RK 0.1.281+), so a browser
 # picture can recompute an HSGP basis when a slider moves its domain (todo
 # 0ggll1f, from ReactiveKernels snag js-source-all-pr-b15faf4f).
 #
@@ -169,7 +169,7 @@ agree(a::AbstractArray, b::AbstractArray) = size(a) == size(b) && all(agree.(a, 
 agree(a, b) = false
 
 @stestset "js_source of a kernel computing an HSGP basis agrees with native" begin
-    @test pkgversion(ReactiveKernels) >= v"0.1.274"
+    @test pkgversion(ReactiveKernels) >= v"0.1.281"
     for (name, k, have, want, types, cases) in JS_CASES, vectors in (:array, :float64array)
         source = ReactiveKernels.js_source(k; have, want, types, name)
         @test occursin("export function $name(", source)
