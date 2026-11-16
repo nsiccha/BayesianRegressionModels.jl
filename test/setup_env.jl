@@ -456,7 +456,8 @@ const PINS = [
     # `jax.grad`: a counted `while` to a padded row length becomes a
     # `fori_loop` (RK snag jax-source-of-an-6bfaf24a;
     # test/ordinal_explicit_range.jl).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "95d9b7a5ae130249cc0620aa80b1b0fe96f79734"),
+    # RK 0.1.289: fixed-domain HSGP JavaScript, including Julia Float64 error text.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "239c484ade4c071ae404db4ce18f8c23adf7e10c"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
