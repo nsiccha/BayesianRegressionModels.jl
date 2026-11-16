@@ -84,19 +84,6 @@ _adaptive_cell_cpc(b::R2D2AdaptiveCenteringBlock) = copy(b.cholesky_cpc)
 _adaptive_cell_mixing(::AdaptiveCenteringBlock) = Int[]
 _adaptive_cell_mixing(b::R2D2AdaptiveCenteringBlock) = copy(b.mixing)
 
-# The cell families an SBBRMI wrapper adapts beside random effects, which these
-# rows do not describe yet (a follow-up of decision 0e4u3mv adds them in the same
-# schema): each has its own scale and location form.
-function _adaptive_cells_other_families(model, names)
-    out = String[]
-    isempty(_adaptive_hsgp_level_centering_blocks(model, names)) ||
-        push!(out, "grouped HSGP level cells")
-    isempty(_total_blocks_by_placement(model).sampled) ||
-        push!(out, "exact total coefficients")
-    isempty(s2z_effect_blocks(model)) || push!(out, "S2Z contrasts")
-    out
-end
-
 # A model's `car` fields and `cdar` walks, as the wrapper builds them: an
 # SBBRMI's always, an RKBRMI's under `fields = true` (its default passes them
 # through).
@@ -112,11 +99,31 @@ _adaptive_cell_cdar_blocks(model, names, _) = _adaptive_cdar_centering_blocks(mo
 _adaptive_cell_hsgp_blocks(rk::RKBRMI, names, hsgp) =
     hsgp ? _rk_adaptive_hsgp_blocks(rk, names) : _HSGPAdaptiveCenteringBlock[]
 _adaptive_cell_hsgp_blocks(model, names, _) = _adaptive_hsgp_centering_blocks(model, names)
+_adaptive_cell_hsgp_level_blocks(rk::RKBRMI, names, enabled) =
+    enabled ? _rk_adaptive_hsgp_level_blocks(rk, names) : _HSGPLevelAdaptiveCenteringBlock[]
+_adaptive_cell_hsgp_level_blocks(model, names, _) =
+    _adaptive_hsgp_level_centering_blocks(model, names)
+
+# RKBRMI has no exact-total or S2Z wrapper cells. Keep these reads on the
+# SBBRMI/GenerativePlan path, without needing the WarmupHMC extension.
+_adaptive_cell_totals(::RKBRMI, names) = nothing
+_adaptive_cell_totals(model, names) = _total_centering_columns(model, names)
+_adaptive_cell_s2z(::RKBRMI, names) = nothing
+_adaptive_cell_s2z(model, names) = _s2z_centering_cells(model, names)
 
 # A hyperparameter coordinate and its declared bounds (`_adaptive_constrain`).
 _adaptive_cell_hyper(coordinate, lower, upper) = (; coordinate, lower, upper)
 
-function _adaptive_centering_cells(model, names::Vector{String}; fields=false, hsgp=true)
+function _adaptive_cell_level_hypers(s::_HSGPLevelScale, g)
+    s.predicted && return [(; kind=:log_predictor, intercept=s.intercept,
+        sd=_adaptive_cell_hyper(s.sd, s.sd_lower, s.sd_upper),
+        z=s.sd == 0 ? 0 : s.z[g])]
+    [(; kind=:bounded, coordinate=i, lower=lo, upper=hi)
+     for (i, lo, hi) in zip(s.coordinates, s.lower, s.upper)]
+end
+
+function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
+                                   hsgp=true, hsgp_levels=false)
     ordered, locations = _adaptive_cell_blocks(model, names)
     margins = _adaptive_cell_margins(model)
     lookup = IdDict{Any,Matrix{Int}}()
@@ -189,7 +196,7 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false, h
         sigma = _adaptive_cell_hyper(b.sd, b.sd_lower, b.sd_upper)
         length_scales = [_adaptive_cell_hyper(i, lo, hi) for (i, lo, hi) in
                          zip(b.length_scales, b.length_scale_lower, b.length_scale_upper)]
-        push!(blocks, (; block=bi, family=:hsgp, binding=b.logical, term=b.term,
+        push!(blocks, (; block=bi, family=:hsgp, kind=:basis, binding=b.logical, term=b.term,
             level_index, n_basis=length(b.effects), spectrum, target=copy(b.target_c)))
         for k in eachindex(b.effects)
             push!(cells, (; cell=length(cells) + 1, family=:hsgp, block=bi,
@@ -200,6 +207,72 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false, h
                          omega2=spectrum === :exp_quad ? b.omega2[k, :] : Float64[],
                          harmonic=spectrum === :periodic ? b.harmonics[k] : 0.0),
                 location=(;)))
+        end
+    end
+    # Grouped HSGP level cells: term, basis, then level. Unlike the independent
+    # basis blocks above, the earlier levels of this basis condition each cell.
+    level_blocks = _adaptive_cell_hsgp_level_blocks(model, names, hsgp_levels)
+    for b in level_blocks
+        bi = length(blocks) + 1
+        G, B = size(b.effects)
+        levels = [_adaptive_cell_level(l) for l in b.levels]
+        push!(blocks, (; block=bi, family=:hsgp, kind=:levels, binding=b.logical,
+            term=b.term, group=b.group, levels, n_levels=G, n_basis=B,
+            target=0.0, correlation=(; kind=b.correlation,
+                free=copy(b.cholesky_free), cpc=copy(b.cholesky_cpc))))
+        for k in 1:B
+            offset = length(cells)
+            for g in 1:G
+                push!(cells, (; cell=length(cells) + 1, family=:hsgp, block=bi,
+                    binding=b.logical, group=b.group,
+                    margin=(; predictor=b.logical, coefficient=b.term),
+                    level=levels[g], level_index=g, term=k, effect=b.effects[g, k],
+                    name=names[b.effects[g, k]], target=0.0,
+                    conditioning=collect(offset .+ (1:g-1)),
+                    scale=(; spectrum=:exp_quad,
+                        sigma=only(_adaptive_cell_level_hypers(b.sigma, g)),
+                        length_scales=_adaptive_cell_level_hypers(b.rho, g),
+                        rho_floor=b.rho_floor, omega2=b.omega2[k, :]),
+                    location=(;)))
+            end
+        end
+    end
+    # Exact totals use a column-wide least-squares location; the scalar
+    # control rows alone cannot describe their coupled map. Store each design
+    # column as a vector, with the global cell ids in its row order.
+    totals = _adaptive_cell_totals(model, names)
+    if !isnothing(totals)
+        for j in eachindex(totals.scales)
+            bi = length(blocks) + 1
+            inds = totals.starts[j]:totals.starts[j + 1]-1
+            J, P = length(inds), totals.widths[j]
+            ids = collect(length(cells) .+ (1:J))
+            design = [totals.design[totals.offsets[j] .+ ((p - 1) * J + 1:p * J)]
+                      for p in 1:P]
+            push!(blocks, (; block=bi, family=:scalar, kind=:total, target=1.0,
+                cells=ids, design, log_scale=totals.scales[j]))
+            for (g, i) in enumerate(inds)
+                effect = totals.indices[i]
+                push!(cells, (; cell=ids[g], family=:scalar, block=bi, binding=nothing,
+                    group=nothing, margin=nothing, level=nothing, level_index=g,
+                    term=nothing, effect, name=names[effect], target=1.0,
+                    scale=(; log_coordinate=totals.scales[j]),
+                    location=(; kind=:least_squares)))
+            end
+        end
+    end
+    s2z = _adaptive_cell_s2z(model, names)
+    if !isnothing(s2z) && !isempty(s2z.indices)
+        bi = length(blocks) + 1
+        ids = collect(length(cells) .+ eachindex(s2z.indices))
+        push!(blocks, (; block=bi, family=:scalar, kind=:s2z, cells=ids,
+            target=copy(s2z.targets)))
+        for i in eachindex(s2z.indices)
+            effect = s2z.indices[i]
+            push!(cells, (; cell=ids[i], family=:scalar, block=bi, binding=nothing,
+                group=nothing, margin=nothing, level=nothing, level_index=i,
+                term=nothing, effect, name=names[effect], target=s2z.targets[i],
+                scale=(; log_coordinate=s2z.scales[i]), location=(; constant=0.0)))
         end
     end
     # The joint wrapper's later families, in its pair order: `car` cells, then
@@ -241,6 +314,19 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false, h
                 location=(;)))
         end
     end
+    mapped = BitSet(c.effect for c in cells)
+    for b in level_blocks
+        isdisjoint(_adaptive_read_coordinates(b), mapped) || error(
+            "BRM adaptive centering cells: grouped HSGP `$(b.term)` reads its " *
+            "correlation or scales from a coordinate another cell rewrites.")
+    end
+    scalar = [c for c in cells if c.family === :scalar]
+    if !isempty(scalar)
+        any(c -> c.family === :cdar, cells) && throw(ArgumentError(
+            "adaptive total coefficients and S2Z contrasts cannot yet be mixed with cdar blocks"))
+        isdisjoint((c.scale.log_coordinate for c in scalar), mapped) || error(
+            "BRM adaptive centering cells: a total/S2Z scale coordinate is rewritten by another cell.")
+    end
     (; blocks=identity.(blocks), cells=identity.(cells))
 end
 
@@ -250,8 +336,10 @@ end
 
 The cells [`adaptive_centering_problem`](@ref) adapts for `model` (an
 [`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): its random-effect cells, its
-HSGP basis-weight cells (an RKBRMI's unless `hsgp = false`), and its areal
-`car` field cells and `cdar` walk cells (an RKBRMI's under `fields = true`),
+HSGP basis-weight cells (an RKBRMI's unless `hsgp = false`), grouped HSGP
+level cells (an RKBRMI's under `hsgp_levels = true`), exact totals and S2Z
+cells (SBBRMI only), and its areal `car` field cells and `cdar` walk cells
+(an RKBRMI's under `fields = true`),
 each set as its wrapper adapts it, described as plain data:
 numbers, symbols, strings, `nothing`, vectors and named tuples. Indices are
 positions of the unconstrained vector `unc_names` names: for an `RKBRMI`, by
@@ -263,7 +351,8 @@ needs no WarmupHMC and builds no wrapper.
 `cells[p]`, in the wrapper's cell order (the order of `centeredness`,
 [`adaptive_centering_controls`](@ref) and checkpoints: random-effect cells of
 ordinary blocks, then of derived-scale blocks, each containing blocks first,
-then level, then term; then HSGP cells; then `car` cells; then `cdar` cells). A
+then level, then term; then HSGP basis cells; then HSGP level cells; then
+exact totals; then S2Z cells; then `car` cells; then `cdar` cells). A
 random-effect cell (`family = :ranef`) has:
 
 - `cell` (`== p`), `family` (`:ranef`), `block` (its row in `blocks`),
@@ -315,11 +404,41 @@ coordinates of Stan's `cholesky_factor_corr` free values, or the constant
 canonical partial correlations of a known correlation; both empty for one term)
 and `mixing` (per level, the coordinate of a Student-t level's `log w`, or empty).
 An HSGP block (one per term, per level of a grouped term): `block`, `family`
-(`:hsgp`), `binding` (the predictor), `term`, `level_index`, `n_basis`,
+(`:hsgp`), `kind = :basis`, `binding` (the predictor), `term`, `level_index`, `n_basis`,
 `spectrum` and `target` (per basis function).
 A `car` block: `block`, `family` (`:car`), `binding` (the predictor), `term`,
 `type` (`:icar` or `:bym2`), `areas`, `target` (0). A `cdar` block: `block`,
 `family` (`:cdar`), `binding`, `term`, `n_groups`, `n_steps`, `target` (0).
+
+A grouped HSGP level block has `family = :hsgp`, `kind = :levels`, `binding`,
+`term`, `group`, `levels`, `n_levels`, `n_basis`, `target = 0` and
+`correlation = (; kind, free, cpc)`: `kind` is `:none`, `:parameter`, or
+`:data`. Its cells follow basis, then level order. Each has `cell`, `family`,
+`block`, `binding`, `group`, `margin`, `level`, `level_index`, `term` (the basis),
+`effect`, `name`, `target = 0`, `conditioning` (the earlier levels' cell ids
+within this basis), `location = (;)`, and
+`scale = (; spectrum=:exp_quad, sigma, length_scales, rho_floor, omega2)`.
+Each hyperparameter is either `(; kind=:bounded, coordinate, lower, upper)`
+as above, or `(; kind=:log_predictor, intercept, sd, z)`, whose log value is
+`x[intercept] + constrain(sd) * x[z]`. An intercept coordinate of 0 omits the
+intercept; `sd.coordinate == 0` omits the level effect. `sd` has the ordinary
+`(; coordinate, lower, upper)` form. A predicted length scale is floored at
+`rho_floor` after exponentiation.
+
+Exact totals and S2Z cells have `family = :scalar`, `cell`, `block`, `effect`,
+`name`, their own `target`, `scale = (; log_coordinate)` (the raw log-scale
+coordinate), and `binding`, `group`, `margin`, `level`, `term` all `nothing`.
+Each exact-total column has one block `(; block, family=:scalar, kind=:total,
+target=1, cells, design, log_scale)`: `cells` are its cell ids in group order,
+`design` is a vector of its linearly independent design columns (each a vector
+in that same order), and `log_scale` is its log-scale coordinate. Its cells'
+`level_index` is the row of that design and `location = (; kind=:least_squares)`.
+S2Z cells form one block `(; block, family=:scalar, kind=:s2z, cells, target)`
+with `target` a vector, and `location = (; constant=0)` per cell. They follow
+block, coefficient, then contrast or group order; `level_index` is their
+position in this S2Z block. Contrast coordinates require compiled endpoint
+frames (0 or 1 per coefficient); the existing deprecated group coordinates
+accept any compiled frame.
 
 # The map
 
@@ -361,6 +480,25 @@ compiled value `y = x[effect] * s^(t - c)`, and the log-Jacobian adds
 Then `log s = ℓ` while `ℓ > -110`, and `-150 + log(1 + exp(ℓ + 150))` below,
 a smooth floor that keeps `s^(t - c)` a normal Float64 at every control.
 
+For grouped HSGP level cells, use that spectral formula with the level's
+hyperparameters. Rebuild the level correlation's Cholesky factor `L` as for
+random effects (`L = I` for `kind = :none`). At level `g` let
+`C[g, :] = exp(ℓ_floored) * L[g, :]`, `s = C[g, g]` and
+`loc = Σ_l C[g, l] * y[conditioning[l].effect]` over earlier levels of this
+basis. Then `y[effect] = (x[effect] - c * loc) * s^(-c)` and the log-Jacobian
+adds `-c * log s`. All level targets are 0.
+
+Map an exact-total column together. Form `W` from the block's design columns,
+`a_j = exp((1 - c_j) * x[log_scale])` and `A = Diagonal(a)`. With `x_col`
+the column's effect coordinates, solve
+`loc = W * ((W' * A * W) \\ (W' * A * x_col))`, then
+`y_col = loc + A * (x_col - loc)`. Its log-Jacobian is
+`sum(log, a) + logdet(W'W) - logdet(W'AW)`. An empty design gives `loc = 0`
+and both log determinants 0. These cells are coupled within the column;
+their location is not a constant prior mean. For S2Z cells, independently,
+`y[effect] = x[effect] * exp((target - c) * x[scale.log_coordinate])`, with
+log-Jacobian `(target - c) * x[scale.log_coordinate]`.
+
 A `car` or `cdar` cell is a scalar cell with target 0: with its location `loc`
 and scale `s`, `y = (x[effect] - c * loc) * s^(-c)` and the log-Jacobian adds
 `-c * log s`. Write `σ = constrain(x[sigma.coordinate])` and
@@ -374,7 +512,7 @@ infinite `upper` and `lower + (upper - lower) * σ(v)` otherwise:
   walk's spread `v = (1 - ρ^(2 step)) / (1 - ρ^2)`, or `v = step` where
   `1 - ρ^2 <= 1e-12`.
 
-These cells read only coordinates no cell rewrites.
+The HSGP, scalar and field scale coordinates are not rewritten by any cell.
 
 Where `s` leaves Float64's normal range BRM sums `log s` as `log τ_k`, the logs
 of the stick factors of row `k` and `log r_g`, which is finite wherever the
@@ -382,12 +520,9 @@ coordinates are. `ranef_order = :learned` permutes, at restarting windows, the
 order of a correlated block's terms within a level; these rows describe the
 declared order, the default.
 
-A model whose wrapper also adapts grouped HSGP level cells (`cor =`, or
-per-level scales; an SBBRMI's always, an RKBRMI's under `hsgp_levels = true`), or
-an `SBBRMI`'s exact-total or S2Z cells, raises, naming them: their cells have their
-own scale and location forms and are not described here yet. Under an RKBRMI's
-default `hsgp_levels = false` such a term keeps its emitted frame, so it has no
-cells. Blocks the wrapper does not build raise as in
+Under an RKBRMI's default `hsgp_levels = false`, grouped level terms keep their
+emitted frame and have no cells. Exact totals or S2Z cells beside `cdar` walks
+raise, as their wrapper does. Blocks the wrapper does not build raise as in
 [`adaptive_centering_blocks`](@ref).
 """
 function adaptive_centering_cells end
@@ -395,18 +530,10 @@ function adaptive_centering_cells end
 function adaptive_centering_cells(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk);
                                   hsgp=true, hsgp_levels=false, fields=false)
     names = String.(unc_names)
-    _adaptive_cells_refuse(hsgp_levels && !isempty(_rk_adaptive_hsgp_level_blocks(rk, names)) ?
-        ["grouped HSGP level cells"] : String[])
-    _adaptive_centering_cells(rk, names; fields, hsgp)
+    _adaptive_centering_cells(rk, names; fields, hsgp, hsgp_levels)
 end
 
 function adaptive_centering_cells(model, unc_names)
     names = String.(unc_names)
-    _adaptive_cells_refuse(_adaptive_cells_other_families(model, names))
     _adaptive_centering_cells(model, names)
 end
-
-_adaptive_cells_refuse(other) = isempty(other) || error(
-    "adaptive_centering_cells: this model's adaptive centring also adapts ",
-    join(other, ", "), ", whose cells are not described by these rows yet; ",
-    "random-effect, HSGP basis-weight, car and cdar cells are.")

@@ -2852,6 +2852,19 @@ and every cell's 11 candidate losses against an independent weighted-correlation
 oracle at zero, mixed and one source controls. It tests the fixed-frame scoring
 proxy; it does not measure online window winners or sampler convergence.
 
+`adaptive_centering_cells.jl` reconstructs the wrapper's map from the public
+plain-data `adaptive_centering_cells` rows, without reading BRM's internal
+block types or mapping helpers. On both backends it checks random-effect,
+HSGP basis and grouped-level, `car` and `cdar` rows. On SBBRMI it also checks
+exact totals with constant or group-level design columns, totals beside other
+families, and S2Z contrast endpoints or interior group-coordinate frames.
+The reconstructed map and log-Jacobian must match the wrapper, its density
+must match, and its finite-difference gradient must match the wrapper's AD
+gradient. Row order and labels must agree with `adaptive_centering_controls`.
+Run `julia --project=test test/adaptive_centering_cells.jl`, optionally with
+testset substring filters such as `"grouped HSGP level rows"`, `"exact totals"`
+or `"S2Z"`.
+
 `adaptive_centering_learned_order.jl` covers `ranef_order=:learned`, where
 each group's triangular order follows its controls (snag
 `correlated-kreis-15564811`). Its synthetic half needs no Stan model: it checks

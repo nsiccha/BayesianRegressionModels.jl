@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.332
+## 0.2.333
 
 - `StatisticalPreparation.hsgp_basis` is type-stable for every argument shape:
   one or more axes, `k` an integer, vector or tuple, a fixed `domain` or a
@@ -33,6 +33,22 @@ instead of failing at run time.
   pins its landed commit `8186d52e`. This includes JavaScript tuple length,
   nested tuple literals, numeric vector `fill!`, and keyword-local snapshots;
   the nested ReactiveKernelsPPL package is 0.1.204.
+
+## 0.2.332
+
+- `adaptive_centering_cells` now describes grouped HSGP level cells on both
+  backends: an SBBRMI's always, an RKBRMI's under `hsgp_levels = true`. HSGP
+  blocks distinguish `kind = :basis` and `:levels`; level rows carry their
+  spectral hyperparameters, level correlation and earlier conditioning cells.
+- SBBRMI exact-total and S2Z cells are described as `family = :scalar` in the
+  wrapper's order. A `kind = :total` block supplies the design columns and
+  cell ids for its coupled least-squares location and Jacobian. A `kind = :s2z`
+  block supplies independent zero-location cells with their own compiled
+  targets, including the existing deprecated group-coordinate form.
+- The accessor docstring documents each map. The independent row-only map in
+  `test/adaptive_centering_cells.jl` checks maps, Jacobians, densities and
+  gradients against the wrapper on both backends, including mixed families.
+  The wrapper's inference behavior and defaults are unchanged.
 
 ## 0.2.331
 
