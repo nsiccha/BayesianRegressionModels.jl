@@ -437,7 +437,8 @@ S2Z cells form one block `(; block, family=:scalar, kind=:s2z, cells, target)`
 with `target` a vector, and `location = (; constant=0)` per cell. They follow
 block, coefficient, then contrast or group order; `level_index` is their
 position in this S2Z block. Contrast coordinates require compiled endpoint
-frames (0 or 1 per coefficient); group coordinates accept any compiled frame.
+frames (0 or 1 per coefficient); the existing deprecated group coordinates
+accept any compiled frame.
 
 # The map
 
