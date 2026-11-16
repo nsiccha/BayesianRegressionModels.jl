@@ -2152,15 +2152,20 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   reader one joint site over all the sparse globals it reads with its own
   coordinates integrated out (the Schur complement of the curvature the
   orthogonal design estimates, plus 2k unit evaluations for its k sparse
-  globals), and sets the sparse globals' means by a Newton step on the global
-  term plus the summed sites, solved by conjugate gradients (at most 25 per
-  iteration) on the global term's gradient. Readers stay coupled to their
-  sparse globals, with their slope from the same curvature. Where the data pin a
+  globals). The sparse globals take a joint Gaussian factor whose sparse
+  precision is the global term's curvature plus the summed sites. Each
+  iteration takes one sparse-Cholesky Newton step for its mean; the same
+  factor supplies draws, entropy and marginal sds by selected inversion.
+  Readers stay coupled to their sparse globals, with their slope from the same
+  curvature. Where the data pin a
   sparse global only together with its readers' coordinates (a slow field
   beside fast window states, a boundary beside a window's path), the default
-  crawls along that ridge; on a Gaussian model `:collapsed` reaches the exact
-  means once every reader has been visited. A unit without a whole curvature (a
-  structured unit, or `unit_curvature = :pair`) gives a joint site conditional
+  crawls along that ridge. With fixed hyperparameters and Gaussian terms,
+  the sparse globals' means and marginal sds are exact once every dense
+  orthogonal-design reader has supplied its site. The readers' own factors
+  still take their bounded local steps and can need further visits.
+  A unit without a whole curvature (a structured unit, or
+  `unit_curvature = :pair`) gives a joint site conditional
   on its factor. It refuses learned centering whose cells read a sparse global
   as a location or scale, and `laplace`.
 - `separator` — defaults to `:auto` in explicitly connected mode and `:none`

@@ -12,6 +12,51 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.332
+
+- `brm_svi_fit(...; sparse_globals = :collapsed)` updates the sparse globals (the
+  globals few units read: a window's boundary state, a read-pair `gmrf` field
+  state, a separator; `diagnostics.sparse_globals` lists them) with their
+  readers' own coordinates integrated out. Each reader keeps one joint Gaussian
+  site over the sparse globals it reads: the Schur complement of its curvature,
+  which the orthogonal design already estimates, plus 2k unit evaluations for
+  its k sparse globals. The sparse globals then take a joint factor
+  `N(m, P⁻¹)`, with `P` the global term's curvature over them plus the summed
+  sites. That curvature comes from Hessian-vector products on the structural
+  pattern of the model's density factors, where a read-pair field contributes
+  its conditioning sets. Each iteration takes one sparse-Cholesky Newton step
+  for `m`, draws from `P`'s factor, and gets the marginal sds by selected
+  inversion. Readers stay coupled to their sparse globals, with the slope from
+  the same curvature.
+
+  The default `:sites` is unchanged, and its fits are bit-identical. Where the
+  data pin a sparse global only together with its readers' coordinates (a slow
+  field beside fast window states, a boundary beside a window's path), the
+  default crawls along that ridge.
+
+  Measured on `test/nlme_svi_collapsed.jl`'s exactly Gaussian toy (32 window
+  units, 8 field states and 28 boundaries, all sparse at batch 2), after 20
+  passes over the data:
+
+  - sparse globals' means: 1.8e-8 exact posterior sds from the exact means,
+    against 0.47 under `:sites`;
+  - unit means: 1.0e-5 sds, against 0.16;
+  - sparse globals' sds: 1.000 of their exact marginal sds, against 0.21-0.43
+    under `:sites`.
+
+  On the larger 2,048-window Gaussian probe, field / fast-state mean errors
+  were 0.04 / 0.35 posterior sds after 10 passes and 0.02 / 0.04 after 20
+  (the final means estimated from 1,000 draws). The readers' own factors
+  retain their bounded local updates; solving their collapsed sites does not
+  solve those factors in one visit. The run stopped at its iteration budget
+  with `converged = false`.
+
+  `diagnostics.sparse_globals` adds `mode`, `units_seen`, `solves`,
+  `prior_colors`, `prior_assemblies`, `precision_nonzeros`, `fallbacks`,
+  `skipped_steps` and `global_term_calls`. `:collapsed` refuses
+  `laplace = GaussianBlockLaplace()`, and learned centering whose cells read a
+  sparse global as a location or scale.
+
 ## 0.2.331
 
 - `adaptive_centering_problem(rk::RKBRMI, ...; hsgp_levels = true)` maps a

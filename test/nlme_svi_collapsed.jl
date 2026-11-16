@@ -15,7 +15,7 @@
 # RUN: julia --project=test test/nlme_svi_collapsed.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
-using LinearAlgebra, Random, SparseArrays, Statistics
+using LinearAlgebra, Random, SparseArrays, Statistics, Serialization
 import LogDensityProblems
 
 function svi_collapsed_path(x0, e, a, s)
@@ -206,6 +206,10 @@ end
     rest = brm_svi_resume(m, state; ndraws=8)
     @test svi_same_result(rest, full)
     @test rest.diagnostics.sparse_globals == full.diagnostics.sparse_globals
+    # Through Serialization too: the sparse factor is workspace and is factored again.
+    io = IOBuffer(); serialize(io, state); seekstart(io)
+    again = brm_svi_resume(m, deserialize(io); ndraws=8)
+    @test svi_same_result(again, full)
 end
 
 @stestset "a collapsed run is the same at any number of tasks" begin
