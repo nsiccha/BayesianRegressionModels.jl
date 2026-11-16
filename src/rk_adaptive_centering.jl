@@ -105,8 +105,9 @@ columns, scalar or correlated, `||` blocks included.
 A block whose levels are correlated (`gr(g; cor=...)`) raises, as on SBBRMI.
 HSGP basis weights, `car`, `cdar` and `gmrf` fields, cell latents and
 completions are not random-effect blocks and are not returned here; the
-wrapper adapts HSGP weights, and `car` and `cdar` cells under `fields = true`,
-as cells of their own ([`adaptive_centering_cells`](@ref)).
+wrapper adapts HSGP basis weights, grouped HSGP level cells under
+`hsgp_levels = true`, and `car` and `cdar` cells under `fields = true`, as cells
+of their own ([`adaptive_centering_cells`](@ref)).
 """
 function adaptive_centering_blocks(rk::RKBRMI,
         unc_names=_rk_layout_coordinate_names(rk))
@@ -652,12 +653,12 @@ end
 # A known hyperparameter (`length_scale(lp, hsgp(x)) = 0.8`) has no coordinate
 # and is carried as coordinate 0 at both bounds, as on SBBRMI.
 #
-# Three kinds of term keep the emitted frame here, so their weights pass through
-# unchanged: a grouped term whose levels are correlated (`cor=`) or whose scales
-# a hyper-predictor sets per level (SBBRMI maps those across their levels,
-# `_adaptive_hsgp_level_centering_blocks`), and a term whose hyperparameter is
-# a model value (`sd(lp, hsgp(x)) = exp(a)`), whose scale no fixed bound
-# describes.
+# A grouped term whose levels are correlated (`cor=`) or whose scales a
+# hyper-predictor sets per level has no basis cells: under `hsgp_levels = true`
+# it is mapped across its levels instead (`_rk_adaptive_hsgp_level_blocks`,
+# below), and otherwise keeps its emitted frame. A term whose hyperparameter is a
+# model value (`sd(lp, hsgp(x)) = exp(a)`), whose scale no fixed bound
+# describes, keeps its emitted frame: its weights pass through unchanged.
 
 function _rk_adaptive_hsgp_term(rk::RKBRMI, declaration)
     for predictor in rk.plan.predictors, term in predictor.terms
@@ -691,15 +692,36 @@ function _rk_adaptive_hsgp_hyper(pos, bounds, names, r, carrier, prior, j, what)
           "coordinate `$name` in the RK layout and no known value.")
 end
 
+# A squared-exponential term's half-width per axis: from its fitted interval (the
+# record's `fit`, a fitted value of the program) or its fixed domain's settings.
+function _rk_adaptive_hsgp_widths(rk::RKBRMI, r, o)
+    D = length(r.axes)
+    if r.fit !== nothing
+        fit = Float64.(_rk_frozen_values(rk, [r.fit]).values[r.fit])
+        index = _rk_hsgp_fit_index(o, D)
+        return [fit[index.width(j)] for j in 1:D]
+    end
+    o.fixed_fits === nothing && error(
+        "BRM adaptive centering on RKBRMI: HSGP `$(r.declaration)` has ",
+        "neither a fitted interval nor a fixed domain.")
+    settings = Float64.(rk.plan.columns[o.settings])
+    [settings[D + 2j] for j in 1:D]
+end
+
+# The basis frequencies `omega2[b, j]` RK's basis graph computes from the modes
+# and half-widths, in its tensor order.
+_rk_adaptive_hsgp_omega2(modes, widths) =
+    [(_rk_adaptive_hsgp_mode(modes, j, b) * pi / (2 * widths[j]))^2
+     for b in 1:prod(modes), j in eachindex(widths)]
+
 function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
     names = String.(unc_names)
     pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
     bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
     out = _HSGPAdaptiveCenteringBlock[]
     for r in _rk_coordinate_records(rk.plan)
-        r.kind === :hsgp || continue
+        r.kind === :hsgp && !_rk_hsgp_level_mapped(rk, r) || continue
         o = _rk_adaptive_hsgp_term(rk, r.declaration).options
-        r.grouped && (r.level_correlation || !isempty(o.hyper_plans)) && continue
         periodic = get(o, :cov, :exp_quad) === :periodic
         modes = Int.(rk.plan.columns[o.modes])
         B = periodic ? 2 * only(modes) : prod(modes)
@@ -738,20 +760,7 @@ function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
         omega2, harmonics = if periodic
             Matrix{Float64}(undef, 0, 0), Vector{Float64}(_brm_hsgp_periodic_harmonics(only(modes)))
         else
-            D = length(r.axes)
-            widths = if r.fit !== nothing
-                fit = Float64.(_rk_frozen_values(rk, [r.fit]).values[r.fit])
-                index = _rk_hsgp_fit_index(o, D)
-                [fit[index.width(j)] for j in 1:D]
-            else
-                o.fixed_fits === nothing && error(
-                    "BRM adaptive centering on RKBRMI: HSGP `$(r.declaration)` has ",
-                    "neither a fitted interval nor a fixed domain.")
-                settings = Float64.(rk.plan.columns[o.settings])
-                [settings[D + 2j] for j in 1:D]
-            end
-            [(_rk_adaptive_hsgp_mode(modes, j, b) * pi / (2 * widths[j]))^2
-             for b in 1:B, j in 1:D], Float64[]
+            _rk_adaptive_hsgp_omega2(modes, _rk_adaptive_hsgp_widths(rk, r, o)), Float64[]
         end
         for g in 1:G
             push!(out, _HSGPAdaptiveCenteringBlock(r.predictor, r.declaration, zeros(B),
@@ -759,5 +768,162 @@ function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
                 [h[3] for h in rhos], sigma..., omega2, harmonics))
         end
     end
+    out
+end
+
+# ── HSGP level cells ─────────────────────────────────────────────────────────
+#
+# A grouped squared-exponential term whose levels are correlated (`cor = Omega`,
+# a sampled `LKJCholesky`, or a known matrix) or whose SD or length scale a
+# hyper-predictor sets per level (`log(sd(hsgp(x))) ~ 1 + (1 | g)`) is emitted
+# by RK as SBBRMI emits it: standardized weights `<decl>.<weights>.<g>.<b>`,
+# level weights `L_level * z` (`_rk_ast_hsgp_level_weights!`), each scaled by
+# its level's spectral scale, the level's log hyperparameter being
+# `intercept + sd * z_hyper[g]` with a predicted length scale floored at the
+# basis's validity floor (`_rk_ast_hsgp_hyper!`). So basis column `b` is one
+# correlated block over the levels with factor `diag(s_b) * L`, mapped by the
+# SBBRMI wrapper's `_HSGPLevelAdaptiveCenteringBlock`, whose readers take RK
+# positions: a factor coordinate is Stan's `cholesky_factor_corr` free value on
+# both backends. The floor is the shared `_brm_hsgp_rho_lower` of the fitted
+# half-widths, the value RK's floor graph computes. A `cor = multigroup(...)`
+# coherence raises, as on SBBRMI: its level correlation changes with each basis
+# frequency, so one factor per basis does not describe it.
+
+# One hyperparameter of a level-mapped term: shared (one coordinate, or one per
+# axis, `0` for a known value) or predicted per level. `nothing` when it is a
+# model value, which keeps the term in its emitted frame.
+function _rk_adaptive_hsgp_level_scale(pos, bounds, transforms, names, r, o, hyper, G)
+    decl = r.declaration
+    predicted = any(p -> p.hyper === hyper, o.hyper_plans)
+    what = hyper === :sd ? "marginal SD" : "length scale"
+    carrier = getfield(r.locals.scales, hyper)
+    if !predicted
+        prior = hyper === :sd ? o.sigma_prior : o.rho_prior
+        carriers = carrier === nothing ?
+            (hyper === :sd ? (:sigma,) : r.iso ? (:rho,) :
+             Tuple(Symbol(:rho_, j) for j in eachindex(r.axes))) :
+            carrier isa Symbol ? (carrier,) : Tuple(carrier)
+        hs = [_rk_adaptive_hsgp_hyper(pos, bounds, names, r, c, prior, j, what)
+              for (j, c) in enumerate(carriers)]
+        any(isnothing, hs) && return nothing
+        return _HSGPLevelScale((; coordinates=[first(h) for h in hs],
+            lower=[h[2] for h in hs], upper=[h[3] for h in hs]))
+    end
+    # A predicted hyperparameter: the intercept is sampled as the log value's
+    # own (unconstrained) coordinate, the level effects as `sd .* z`.
+    intercept = 0
+    if carrier !== nothing
+        name = string(decl, ".", carrier)
+        intercept = only(_rk_adaptive_positions(pos, [name], (; z=decl),
+            "$what intercept"))
+        transforms[intercept] === :identity || error(
+            "BRM adaptive centering on RKBRMI: HSGP `$decl`'s $what intercept `$name` ",
+            "is sampled under the RK transform `$(repr(transforms[intercept]))`; it is ",
+            "read as the log value's unconstrained intercept.")
+    end
+    effects = getfield(r.locals.hypers, hyper)
+    sd, sd_lower, sd_upper, z = 0, 0.0, Inf, Int[]
+    if effects !== nothing
+        sd, sd_lower, sd_upper = _rk_adaptive_hyper(pos, bounds, names, decl,
+            effects.scale, "$what level-effect SD")
+        z = _rk_adaptive_positions(pos, [string(decl, ".", effects.z, ".", g) for g in 1:G],
+            (; z=decl), "$what level-effect")
+    end
+    _HSGPLevelScale(true, Int[], Float64[], Float64[], intercept, sd, sd_lower,
+                    sd_upper, z)
+end
+
+# A grouped HSGP term whose levels are correlated (`cor =`) or scaled per level
+# (a hyper-predictor): the wrapper maps it across its levels under
+# `hsgp_levels = true` (`_rk_adaptive_hsgp_level_blocks`) and never builds basis
+# cells for it (`_rk_adaptive_hsgp_blocks`).
+_rk_hsgp_level_mapped(rk::RKBRMI, r) = r.kind === :hsgp && r.grouped &&
+    (r.level_correlation ||
+     !isempty(_rk_adaptive_hsgp_term(rk, r.declaration).options.hyper_plans))
+_rk_has_hsgp_level_terms(rk::RKBRMI) =
+    any(r -> _rk_hsgp_level_mapped(rk, r), _rk_coordinate_records(rk.plan))
+
+"""
+    _rk_adaptive_hsgp_level_blocks(rk::RKBRMI, unc_names=<the RK layout names>)
+
+One `_HSGPLevelAdaptiveCenteringBlock` per grouped squared-exponential HSGP of
+an RKBRMI whose levels are correlated (`cor =`) or scaled per level (a
+hyper-predictor), over RK layout positions; the companion of
+`_rk_adaptive_hsgp_blocks`, which builds every other HSGP's cells. A term whose
+hyperparameter is a model value keeps its emitted frame; `cor =
+multigroup(...)` and a level-mapped periodic term raise.
+"""
+function _rk_adaptive_hsgp_level_blocks(rk::RKBRMI,
+                                        unc_names=_rk_layout_coordinate_names(rk))
+    names = String.(unc_names)
+    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
+    transforms = _rk_layout_coordinate_transforms(rk)
+    bounds = _rk_adaptive_scale_bounds(rk, transforms)
+    out = _HSGPLevelAdaptiveCenteringBlock[]
+    for r in _rk_coordinate_records(rk.plan)
+        _rk_hsgp_level_mapped(rk, r) || continue
+        o = _rk_adaptive_hsgp_term(rk, r.declaration).options
+        decl = r.declaration
+        what = "BRM adaptive centering on RKBRMI: grouped HSGP `$decl` on `$(r.predictor)`"
+        lc = get(o, :level_cor, nothing)
+        lc === nothing || lc isa _BRMLevelCorrelation || error(
+            "$what correlates the levels of `$(r.group)` through `cor = multigroup(...)`, ",
+            "whose level correlation changes with each basis frequency (or whose ",
+            "weights sit on a shared grid of inducing rows), so a per-basis level map ",
+            "with one correlation factor does not describe it. Adaptive centering of ",
+            "such a term is not implemented; pass `hsgp_levels = false` (the default) ",
+            "to keep its weights in their emitted frame.")
+        get(o, :cov, :exp_quad) === :exp_quad || error(
+            "$what is periodic with correlated or predicted levels; its level cells ",
+            "are not built. Pass `hsgp_levels = false` (the default) to keep its ",
+            "weights in their emitted frame.")
+        modes = Int.(rk.plan.columns[o.modes])
+        B, G = prod(modes), length(r.levels)
+        weight_names = [string(decl, ".", r.locals.weights, ".", g, ".", b)
+                        for g in 1:G, b in 1:B]
+        # A term no observed likelihood reaches has no sampler coordinate.
+        all(n -> !haskey(pos, n), weight_names) && continue
+        effects = reshape(_rk_adaptive_positions(pos, vec(weight_names), (; z=decl),
+            "HSGP level-weight"), G, B)
+        any(n -> haskey(pos, n), (string(decl, ".", r.locals.weights, ".", G + 1, ".1"),
+                                  string(decl, ".", r.locals.weights, ".1.", B + 1))) &&
+            error("$what has more level weights in the RK layout than its $G levels × ",
+                  "$B basis functions.")
+        sigma = _rk_adaptive_hsgp_level_scale(pos, bounds, transforms, names, r, o, :sd, G)
+        rho = _rk_adaptive_hsgp_level_scale(pos, bounds, transforms, names, r, o,
+                                            :length_scale, G)
+        (sigma === nothing || rho === nothing) && continue
+        sigma.predicted || length(sigma.coordinates) == 1 || error(
+            "$what must have one marginal SD.")
+        widths = _rk_adaptive_hsgp_widths(rk, r, o)
+        # A predicted length scale is iso: one floor, the strictest axis's.
+        rho_floor = rho.predicted ?
+            maximum(_brm_hsgp_rho_lower((0.0, widths[j]), modes[j]) for j in eachindex(widths)) :
+            0.0
+        correlation, cholesky_free, cholesky_cpc = :none, Int[], Float64[]
+        if lc !== nothing
+            lc.K == G || error("$what correlates $(lc.K) levels, but `$(r.group)` has $G.")
+            if lc.kind === :parameter
+                correlation = :parameter
+                cholesky_free = _rk_adaptive_positions(pos,
+                    [string(lc.name, ".", m) for m in 1:(G * (G - 1)) ÷ 2], (; z=decl),
+                    "level-correlation Cholesky")
+            else
+                L = lc.factor
+                L isa AbstractMatrix{<:Real} && size(L) == (G, G) && istril(L) || error(
+                    "$what carries no $G × $G lower Cholesky factor for its known ",
+                    "level correlation.")
+                correlation = :data
+                cholesky_cpc = _adaptive_cholesky_cpc(Matrix{Float64}(L))
+            end
+        end
+        push!(out, _HSGPLevelAdaptiveCenteringBlock(r.predictor, decl, r.group,
+            collect(Any, r.levels), effects, correlation, cholesky_free, cholesky_cpc,
+            sigma, rho, rho_floor, _rk_adaptive_hsgp_omega2(modes, widths)))
+    end
+    claimed = reduce(vcat, (vec(b.effects) for b in out); init=Int[])
+    allunique(claimed) || error(
+        "BRM adaptive centering on RKBRMI: HSGP level blocks claim overlapping ",
+        "coordinates; refusing an ambiguous transform.")
     out
 end

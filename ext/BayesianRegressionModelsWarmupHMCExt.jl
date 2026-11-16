@@ -3235,7 +3235,7 @@ end
 """
     adaptive_centering_problem(rk::RKBRMI, problem, ad_backend;
         unc_names=nothing, centeredness=nothing, ranef_order=:declared, hsgp=true,
-        fields=false)
+        hsgp_levels=false, fields=false)
 
 Wrap `problem = rk_logdensity_problem(rk; ad_backend)` in the same WarmupHMC
 adaptive partial centring of random effects as the SBBRMI method: one
@@ -3270,11 +3270,25 @@ from 77-175 to 314-502 and removed every divergence in 6 of 6 seeds; on a
 data-rich panel of 4 group curves (`hsgp(x; k=10, by=g)`) it raised it in 4 of
 6 seeds and lowered it in 2, the intercept being the slowest coordinate there
 (`research/adaptive_centering/rk_families.jl`, families `hsgp_mcycle`,
-`hsgp_grouped`). `hsgp = false` leaves every weight in its emitted frame. A
-grouped term whose levels are correlated (`cor =`) or scaled per level (a
-hyper-predictor such as `log(sd(hsgp(x))) ~ 1 + (1 | g)`), and a term whose
-marginal SD or length scale is a model value (`sd(lp, hsgp(x)) = exp(a)`),
-keep their emitted frame either way.
+`hsgp_grouped`). `hsgp = false` leaves those weights in their emitted frame. A
+term whose marginal SD or length scale is a model value
+(`sd(lp, hsgp(x)) = exp(a)`) keeps its emitted frame either way.
+
+`hsgp_levels = true` also maps a grouped squared-exponential term whose levels
+are correlated (`cor = Omega`, a sampled `LKJCholesky`, or a known matrix) or
+scaled per level (a hyper-predictor such as `log(sd(hsgp(x))) ~ 1 + (1 | g)`)
+across its levels, as the SBBRMI wrapper does: basis column `b`'s level weights
+are one correlated block with factor `diag(s_b) * L`, each level centred on its
+conditional mean given the earlier levels, after the basis-weight cells (pair
+order term, basis, level). It is off by default, so such a term keeps its
+emitted frame: on data-rich panels of 4 related curves (`hsgp(x; k=10, by=g,
+cor=Omega)`, and per-level SDs `log(sd(hsgp(x))) ~ 1 + (1 | g)`), where the
+plain RK density already mixed (minimum bulk ESS 114-258), it lowered the
+minimum bulk ESS in 6 of 6 seeds each (to 43-143), the intercept or a level's
+first basis weight being the slowest coordinate
+(`research/adaptive_centering/rk_families.jl`, families `hsgp_cor`,
+`hsgp_hyper`). Under `hsgp_levels = true` a `cor = multigroup(...)` coherence and a
+periodic term with correlated or predicted levels raise.
 
 `fields = true` also adapts the cells of areal `car` fields and `cdar` walks,
 as the SBBRMI wrapper does (after the random-effect cells, `car` then `cdar`):
@@ -3295,7 +3309,7 @@ without any random-effect block raises.
 """
 function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
         unc_names=nothing, centeredness=nothing, ranef_order=:declared, hsgp=true,
-        fields=false)
+        hsgp_levels=false, fields=false)
     names = String.(isnothing(unc_names) ? BRM._rk_layout_coordinate_names(model) :
                     unc_names)
     ranef_order in (:declared, :learned) ||
@@ -3306,20 +3320,28 @@ function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
     blocks = BRM.adaptive_centering_blocks(model, names)
     fields isa Bool || throw(ArgumentError("fields must be true or false"))
     hsgp isa Bool || throw(ArgumentError("hsgp must be true or false"))
+    hsgp_levels isa Bool || throw(ArgumentError("hsgp_levels must be true or false"))
     hsgp_blocks = hsgp ? BRM._rk_adaptive_hsgp_blocks(model, names) :
         BRM._HSGPAdaptiveCenteringBlock[]
+    level_blocks = hsgp_levels ? BRM._rk_adaptive_hsgp_level_blocks(model, names) :
+        _NO_LEVEL_BLOCKS
     car_blocks = fields ? BRM._rk_adaptive_car_blocks(model, names) : _NO_CAR_BLOCKS
     cdar_blocks = fields ? BRM._rk_adaptive_cdar_blocks(model, names) : _NO_CDAR_BLOCKS
-    if isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks) &&
-            isempty(cdar_blocks)
+    if isempty(blocks) && isempty(hsgp_blocks) && isempty(level_blocks) &&
+            isempty(car_blocks) && isempty(cdar_blocks)
+        # What a switched-off keyword would have adapted, named in the error.
+        held_basis = !hsgp && !isempty(BRM._rk_adaptive_hsgp_blocks(model, names))
+        held_levels = !hsgp_levels && BRM._rk_has_hsgp_level_terms(model)
         held = !fields && !(isempty(BRM._rk_adaptive_car_blocks(model, names)) &&
                             isempty(BRM._rk_adaptive_cdar_blocks(model, names)))
         error("BRM adaptive centering on RKBRMI: this model has no random-effect " *
               "block" * (hsgp ? " or HSGP" : "") * " with sampler coordinates to adapt" *
-              (!hsgp && !isempty(BRM._rk_adaptive_hsgp_blocks(model, names)) ?
-              "; its HSGP weights adapt only with `hsgp = true`, the default" : "") * (held ?
-              "; its `car` fields or `cdar` walks adapt only with `fields = true` " *
-              "(off by default: see the docstring)." : "."))
+              (held_basis ? "; its HSGP weights adapt only with `hsgp = true`, the default" : "") *
+              (held_levels ? "; its grouped HSGP terms with correlated or per-level-scaled " *
+                             "levels adapt only with `hsgp_levels = true` (off by default: " *
+                             "see the docstring)" : "") *
+              (held ? "; its `car` fields or `cdar` walks adapt only with `fields = true` " *
+                      "(off by default: see the docstring)." : "."))
     end
     locations = BRM._adaptive_ranef_locations(model, blocks, names)
     ordinary = BRM.AdaptiveCenteringBlock[
@@ -3329,7 +3351,7 @@ function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
     _containers_first!(ordinary, locations)
     _containers_first!(r2d2_blocks, locations)
     _cells_centering_problem(problem, ad_backend, ordinary, r2d2_blocks,
-        hsgp_blocks, _NO_LEVEL_BLOCKS, cdar_blocks,
+        hsgp_blocks, level_blocks, cdar_blocks,
         car_blocks, locations, _NO_SCALAR_CELLS; centeredness, ranef_order)
 end
 

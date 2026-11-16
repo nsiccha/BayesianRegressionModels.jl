@@ -11,7 +11,7 @@
 #     julia --project=test research/adaptive_centering/rk_families.jl [family...]
 #
 # Families: student_t, known, bounded, stratified, factor, mm, r2d2, car_bym2, cdar,
-# hsgp_mcycle, hsgp_grouped. Each runs 4 chains
+# hsgp_mcycle, hsgp_grouped, hsgp_cor, hsgp_hyper. Each runs 4 chains
 # through WarmupHMC's quorum sampler (`min_completed = 3`), 400 draws, for each
 # seed, plain and wrapped, and prints max R-hat, min bulk ESS over every
 # coordinate (RK layout frame), divergences and wall time.
@@ -94,8 +94,22 @@ function hsgp_panel(; seed=5, G=4, n=80)
     (; y, x, g=string.("g", group))
 end
 
+# Group curves whose levels are related: `G` curves of `n` rows on `[-2, 2]`
+# with noise sd 0.1, phases `0.3 g` apart (so the levels' weights are strongly
+# correlated) and amplitudes `amp` (so a per-level SD is the stiff direction
+# when they differ).
+function hsgp_level_panel(; seed=6, G=4, n=80, amp=ones(G))
+    rng = Xoshiro(seed)
+    group = repeat(1:G; inner=n)
+    x = repeat(collect(range(-2.0, 2.0; length=n)), G)
+    y = amp[group] .* sin.(1.5 .* x .+ 0.3 .* group) .+ 0.1 .* randn(rng, length(x))
+    (; y, x, g=string.("g", group))
+end
+
 const FAMILY_DATA = Dict(:car_bym2 => car_panel, :cdar => walk_panel,
-    :hsgp_mcycle => mcycle_data, :hsgp_grouped => hsgp_panel)
+    :hsgp_mcycle => mcycle_data, :hsgp_grouped => hsgp_panel,
+    :hsgp_cor => hsgp_level_panel,
+    :hsgp_hyper => () -> hsgp_level_panel(; amp=[0.3, 0.8, 1.5, 3.0]))
 
 const FAMILIES = Dict(
     # One smooth over a noisy, data-rich axis: the HSGP basis weights' cells.
@@ -107,6 +121,18 @@ const FAMILIES = Dict(
     # One smooth per group, the weights of each level pinned by its rows.
     :hsgp_grouped => df -> @brm(df, begin
         mu ~ 1 + hsgp(x; k=10, by=g)
+        y ~ Normal(mu, 0.1)
+    end),
+    # Correlated group curves: the level cells of a `cor = Omega` term.
+    :hsgp_cor => df -> @brm(df, begin
+        Omega ~ LKJCholesky(4, 2.0)
+        mu ~ 1 + hsgp(x; k=10, by=g, cor=Omega)
+        y ~ Normal(mu, 0.1)
+    end),
+    # Group curves of different amplitudes: a per-level SD's level cells.
+    :hsgp_hyper => df -> @brm(df, begin
+        mu ~ 1 + hsgp(x; k=10, by=g)
+        log(sd(hsgp(x))) ~ 1 + (1 | g)
         y ~ Normal(mu, 0.1)
     end),
     # BYM2 areal field on a data-rich grid: theta cells centred on area totals.
@@ -210,8 +236,10 @@ function main(families)
         df = get(FAMILY_DATA, family, panel)()
         rk = RKBRMI(FAMILIES[family](df))
         problem = rk_logdensity_problem(rk; ad_backend=AD)
-        # Field families adapt their car / cdar cells only under `fields = true`.
-        kw = family in (:car_bym2, :cdar) ? (; fields=true) : (;)
+        # Field families adapt their car / cdar cells only under `fields = true`,
+        # grouped HSGP level cells only under `hsgp_levels = true`.
+        kw = family in (:car_bym2, :cdar) ? (; fields=true) :
+             family in (:hsgp_cor, :hsgp_hyper) ? (; hsgp_levels=true) : (;)
         cells = length(adaptive_centering_controls(
             adaptive_centering_problem(rk, problem, AD; kw...), rk))
         println("== $family: $cells cells, ",
