@@ -537,9 +537,11 @@ end
 # and an ICAR field `sigma .* phi_full`; a `cdar` walk reads its standard-normal
 # innovations `eta[p, w]`, stored column-major.
 
-# The plan term of a `car` or `cdar` component declaration.
+# The plan term of a `car` or `cdar` component declaration. A model with
+# ordinary value statements plans an `_RKValuePlan`, whose regression formulas
+# sit in its `regression` plan: `_rk_replay_predictors` reads either kind.
 function _rk_adaptive_term(rk::RKBRMI, kind, declaration)
-    for predictor in rk.plan.predictors, term in predictor.terms
+    for predictor in _rk_replay_predictors(rk.plan), term in predictor.terms
         term.kind === kind && term.options.value === declaration && return term
     end
     error("BRM adaptive centering on RKBRMI: internal: no `$kind` term declares ",
@@ -660,8 +662,10 @@ end
 # model value (`sd(lp, hsgp(x)) = exp(a)`), whose scale no fixed bound
 # describes, keeps its emitted frame: its weights pass through unchanged.
 
+# The plan term of an `hsgp` declaration, on a structural or a value plan
+# (`_rk_adaptive_term`).
 function _rk_adaptive_hsgp_term(rk::RKBRMI, declaration)
-    for predictor in rk.plan.predictors, term in predictor.terms
+    for predictor in _rk_replay_predictors(rk.plan), term in predictor.terms
         term.kind === :hsgp && term.options.id === declaration && return term
     end
     error("BRM adaptive centering on RKBRMI: internal: no `hsgp` term declares ",
