@@ -873,6 +873,54 @@ end
     @test all(b -> b.family !== :hsgp || b.kind === :levels, plan.blocks)
 end
 
+# A model whose value statements combine its formulas (`mu = level + surface +
+# course`) plans an `_RKValuePlan`, which keeps the formulas in its `regression`
+# plan. Its HSGP terms (a basis vector read from the data, a floored length
+# scale, a grouped term orthogonal to its line), a level-mapped grouped term and
+# a car field describe and map as a formula model's do (snag
+# rk-hsgp-adaptive-cf312e88: the term lookup read only a formula plan's
+# predictors and raised `type _RKValuePlan has no field predictors`).
+@stestset "RKBRMI: HSGP, level and car cells on a value plan" begin
+    value_plan(rk) = rk.plan isa BayesianRegressionModels._RKValuePlan
+    data = merge(hsgp_data(; seed=35), (; basis=[3, 2]))
+    rk, plan, _ = rk_parity(@brm data begin
+        surface ~ 0 + hsgp(x, x2; k=basis, c=1.5)
+        course ~ 0 + hsgp(t; k=3, c=1.5, by=g, orthogonal_to=:linear)
+        level ~ 1 + (1 | u)
+        mu = level + surface + course
+        length_scale(surface, hsgp(x, x2)) ~
+            truncated(LogNormal(0.0, 0.7); lower=length_scale_floor)
+        sigma ~ Exponential(1.0)
+        y ~ Normal(mu, sigma)
+    end)
+    @test value_plan(rk)
+    @test [c.family for c in plan.cells] == vcat(fill(:ranef, 5), fill(:hsgp, 6 + 9))
+    hsgp = [b for b in plan.blocks if b.family === :hsgp]
+    @test sort([(b.binding, b.n_basis) for b in hsgp]) ==
+          [(:course, 3), (:course, 3), (:course, 3), (:surface, 6)]
+    # The floored length scale is a bounded sampled coordinate (lower > 0).
+    surface = [c for c in plan.cells if c.family === :hsgp && c.binding === :surface]
+    rho = only(first(surface).scale.length_scales)
+    @test rho.coordinate > 0 && rho.lower > 0
+    # A grouped term with correlated levels, mapped across them.
+    rk, plan, _ = rk_parity(@brm(data, begin
+        Omega ~ LKJCholesky(3, 2.0)
+        field ~ 0 + hsgp(x; k=2, by=g, cor=Omega)
+        mu = 0.5 + field
+        y ~ Normal(mu, 0.3)
+    end); hsgp_levels=true)
+    @test value_plan(rk)
+    check_level_rows(plan)
+    # A car field (`fields = true`), one cell per area as on a formula model.
+    rk, plan, _ = rk_parity(@brm(car_data(), begin
+        field ~ 1 + car(area; edges=(from, to), type=:bym2)
+        mu = 0.5 + field
+        y ~ Normal(mu, 1.0)
+    end); fields=true)
+    @test value_plan(rk)
+    @test count(c -> c.family === :car, plan.cells) == 8
+end
+
 @stestset "SBBRMI: grouped HSGP level rows" begin
     for brmi in level_models()
         plan, _ = sb_parity(SBBRMI(brmi; mod=@__MODULE__, total_groups=()))

@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.334
+
+- `adaptive_centering_cells(rk::RKBRMI)` and `adaptive_centering_problem(rk::RKBRMI,
+  ...)` build HSGP cells (0.2.330, and `hsgp_levels = true`'s level cells) and
+  `fields = true`'s `car` cells for a model whose value statements combine its
+  formulas (`level = f[site] + g`, `mu = level + course`), which RKBRMI plans as
+  values. Such a model raised `type _RKValuePlan has no field predictors` once
+  either reached a term: the term lookup read only a formula-only model's plan.
+  Formula-only models are unchanged.
+
 ## 0.2.333
 
 - `brm_svi_fit(...; sparse_globals = :collapsed)` updates the sparse globals (the
