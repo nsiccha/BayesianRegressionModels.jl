@@ -103,9 +103,10 @@ Covered groupings: one grouping column or a shared `|ID|` bucket's joint
 columns, scalar or correlated, `||` blocks included.
 
 A block whose levels are correlated (`gr(g; cor=...)`) raises, as on SBBRMI.
-Multi-membership and R2D2-scaled blocks, HSGP weights, `car`, `cdar` and
-`gmrf` fields, cell latents and completions keep the emitted frame: they are
-not cells of this wrapper, and their coordinates pass through unchanged.
+HSGP basis weights, `car`, `cdar` and `gmrf` fields, cell latents and
+completions are not random-effect blocks and are not returned here; the
+wrapper adapts HSGP weights, and `car` and `cdar` cells under `fields = true`,
+as cells of their own ([`adaptive_centering_cells`](@ref)).
 """
 function adaptive_centering_blocks(rk::RKBRMI,
         unc_names=_rk_layout_coordinate_names(rk))
@@ -630,6 +631,133 @@ function _rk_adaptive_cdar_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
         cdiag = L === nothing ? ones(P) : [sum(abs2, view(L, p, :)) for p in 1:P]
         push!(out, _CDARAdaptiveCenteringBlock(r.predictor, r.declaration, P, W, effects,
             sigma..., rho..., cdiag))
+    end
+    out
+end
+
+# ── HSGP basis weights ───────────────────────────────────────────────────────
+#
+# RKBRMI emits every HSGP non-centred: basis weight `b` is its standardized draw
+# (`<decl>.beta_raw.<b>`; level `g`'s of a grouped term `<decl>.<weights>.<g>.<b>`)
+# times its spectral scale, the program's value `<decl>.<spectral>[b]`. That
+# scale is SBBRMI's (`_adaptive_hsgp_log_scale`) of RK's constrained marginal SD
+# and length scales at the frequencies RK's basis graph computes,
+# `omega2[b, j] = (mode_j(b) * pi / (2 * width_j))^2` in its tensor order
+# (`_rk_hsgp_tensor_mode`), with each axis's half-width read from the term's
+# fitted interval (the record's `fit`, a fitted value of the program) or from
+# its fixed domain's settings; a periodic term's spectrum reads its harmonics
+# `[1:K; 1:K]` (`_rk_ast_hsgp_periodic_basis_graph!`). So
+# `_HSGPAdaptiveCenteringBlock`s over RK positions adapt RK's weights exactly
+# as SBBRMI's adapt Stan's, one block per term (per level of a grouped term).
+# A known hyperparameter (`length_scale(lp, hsgp(x)) = 0.8`) has no coordinate
+# and is carried as coordinate 0 at both bounds, as on SBBRMI.
+#
+# Three kinds of term keep the emitted frame here, so their weights pass through
+# unchanged: a grouped term whose levels are correlated (`cor=`) or whose scales
+# a hyper-predictor sets per level (SBBRMI maps those across their levels,
+# `_adaptive_hsgp_level_centering_blocks`), and a term whose hyperparameter is
+# a model value (`sd(lp, hsgp(x)) = exp(a)`), whose scale no fixed bound
+# describes.
+
+function _rk_adaptive_hsgp_term(rk::RKBRMI, declaration)
+    for predictor in rk.plan.predictors, term in predictor.terms
+        term.kind === :hsgp && term.options.id === declaration && return term
+    end
+    error("BRM adaptive centering on RKBRMI: internal: no `hsgp` term declares ",
+          "`$declaration`.")
+end
+
+# Axis `j`'s mode in tensor basis column `b`, the value `_rk_hsgp_tensor_mode`
+# emits: the column-major position of `b` in the `modes[1] x ... x modes[D]` grid.
+_rk_adaptive_hsgp_mode(modes, j, b) = div(b - 1, prod(modes[1:j-1]; init=1)) % modes[j] + 1
+
+# One HSGP hyperparameter as `(coordinate, lower, upper)`: its RK coordinate and
+# bounds when sampled, `(0, v, v)` when known as `v` (axis `j`'s entry of a known
+# vector of length scales), `nothing` when it is a model value (the term then
+# keeps its emitted frame).
+function _rk_adaptive_hsgp_hyper(pos, bounds, names, r, carrier, prior, j, what)
+    name = string(r.declaration, ".", carrier)
+    haskey(pos, name) && return _rk_adaptive_hyper(pos, bounds, names, r.declaration,
+                                                   carrier, what)
+    if _brm_is_known_term_value(prior)
+        v = prior.value isa AbstractVector ? prior.value[j] : prior.value
+        v isa Real && v > 0 || error(
+            "BRM adaptive centering on RKBRMI: HSGP `$(r.declaration)`'s known $what ",
+            "is $(repr(v)), not a positive number.")
+        return (0, Float64(v), Float64(v))
+    end
+    _brm_is_derived_term_value(prior) && return nothing
+    error("BRM adaptive centering on RKBRMI: HSGP `$(r.declaration)` has no $what ",
+          "coordinate `$name` in the RK layout and no known value.")
+end
+
+function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
+    names = String.(unc_names)
+    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
+    bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
+    out = _HSGPAdaptiveCenteringBlock[]
+    for r in _rk_coordinate_records(rk.plan)
+        r.kind === :hsgp || continue
+        o = _rk_adaptive_hsgp_term(rk, r.declaration).options
+        r.grouped && (r.level_correlation || !isempty(o.hyper_plans)) && continue
+        periodic = get(o, :cov, :exp_quad) === :periodic
+        modes = Int.(rk.plan.columns[o.modes])
+        B = periodic ? 2 * only(modes) : prod(modes)
+        G = r.grouped ? length(r.levels) : 1
+        weight_names = r.grouped ?
+            [string(r.declaration, ".", r.locals.weights, ".", g, ".", b) for b in 1:B, g in 1:G] :
+            [string(r.declaration, ".beta_raw.", b) for b in 1:B, _ in 1:1]
+        # A term no observed likelihood reaches has no sampler coordinate.
+        all(n -> !haskey(pos, n), weight_names) && continue
+        weights = reshape(_rk_adaptive_positions(pos, vec(weight_names),
+            (; z=r.declaration), "HSGP basis-weight"), B, G)
+        extra = r.grouped ?
+            (string(r.declaration, ".", r.locals.weights, ".", G + 1, ".1"),
+             string(r.declaration, ".", r.locals.weights, ".1.", B + 1)) :
+            (string(r.declaration, ".beta_raw.", B + 1),)
+        any(n -> haskey(pos, n), extra) && error(
+            "BRM adaptive centering on RKBRMI: HSGP `$(r.declaration)` has more basis ",
+            "weights in the RK layout than its $B basis functions",
+            r.grouped ? " and $G levels." : ".")
+        sd_carrier = r.grouped ? r.locals.scales.sd : :sigma
+        rho_carriers = r.grouped ? r.locals.scales.length_scale :
+            _rk_hsgp_length_carriers(_rk_adaptive_hsgp_term(rk, r.declaration))
+        axes_n = r.iso ? 1 : length(r.axes)
+        # A known length scale leaves no carrier; its value is the term's prior.
+        rho_carriers = rho_carriers === nothing ?
+            (axes_n == 1 ? (:rho_iso,) : Tuple(Symbol(:rho_, j) for j in 1:axes_n)) :
+            rho_carriers isa Symbol ? (rho_carriers,) : Tuple(rho_carriers)
+        length(rho_carriers) == axes_n || error(
+            "BRM adaptive centering on RKBRMI: internal: HSGP `$(r.declaration)` has ",
+            "$(length(rho_carriers)) length-scale carriers for $axes_n length scales.")
+        sigma = _rk_adaptive_hsgp_hyper(pos, bounds, names, r,
+            something(sd_carrier, :sigma), o.sigma_prior, 1, "marginal SD")
+        rhos = [_rk_adaptive_hsgp_hyper(pos, bounds, names, r, rho_carriers[j],
+                    o.rho_prior, j, "length scale") for j in 1:axes_n]
+        (sigma === nothing || any(isnothing, rhos)) && continue
+        omega2, harmonics = if periodic
+            Matrix{Float64}(undef, 0, 0), Vector{Float64}(_brm_hsgp_periodic_harmonics(only(modes)))
+        else
+            D = length(r.axes)
+            widths = if r.fit !== nothing
+                fit = Float64.(_rk_frozen_values(rk, [r.fit]).values[r.fit])
+                index = _rk_hsgp_fit_index(o, D)
+                [fit[index.width(j)] for j in 1:D]
+            else
+                o.fixed_fits === nothing && error(
+                    "BRM adaptive centering on RKBRMI: HSGP `$(r.declaration)` has ",
+                    "neither a fitted interval nor a fixed domain.")
+                settings = Float64.(rk.plan.columns[o.settings])
+                [settings[D + 2j] for j in 1:D]
+            end
+            [(_rk_adaptive_hsgp_mode(modes, j, b) * pi / (2 * widths[j]))^2
+             for b in 1:B, j in 1:D], Float64[]
+        end
+        for g in 1:G
+            push!(out, _HSGPAdaptiveCenteringBlock(r.predictor, r.declaration, zeros(B),
+                weights[:, g], [first(h) for h in rhos], [h[2] for h in rhos],
+                [h[3] for h in rhos], sigma..., omega2, harmonics))
+        end
     end
     out
 end

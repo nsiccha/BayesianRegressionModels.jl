@@ -23,7 +23,9 @@
 # nested in an ordinary one beside a centred block with known SDs and
 # correlation (the joint derived-scale wrapper), and an R2D2 block whose scales
 # are unit and simplex atoms, and car cells beside a random-effect block and a
-# cdar walk (0.2.316). An SBBRMI wrapper that also adapts S2Z contrasts raises.
+# cdar walk (0.2.316); HSGP basis-weight cells (squared-exponential, anisotropic,
+# grouped, periodic, known hyperparameters) on both backends, beside a
+# random-effect block. An SBBRMI wrapper that also adapts S2Z contrasts raises.
 #
 #     julia --project=test test/adaptive_centering_cells.jl [testset filter...]
 using Test, BayesianRegressionModels, Distributions, Random, LinearAlgebra
@@ -31,6 +33,7 @@ using ReactiveKernels, ReactiveKernelsPPL, Enzyme, LogDensityProblems, WarmupHMC
 using DifferentiationInterface: AutoEnzyme
 using CategoricalArrays
 import StanBlocks
+import SpecialFunctions
 include(joinpath(@__DIR__, "testset_filter.jl"))
 
 const AD = AutoEnzyme(; mode=Enzyme.Reverse)
@@ -132,6 +135,25 @@ function scalar_cell(c, x)
     zero(T), log(sigma) + log(c.scale.cdiag) / 2 + log(v) / 2
 end
 
+# A hyperparameter's value from its row: a known one (`coordinate == 0`) is
+# its `lower`.
+hyper(h, x) = h.coordinate == 0 ? oftype(float(first(x)), h.lower) : constrain(h, x)
+
+# An HSGP cell's log spectral scale, from its row alone, floored smoothly below
+# -110 at -150.
+function hsgp_log_scale(c, x)
+    sc = c.scale
+    sigma = hyper(sc.sigma, x)
+    rho(a) = hyper(sc.length_scales[length(sc.length_scales) == 1 ? 1 : a], x)
+    l = if sc.spectrum === :periodic
+        log(sigma) + (log(2) + log(SpecialFunctions.besselix(sc.harmonic, 1 / rho(1)^2))) / 2
+    else
+        log(sigma) + sum(log(rho(a) * sqrt(2pi)) / 2 - rho(a)^2 * sc.omega2[a] / 4
+                         for a in eachindex(sc.omega2))
+    end
+    l > -110 ? l : -150 + softplus(l + 150)
+end
+
 # Source `x` -> compiled `y` and the log-Jacobian, cell by cell in row order.
 function public_map(x, plan, controls)
     T = eltype(x)
@@ -140,6 +162,13 @@ function public_map(x, plan, controls)
     s = zeros(T, length(plan.cells))
     loc = zeros(T, length(plan.cells))
     for c in plan.cells
+        if c.family === :hsgp   # centred on 0, at its own target
+            log_s, t, cc = hsgp_log_scale(c, x), c.target, controls[c.cell]
+            y[c.effect] = x[c.effect] * exp((t - cc) * log_s)
+            ljac += (t - cc) * log_s
+            s[c.cell] = exp(log_s)
+            continue
+        end
         if c.family !== :ranef   # a scalar cell with target 0
             L, log_s = scalar_cell(c, x)
             cc = controls[c.cell]
@@ -198,7 +227,9 @@ function check_rows(plan, rows, names)
           [names[c.effect] for c in plan.cells]
     @test [r.binding for r in rows] == [c.binding for c in plan.cells]
     @test [r.term for r in rows] == [c.term for c in plan.cells]
-    @test [r.target for r in rows] == [plan.blocks[c.block].target for c in plan.cells]
+    # An HSGP cell carries its own compiled frame; every other cell its block's.
+    @test [r.target for r in rows] ==
+          [c.family === :hsgp ? c.target : plan.blocks[c.block].target for c in plan.cells]
     @test all(plan.blocks[c.block].family === c.family for c in plan.cells)
     ranef = [r for r in rows if r.family === :ranef]
     rcells = [c for c in plan.cells if c.family === :ranef]
@@ -213,11 +244,12 @@ function check_rows(plan, rows, names)
     end
 end
 
-# `fields` is the RKBRMI wrapper's keyword (its car and cdar cells); `nothing`
-# passes none, as for an SBBRMI.
+# `fields` and `hsgp` are the RKBRMI wrapper's keywords (its car and cdar cells,
+# its HSGP cells); `nothing` passes none, as for an SBBRMI.
 function check_parity(model, problem, names; trials=2, rng=Xoshiro(7), fd=true,
-                      fields=nothing)
+                      fields=nothing, hsgp=nothing)
     kw = isnothing(fields) ? (;) : (; fields)
+    isnothing(hsgp) || (kw = merge(kw, (; hsgp)))
     plan = adaptive_centering_cells(model, names; kw...)
     n = length(plan.cells)
     check_rows(plan, adaptive_centering_controls(
@@ -274,14 +306,14 @@ function nested_panel(; seed=2)
        unit=categorical(string.("u", lpad.(unit, 2, '0'))))
 end
 
-function rk_parity(brmi; fields=false)
+function rk_parity(brmi; fields=false, hsgp=true)
     rk = RKBRMI(brmi)
     problem = rk_logdensity_problem(rk; ad_backend=AD)
     # The RK layout's coordinate names (brm-use, "RK readers").
     names = String.(ReactiveKernelsPPL.coordinate_names(rk.model.layout))
     # The default `unc_names` of the RKBRMI method is that layout.
-    default = adaptive_centering_cells(rk; fields)
-    plan = check_parity(rk, problem, names; fields)
+    default = adaptive_centering_cells(rk; fields, hsgp)
+    plan = check_parity(rk, problem, names; fields, hsgp)
     @test default == plan
     rk, plan, names
 end
@@ -538,6 +570,68 @@ end
     end
 end
 
+function hsgp_data(; seed=31, n=60)
+    rng = Xoshiro(seed)
+    x = sort(randn(rng, n))
+    x2 = randn(rng, n)
+    t = 48 .* rand(rng, n)
+    g = categorical(rand(rng, ["a", "b", "c"], n))
+    u = categorical(rand(rng, string.("u", 1:5), n))
+    (; x, x2, t, g, u, y=sin.(2x) .+ 0.3 .* x2 .+ 0.2 .* randn(rng, n))
+end
+
+@stestset "RKBRMI: HSGP basis-weight cells, every spectrum and grouping" begin
+    data = hsgp_data()
+    for (brmi, n_cells, spectrum) in (
+            (@brm(data, begin
+                mu ~ 1 + hsgp(x, x2; k=(3, 2), c=(1.5, 2.0), iso=false)
+                y ~ Normal(mu, 0.2)
+            end), 6, :exp_quad),
+            (@brm(data, begin mu ~ 1 + hsgp(x; k=3, by=g); y ~ Normal(mu, 0.2) end),
+             9, :exp_quad),
+            (@brm(data, begin
+                mu ~ 1 + hsgp(t; k=2, cov=:periodic, period=24.0)
+                y ~ Normal(mu, 0.2)
+            end), 4, :periodic),
+            (@brm(data, begin
+                mu ~ 1 + hsgp(x; k=4)
+                length_scale(mu, hsgp(x)) = 0.8
+                y ~ Normal(mu, 0.2)
+            end), 4, :exp_quad))
+        _, plan, _ = rk_parity(brmi)
+        @test length(plan.cells) == n_cells
+        @test all(c -> c.family === :hsgp && c.scale.spectrum === spectrum, plan.cells)
+        @test all(c -> c.target == 0.0, plan.cells)
+    end
+    # A grouped term is one block per level, in the grouping's level order.
+    _, plan, _ = rk_parity(@brm data begin
+        mu ~ 1 + hsgp(x; k=3, by=g)
+        y ~ Normal(mu, 0.2)
+    end)
+    @test [b.level_index for b in plan.blocks] == 1:3
+    # A known length scale is coordinate 0 at both bounds.
+    _, plan, _ = rk_parity(@brm data begin
+        mu ~ 1 + hsgp(x; k=4)
+        length_scale(mu, hsgp(x)) = 0.8
+        y ~ Normal(mu, 0.2)
+    end)
+    @test all(c -> only(c.scale.length_scales) == (; coordinate=0, lower=0.8, upper=0.8),
+              plan.cells)
+end
+
+@stestset "RKBRMI: HSGP cells after a random-effect block's; hsgp = false drops them" begin
+    data = hsgp_data(; seed=33)
+    brmi = @brm data begin
+        mu ~ 1 + hsgp(x; k=4) + (1 | u)
+        sigma ~ Exponential(1.0)
+        y ~ Normal(mu, sigma)
+    end
+    _, plan, _ = rk_parity(brmi)
+    @test [c.family for c in plan.cells] == vcat(fill(:ranef, 5), fill(:hsgp, 4))
+    _, plan, _ = rk_parity(brmi; hsgp=false)
+    @test all(c -> c.family === :ranef, plan.cells) && length(plan.cells) == 5
+end
+
 @stestset "SBBRMI: factor levels and crossed containing groupings" begin
     rng = Xoshiro(17)
     NP = 30
@@ -623,6 +717,25 @@ end
     cells = [c for c in plan.cells if c.family === :cdar]
     @test length(cells) == length(plan.cells) == 4
     @test all(c -> c.scale.cdiag ≈ 1.0, cells)
+end
+
+@stestset "SBBRMI: HSGP cells at their compiled centeredness, and grouped levels" begin
+    data = merge(hsgp_data(; seed=35), (; hsgp_c=[0.0, 0.35, 0.75, 1.0]))
+    model = SBBRMI(@brm(data, begin
+        mu ~ 1 + hsgp(x; k=4, c=1.5, centeredness=hsgp_c) + (1 | u)
+        y ~ Normal(mu, 0.2)
+    end); mod=@__MODULE__, total_groups=())
+    plan, names = sb_parity(model)
+    weights = [c for c in plan.cells if c.family === :hsgp]
+    @test [c.target for c in weights] == [0.0, 0.35, 0.75, 1.0]
+    @test count(c -> c.family === :ranef, plan.cells) == 5
+    model = SBBRMI(@brm(data, begin
+        mu ~ 1 + hsgp(x; k=3, by=g)
+        y ~ Normal(mu, 0.2)
+    end); mod=@__MODULE__, total_groups=())
+    plan, names = sb_parity(model)
+    @test length(plan.cells) == 9 && all(c -> c.family === :hsgp, plan.cells)
+    @test [b.level_index for b in plan.blocks] == 1:3
 end
 
 @stestset "SBBRMI: a wrapper that also adapts S2Z contrasts raises" begin

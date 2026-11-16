@@ -89,8 +89,6 @@ _adaptive_cell_mixing(b::R2D2AdaptiveCenteringBlock) = copy(b.mixing)
 # schema): each has its own scale and location form.
 function _adaptive_cells_other_families(model, names)
     out = String[]
-    isempty(_adaptive_hsgp_centering_blocks(model, names)) ||
-        push!(out, "HSGP basis weights")
     isempty(_adaptive_hsgp_level_centering_blocks(model, names)) ||
         push!(out, "grouped HSGP level cells")
     isempty(_total_blocks_by_placement(model).sampled) ||
@@ -109,10 +107,16 @@ _adaptive_cell_cdar_blocks(rk::RKBRMI, names, fields) =
     fields ? _rk_adaptive_cdar_blocks(rk, names) : _CDARAdaptiveCenteringBlock[]
 _adaptive_cell_cdar_blocks(model, names, _) = _adaptive_cdar_centering_blocks(model, names)
 
+# A model's HSGP basis-weight blocks, as the wrapper builds them: an SBBRMI's
+# always, an RKBRMI's unless `hsgp = false`.
+_adaptive_cell_hsgp_blocks(rk::RKBRMI, names, hsgp) =
+    hsgp ? _rk_adaptive_hsgp_blocks(rk, names) : _HSGPAdaptiveCenteringBlock[]
+_adaptive_cell_hsgp_blocks(model, names, _) = _adaptive_hsgp_centering_blocks(model, names)
+
 # A hyperparameter coordinate and its declared bounds (`_adaptive_constrain`).
 _adaptive_cell_hyper(coordinate, lower, upper) = (; coordinate, lower, upper)
 
-function _adaptive_centering_cells(model, names::Vector{String}; fields=false)
+function _adaptive_centering_cells(model, names::Vector{String}; fields=false, hsgp=true)
     ordered, locations = _adaptive_cell_blocks(model, names)
     margins = _adaptive_cell_margins(model)
     lookup = IdDict{Any,Matrix{Int}}()
@@ -172,6 +176,32 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false)
                 location=(; coefficient, factors, containers)))
         end
     end
+    # HSGP basis-weight cells next (`_joint_centering_state`): term by term, a
+    # grouped term level by level, each block basis by basis
+    # (`BRMHSGPAdaptiveCenteringState`). A cell's compiled frame is its own:
+    # an SBBRMI term may fix a different exponent per basis.
+    term_levels = Dict{Tuple{Symbol,Symbol},Int}()
+    for b in _adaptive_cell_hsgp_blocks(model, names, hsgp)
+        bi = length(blocks) + 1
+        key = (b.logical, b.term)
+        level_index = term_levels[key] = get(term_levels, key, 0) + 1
+        spectrum = isempty(b.harmonics) ? :exp_quad : :periodic
+        sigma = _adaptive_cell_hyper(b.sd, b.sd_lower, b.sd_upper)
+        length_scales = [_adaptive_cell_hyper(i, lo, hi) for (i, lo, hi) in
+                         zip(b.length_scales, b.length_scale_lower, b.length_scale_upper)]
+        push!(blocks, (; block=bi, family=:hsgp, binding=b.logical, term=b.term,
+            level_index, n_basis=length(b.effects), spectrum, target=copy(b.target_c)))
+        for k in eachindex(b.effects)
+            push!(cells, (; cell=length(cells) + 1, family=:hsgp, block=bi,
+                binding=b.logical, margin=(; predictor=b.logical, coefficient=b.term),
+                level=nothing, level_index, term=k, effect=b.effects[k],
+                name=names[b.effects[k]], target=b.target_c[k],
+                scale=(; spectrum, sigma, length_scales,
+                         omega2=spectrum === :exp_quad ? b.omega2[k, :] : Float64[],
+                         harmonic=spectrum === :periodic ? b.harmonics[k] : 0.0),
+                location=(;)))
+        end
+    end
     # The joint wrapper's later families, in its pair order: `car` cells, then
     # `cdar` cells (`_joint_centering_state`). Both are compiled non-centred.
     for b in _adaptive_cell_car_blocks(model, names, fields)
@@ -215,13 +245,14 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false)
 end
 
 """
-    adaptive_centering_cells(rk::RKBRMI, unc_names=<the RK layout names>; fields=false) -> (; blocks, cells)
+    adaptive_centering_cells(rk::RKBRMI, unc_names=<the RK layout names>; hsgp=true, fields=false) -> (; blocks, cells)
     adaptive_centering_cells(model, unc_names) -> (; blocks, cells)
 
 The cells [`adaptive_centering_problem`](@ref) adapts for `model` (an
-[`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): its random-effect cells and
-its areal `car` field cells and `cdar` walk cells (an RKBRMI's under
-`fields = true`, as its wrapper adapts them), described as plain data:
+[`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): its random-effect cells, its
+HSGP basis-weight cells (an RKBRMI's unless `hsgp = false`), and its areal
+`car` field cells and `cdar` walk cells (an RKBRMI's under `fields = true`),
+each set as its wrapper adapts it, described as plain data:
 numbers, symbols, strings, `nothing`, vectors and named tuples. Indices are
 positions of the unconstrained vector `unc_names` names: for an `RKBRMI`, by
 default, `rk_logdensity_problem(rk)`'s layout; for an `SBBRMI`, BridgeStan's
@@ -232,8 +263,8 @@ needs no WarmupHMC and builds no wrapper.
 `cells[p]`, in the wrapper's cell order (the order of `centeredness`,
 [`adaptive_centering_controls`](@ref) and checkpoints: random-effect cells of
 ordinary blocks, then of derived-scale blocks, each containing blocks first,
-then level, then term; then `car` cells; then `cdar` cells). A random-effect
-cell (`family = :ranef`) has:
+then level, then term; then HSGP cells; then `car` cells; then `cdar` cells). A
+random-effect cell (`family = :ranef`) has:
 
 - `cell` (`== p`), `family` (`:ranef`), `block` (its row in `blocks`),
   `binding`, `group`, `level` (the level's label) and `level_index`, `term` (its
@@ -245,6 +276,19 @@ cell (`family = :ranef`) has:
   cell is centred on (`0` for none); `factors`, the coordinates of the
   `factor(f)` levels holding its level; `containers`, the cells of the coarser
   groupings holding its level, coarsest first, every one earlier than `p`.
+
+An HSGP cell (`family = :hsgp`, one per basis weight: term by term, a grouped
+`by = g` term level by level, then basis by basis) has `cell`, `family`,
+`block`, `binding` (the predictor), `margin` (`(; predictor, coefficient)`, the
+coefficient being the term), `level` (`nothing`) and `level_index` (the level's
+position in the grouping's level order, 1 for an ungrouped term), `term` (the
+basis function), `effect`, `name`, `target` (the weight's compiled frame: 0 on
+an RKBRMI; an SBBRMI term may compile each basis at its own `centeredness`),
+`scale = (; spectrum, sigma, length_scales, omega2, harmonic)` and
+`location = (;)`. `spectrum` is `:exp_quad` or `:periodic`; `sigma` and each of
+`length_scales` are `(; coordinate, lower, upper)`, `coordinate == 0` marking a
+known value (`lower == upper`); `omega2` holds the basis function's squared
+frequency per axis (`:exp_quad`), and `harmonic` its harmonic (`:periodic`).
 
 A `car` cell (`family = :car`, one per area; an `:icar` field's cells in its
 emitted `phi` order, a `:bym2` field's in sorted area order) has `cell`,
@@ -270,6 +314,9 @@ linear, unit, simplex, bounded)`; an ordinary block's is the single linear atom
 coordinates of Stan's `cholesky_factor_corr` free values, or the constant
 canonical partial correlations of a known correlation; both empty for one term)
 and `mixing` (per level, the coordinate of a Student-t level's `log w`, or empty).
+An HSGP block (one per term, per level of a grouped term): `block`, `family`
+(`:hsgp`), `binding` (the predictor), `term`, `level_index`, `n_basis`,
+`spectrum` and `target` (per basis function).
 A `car` block: `block`, `family` (`:car`), `binding` (the predictor), `term`,
 `type` (`:icar` or `:bym2`), `areas`, `target` (0). A `cdar` block: `block`,
 `family` (`:cdar`), `binding`, `term`, `n_groups`, `n_steps`, `target` (0).
@@ -302,6 +349,18 @@ term `k`, level `g`, control `c`, target `t`):
 - the compiled value `y = t * loc + (x[effect] - c * loc) * s^(t - c)`, and the
   log-Jacobian adds `(t - c) * log s`.
 
+An HSGP cell is centred on 0 at its spectral scale `s`: with target `t`, the
+compiled value `y = x[effect] * s^(t - c)`, and the log-Jacobian adds
+`(t - c) * log s`. Write `σ` and `ρ_j` for the constrained `sigma` and
+`length_scales[j]` (below; a known value is its `lower`), and
+`ℓ = log σ + Σ_a (log(ρ_a * sqrt(2π)) / 2 - ρ_a^2 * omega2[a] / 4)` over the axes
+`a` of `omega2` for `:exp_quad` (`ρ_a = ρ_1` for every axis when
+`length_scales` holds one), or
+`ℓ = log σ + (log 2 + log(besselix(harmonic, 1 / ρ_1^2))) / 2` for `:periodic`
+(`besselix(ν, z) = I_ν(z) * exp(-z)`, the scaled modified Bessel function).
+Then `log s = ℓ` while `ℓ > -110`, and `-150 + log(1 + exp(ℓ + 150))` below,
+a smooth floor that keeps `s^(t - c)` a normal Float64 at every control.
+
 A `car` or `cdar` cell is a scalar cell with target 0: with its location `loc`
 and scale `s`, `y = (x[effect] - c * loc) * s^(-c)` and the log-Jacobian adds
 `-c * log s`. Write `σ = constrain(x[sigma.coordinate])` and
@@ -323,16 +382,16 @@ coordinates are. `ranef_order = :learned` permutes, at restarting windows, the
 order of a correlated block's terms within a level; these rows describe the
 declared order, the default.
 
-An `SBBRMI` whose wrapper also adapts HSGP, exact-total or S2Z cells raises,
-naming them: their cells have their own scale and location forms and are not
-described here yet. Blocks the wrapper does not build raise as in
+An `SBBRMI` whose wrapper also adapts grouped HSGP level cells (`cor =`, or
+per-level scales), exact-total or S2Z cells raises, naming them: their cells
+have their own scale and location forms and are not described here yet. Blocks the wrapper does not build raise as in
 [`adaptive_centering_blocks`](@ref).
 """
 function adaptive_centering_cells end
 
 adaptive_centering_cells(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk);
-                         fields=false) =
-    _adaptive_centering_cells(rk, String.(unc_names); fields)
+                         hsgp=true, fields=false) =
+    _adaptive_centering_cells(rk, String.(unc_names); fields, hsgp)
 
 function adaptive_centering_cells(model, unc_names)
     names = String.(unc_names)
@@ -340,6 +399,6 @@ function adaptive_centering_cells(model, unc_names)
     isempty(other) || error(
         "adaptive_centering_cells: this model's adaptive centring also adapts ",
         join(other, ", "), ", whose cells are not described by these rows yet; ",
-        "random-effect, car and cdar cells are.")
+        "random-effect, HSGP basis-weight, car and cdar cells are.")
     _adaptive_centering_cells(model, names)
 end

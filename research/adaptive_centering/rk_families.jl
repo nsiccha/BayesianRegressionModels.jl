@@ -10,7 +10,8 @@
 #
 #     julia --project=test research/adaptive_centering/rk_families.jl [family...]
 #
-# Families: student_t, known, bounded, stratified, factor, mm, r2d2, car_bym2, cdar. Each runs 4 chains
+# Families: student_t, known, bounded, stratified, factor, mm, r2d2, car_bym2, cdar,
+# hsgp_mcycle, hsgp_grouped. Each runs 4 chains
 # through WarmupHMC's quorum sampler (`min_completed = 3`), 400 draws, for each
 # seed, plain and wrapped, and prints max R-hat, min bulk ESS over every
 # coordinate (RK layout frame), divergences and wall time.
@@ -72,9 +73,42 @@ function walk_panel(; seed=4, P=6, W=20, n=15)
     (; y, patch=string.("p", group), week=step, C=Matrix(1.0I, P, P))
 end
 
-const FAMILY_DATA = Dict(:car_bym2 => car_panel, :cdar => walk_panel)
+# The motorcycle acceleration data (`mcycle.csv`, 133 rows), both columns
+# standardized so the default HSGP priors are on the data's scale.
+function mcycle_data()
+    rows = [split(l, ',') for l in readlines(joinpath(@__DIR__, "mcycle.csv"))[2:end]]
+    times = parse.(Float64, getindex.(rows, 2))
+    accel = parse.(Float64, getindex.(rows, 3))
+    (; times=(times .- mean(times)) ./ std(times), accel=(accel .- mean(accel)) ./ std(accel))
+end
+
+# A data-rich grouped smooth: 4 groups, each its own curve on one axis, 80 rows
+# per group with noise sd 0.1, so each group's basis weights are pinned by its
+# data.
+function hsgp_panel(; seed=5, G=4, n=80)
+    rng = Xoshiro(seed)
+    phase = 2pi .* rand(rng, G)
+    group = repeat(1:G; inner=n)
+    x = repeat(collect(range(-2.0, 2.0; length=n)), G)
+    y = sin.(1.5 .* x .+ phase[group]) .+ 0.1 .* randn(rng, length(x))
+    (; y, x, g=string.("g", group))
+end
+
+const FAMILY_DATA = Dict(:car_bym2 => car_panel, :cdar => walk_panel,
+    :hsgp_mcycle => mcycle_data, :hsgp_grouped => hsgp_panel)
 
 const FAMILIES = Dict(
+    # One smooth over a noisy, data-rich axis: the HSGP basis weights' cells.
+    :hsgp_mcycle => df -> @brm(df, begin
+        mu ~ 1 + hsgp(times; k=20)
+        sigma ~ Exponential(1.0)
+        accel ~ Normal(mu, sigma)
+    end),
+    # One smooth per group, the weights of each level pinned by its rows.
+    :hsgp_grouped => df -> @brm(df, begin
+        mu ~ 1 + hsgp(x; k=10, by=g)
+        y ~ Normal(mu, 0.1)
+    end),
     # BYM2 areal field on a data-rich grid: theta cells centred on area totals.
     :car_bym2 => df -> @brm(df, begin
         mu ~ 1 + car(area; edges=(from, to), type=:bym2)
