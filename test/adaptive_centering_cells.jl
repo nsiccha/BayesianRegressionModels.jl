@@ -895,8 +895,9 @@ end
     end)
     @test value_plan(rk)
     @test [c.family for c in plan.cells] == vcat(fill(:ranef, 5), fill(:hsgp, 6 + 9))
-    hsgp = [b for b in plan.blocks if b.family === :hsgp]
-    @test sort([(b.binding, b.n_basis) for b in hsgp]) ==
+    # (Not named `hsgp`: a local of that name shadows `hsgp` in the `@brm` blocks below.)
+    hsgp_blocks = [b for b in plan.blocks if b.family === :hsgp]
+    @test sort([(b.binding, b.n_basis) for b in hsgp_blocks]) ==
           [(:course, 3), (:course, 3), (:course, 3), (:surface, 6)]
     # The floored length scale is a bounded sampled coordinate (lower > 0).
     surface = [c for c in plan.cells if c.family === :hsgp && c.binding === :surface]
