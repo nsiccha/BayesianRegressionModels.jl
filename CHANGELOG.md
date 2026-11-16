@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.332
+
+- `StatisticalPreparation.hsgp_basis` is type-stable for every argument shape:
+  one or more axes, `k` an integer, vector or tuple, a fixed `domain` or a
+  data-derived `c`, with or without `by`. Its results are unchanged bit for bit.
+  It now builds the basis from one flat matrix of per-axis sines, with no
+  `CartesianIndices` of a runtime tuple.
+- A `ReactiveKernels` kernel that calls `hsgp_basis(x...; k, domain)`,
+  `hsgp_sqrt_spd` and `hsgp_rho_floors` now translates through
+  `ReactiveKernels.js_source` (ReactiveKernels 0.1.274 or later), errors
+  included, so a page can recompute the basis when a slider moves the domain.
+- Its argument errors name the axis and the count instead of printing the
+  arguments: `axes have different lengths (axis 1 has 30 values, axis 2 has
+  29)`, ``` `k` must be positive, got 0 for axis 2 ```.
+- A bare `domain = (lo, hi)` with two or more axes now raises an
+  `ArgumentError` ("takes one (lo, hi) pair per axis") instead of a
+  `BoundsError`.
+- The test env pins ReactiveKernels 0.1.274 (`43b5aff7d`).
+
 ## 0.2.331
 
 - `adaptive_centering_problem(rk::RKBRMI, ...; hsgp_levels = true)` maps a

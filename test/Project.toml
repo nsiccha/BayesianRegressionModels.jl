@@ -446,4 +446,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # included, as Ordinal thresholds; Statistics.mean in JAX.
 # RK 0.1.263 / RKPPL 0.1.203: jax.grad of stopping-ratio ordinal evidence over
 # cell-computed thresholds (a counted loop to a padded length is a fori_loop).
-rev = "95d9b7a5ae130249cc0620aa80b1b0fe96f79734"
+# RK 0.1.274 (43b5aff7d, RKPPL 0.1.203 unchanged): js_source translates tuple
+# predicates, matrix literals, matrix writes and slices, so a kernel can call
+# StatisticalPreparation.hsgp_basis (test/hsgp_basis_js.jl).
+rev = "43b5aff7d210c34f28aff5b85f6be3709a7385f5"

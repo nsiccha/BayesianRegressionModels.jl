@@ -200,66 +200,144 @@ scale into the coefficient weights, and [`hsgp_rho_floors`](@ref) gives the
 smallest length scale the basis resolves. Use them with
 [`hsgp_effect`](@ref) or [`hsgp_grouped_effect`](@ref). For one length scale
 per axis, write the explicit statements documented under [`hsgp_effect`](@ref).
+
+`hsgp_basis` infers a concrete `(Matrix{Float64}, Matrix{Float64})` for every
+argument shape. A `ReactiveKernels` kernel that calls it with a fixed `domain`
+(with [`hsgp_sqrt_spd`](@ref) and [`hsgp_rho_floors`](@ref)) translates through
+`ReactiveKernels.js_source` (ReactiveKernels 0.1.274 or later), so a page can
+recompute the basis when a slider moves the domain; its errors (axes of different
+lengths, values outside the domain) are raised there too.
 """
 function hsgp_basis(axes_::AbstractVector{<:Real}...; k = 20, c = 1.5,
         domain = nothing, by = nothing)
+    # Type-stable for every argument shape, and built only from operations
+    # `ReactiveKernels.js_source` translates (RK 0.1.274+): concrete vectors and
+    # one flat matrix of per-axis sines, no `CartesianIndices` of a runtime
+    # tuple, error messages that interpolate only numbers.
     d = length(axes_)
     d >= 1 || throw(ArgumentError("hsgp_basis takes at least one axis"))
     n = length(first(axes_))
-    all(a -> length(a) == n, axes_) || throw(ArgumentError(
-        "hsgp_basis: axes have different lengths $(map(length, axes_))"))
-    K = Int.(_per_axis(k, d, :k))
-    all(>(0), K) || throw(ArgumentError(
-        "hsgp_basis: `k` must be positive, got $(repr(k))"))
-    fits = Vector{Tuple{Float64,Float64}}(undef, d)
+    for j in 2:d
+        length(axes_[j]) == n || throw(ArgumentError(
+            "hsgp_basis: axes have different lengths (axis 1 has $n values, " *
+            "axis $j has $(length(axes_[j])))"))
+    end
+    K = _hsgp_per_axis_int(k, d)
+    mu = Vector{Float64}(undef, d)
+    L = Vector{Float64}(undef, d)
     if domain === nothing
-        C = Float64.(_per_axis(c, d, :c))
-        all(>(1), C) || throw(ArgumentError(
-            "hsgp_basis: `c` must exceed 1, got $(repr(c))"))
+        C = _hsgp_per_axis_c(c, d)
         for j in 1:d
-            fits[j] = _hsgp_axis_fit(axes_[j], C[j], :hsgp_basis,
+            mu[j], L[j] = _hsgp_axis_fit(axes_[j], C[j], :hsgp_basis,
                 "hsgp_basis axis $j")
         end
     else
-        pairs = d == 1 && domain isa Tuple{Real,Real} ? [domain] :
-            _per_axis(domain, d, :domain)
+        _hsgp_check_domain_count(domain, d)
         for j in 1:d
-            lo, hi = Float64.(pairs[j])
+            lo, hi = _hsgp_domain_pair(domain, j)
             isfinite(lo) && isfinite(hi) && lo < hi || throw(ArgumentError(
                 "hsgp_basis: domain $j must be finite with lo < hi, got " *
-                repr(pairs[j])))
+                "($lo, $hi)"))
             all(v -> lo <= v <= hi, axes_[j]) || throw(ArgumentError(
                 "hsgp_basis: axis $j has values outside its domain " *
                 "($lo, $hi)"))
-            fits[j] = ((lo + hi) / 2, (hi - lo) / 2)
+            mu[j] = (lo + hi) / 2
+            L[j] = (hi - lo) / 2
         end
     end
     # Per-axis sines, shared with SB's `_brm_apply_hsgp` preparation:
-    # `inv(sqrt(L)) * sin(sqrt(lambda_k) * (x - mu + L))`.
-    cols = map(1:d) do j
-        mu, L = fits[j]
-        inv_sqrt_L = 1.0 / sqrt(L)
-        xs = Float64.(axes_[j])
-        [inv_sqrt_L .* sin.(sqrt(_hsgp_lambda(kk, L)) .* (xs .- mu .+ L))
-            for kk in 1:K[j]]
+    # `inv(sqrt(L)) * sin(sqrt(lambda_k) * (x - mu + L))`. Axis `j`'s mode `kk`
+    # is column `offsets[j] + kk` of `S`.
+    offsets = Vector{Int}(undef, d)
+    total = 0
+    for j in 1:d
+        offsets[j] = total
+        total += K[j]
     end
-    idx = vec(collect(CartesianIndices(Tuple(K))))
-    M = length(idx)
+    S = Matrix{Float64}(undef, n, total)
+    for j in 1:d
+        inv_sqrt_L = 1.0 / sqrt(L[j])
+        for kk in 1:K[j]
+            w = sqrt(_hsgp_lambda(kk, L[j]))
+            for i in 1:n
+                S[i, offsets[j] + kk] =
+                    inv_sqrt_L * sin(w * (Float64(axes_[j][i]) - mu[j] + L[j]))
+            end
+        end
+    end
+    # Tensor products in `CartesianIndices(K)` order (the first axis fastest),
+    # multiplied axis by axis as before, so every entry keeps its bits.
+    M = 1
+    for j in 1:d
+        M *= K[j]
+    end
     PHI = Matrix{Float64}(undef, n, M)
     lambda = Matrix{Float64}(undef, M, d)
-    for (b, I) in enumerate(idx)
-        col = copy(cols[1][I[1]])
-        for j in 2:d
-            col .*= cols[j][I[j]]
-        end
-        PHI[:, b] = col
+    modes = Vector{Int}(undef, d)
+    for b in 1:M
+        r = b - 1
         for j in 1:d
-            lambda[b, j] = _hsgp_lambda(I[j], fits[j][2])
+            modes[j] = r % K[j] + 1
+            r = r ÷ K[j]
+            lambda[b, j] = _hsgp_lambda(modes[j], L[j])
+        end
+        for i in 1:n
+            v = S[i, offsets[1] + modes[1]]
+            for j in 2:d
+                v *= S[i, offsets[j] + modes[j]]
+            end
+            PHI[i, b] = v
         end
     end
     by === nothing && return (PHI, lambda)
     return (_grouped_basis(PHI, by), lambda)
 end
+
+# `hsgp_basis`'s per-axis arguments as concrete vectors: a scalar applies to
+# every axis, a tuple or vector gives one entry per axis.
+function _hsgp_per_axis_int(k, d::Int)
+    K = Vector{Int}(undef, d)
+    if k isa Integer
+        fill!(K, Int(k))
+    else
+        length(k) == d || throw(ArgumentError(
+            "`k` takes one value or one per axis ($d), got $(length(k)) values"))
+        for j in 1:d
+            K[j] = Int(k[j])
+        end
+    end
+    for j in 1:d
+        K[j] > 0 || throw(ArgumentError(
+            "hsgp_basis: `k` must be positive, got $(K[j]) for axis $j"))
+    end
+    return K
+end
+function _hsgp_per_axis_c(c, d::Int)
+    C = Vector{Float64}(undef, d)
+    if c isa Real
+        fill!(C, Float64(c))
+    else
+        length(c) == d || throw(ArgumentError(
+            "`c` takes one value or one per axis ($d), got $(length(c)) values"))
+        for j in 1:d
+            C[j] = Float64(c[j])
+        end
+    end
+    for j in 1:d
+        C[j] > 1 || throw(ArgumentError(
+            "hsgp_basis: `c` must exceed 1, got $(C[j]) for axis $j"))
+    end
+    return C
+end
+# One `(lo, hi)` for one axis, or one pair per axis.
+_hsgp_check_domain_count(domain::Tuple{Real,Real}, d::Int) = d == 1 ||
+    throw(ArgumentError("`domain` takes one (lo, hi) pair per axis ($d), got one pair"))
+_hsgp_check_domain_count(domain, d::Int) = length(domain) == d ||
+    throw(ArgumentError("`domain` takes one (lo, hi) pair per axis ($d), got " *
+                        "$(length(domain))"))
+_hsgp_domain_pair(domain::Tuple{Real,Real}, _) =
+    (Float64(domain[1]), Float64(domain[2]))
+_hsgp_domain_pair(domain, j::Int) = (Float64(domain[j][1]), Float64(domain[j][2]))
 
 # The basis repeated per group level, zero outside the group, group
 # fastest: column `(m - 1) * G + g` is `PHI[:, m]` on the rows of level `g`.

@@ -456,7 +456,11 @@ const PINS = [
     # `jax.grad`: a counted `while` to a padded row length becomes a
     # `fori_loop` (RK snag jax-source-of-an-6bfaf24a;
     # test/ordinal_explicit_range.jl).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "95d9b7a5ae130249cc0620aa80b1b0fe96f79734"),
+    # 43b5aff7d (RK 0.1.274; RKPPL 0.1.203 and its sources unchanged):
+    # `js_source` translates tuple predicates, matrix literals, matrix writes
+    # and slices, so a kernel can call `StatisticalPreparation.hsgp_basis`
+    # (BRM todo 0ggll1f; test/hsgp_basis_js.jl).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "43b5aff7d210c34f28aff5b85f6be3709a7385f5"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
