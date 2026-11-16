@@ -251,7 +251,8 @@ function _brm_svi_consistent(run::_BRMSVIRun, t, c)
             length(run.unit_entropy) == N &&
         run.sampling.method == c.unit_sampling &&
         run.unit_gradient_calls ==
-            sum(i -> run.sampling.visits[i] * _brm_svi_unit_calls(q, i, c), 1:N; init=0) &&
+            sum(i -> run.sampling.visits[i] * (_brm_svi_unit_calls(q, i, c) +
+                _brm_svi_collapsed_unit_calls(run.sites, i)), 1:N; init=0) &&
         sum(run.sampling.draws) == c.batch_size * run.iteration &&
         _brm_svi_stationarity_consistent(run, c)
 end
