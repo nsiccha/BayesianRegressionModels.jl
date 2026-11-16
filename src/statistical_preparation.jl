@@ -204,14 +204,14 @@ per axis, write the explicit statements documented under [`hsgp_effect`](@ref).
 `hsgp_basis` infers a concrete `(Matrix{Float64}, Matrix{Float64})` for every
 argument shape. A `ReactiveKernels` kernel that calls it with a fixed `domain`
 (with [`hsgp_sqrt_spd`](@ref) and [`hsgp_rho_floors`](@ref)) translates through
-`ReactiveKernels.js_source` (ReactiveKernels 0.1.274 or later), so a page can
+`ReactiveKernels.js_source` (ReactiveKernels 0.1.289 or later), so a page can
 recompute the basis when a slider moves the domain; its errors (axes of different
 lengths, values outside the domain) are raised there too.
 """
 function hsgp_basis(axes_::AbstractVector{<:Real}...; k = 20, c = 1.5,
         domain = nothing, by = nothing)
     # Type-stable for every argument shape, and built only from operations
-    # `ReactiveKernels.js_source` translates (RK 0.1.274+): concrete vectors and
+    # `ReactiveKernels.js_source` translates (RK 0.1.289+): concrete vectors and
     # one flat matrix of per-axis sines, no `CartesianIndices` of a runtime
     # tuple, error messages that interpolate only numbers.
     d = length(axes_)
