@@ -121,7 +121,7 @@ _brm_svi_laplace_fit(save,x,previous,method;kwargs...)=throw(ArgumentError(
 function _brm_svi_laplace_dispatch(save,x,previous,method;kwargs...)
     unsupported=intersect(keys(kwargs),(:batch_size,:unit_step,:unit_curvature,:unit_scale,
         :polish_lr,:window,:patience,:min_windows,:polish_windows,:trend_windows,:threads,
-        :unit_reoptimize))
+        :unit_reoptimize,:sparse_globals))
     isempty(unsupported) || throw(ArgumentError(
         "GaussianBlockLaplace: whole-window fixed-budget optimization does not use " *
         join(string.(unsupported),", ") * "; omit these options"))
