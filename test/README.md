@@ -17,6 +17,23 @@ that groups by its input names the caller's columns for its fit-role inputs.
 Run it with
 `julia --startup-file=no --project=test test/rk_descriptor.jl`.
 
+`hsgp_basis_js.jl` checks `StatisticalPreparation.hsgp_basis`:
+- **Exactness.** It equals bit for bit an independent oracle, SB's per-axis
+  `_brm_apply_hsgp` tensored in `CartesianIndices(k)` order. This covers one to
+  three axes, `k` as an integer, vector or tuple, and a fixed `domain` or a
+  data-derived `c`.
+- **Type stability.** The keyword body's argument and local slots and return
+  type are concrete on the domain, data and `by` paths. A negative control
+  checks that the removed runtime-rank index array is still detected.
+- **Errors.** Its argument errors name the axis and the count.
+- **JavaScript.** With ReactiveKernels 0.1.289+ and Node on the PATH, a kernel
+  that computes the basis, its spectral weights, its length-scale floors and a
+  field through `ReactiveKernels.js_source` agrees with native `prepare` under
+  `js_run`. This includes a moved slice and the errors native raises: a value
+  outside the domain, axes of different lengths and `lo > hi`.
+
+Run it with `julia --startup-file=no --project=test test/hsgp_basis_js.jl`.
+
 `rk_jax_inputs.jl` checks `rk_bound_data(rk, source)` on macro and runtime-source
 models: scalar constants read by a ragged plate, ordinary scalar inputs, array
 constants, untranslated data-only definitions, and frozen/fresh/data-free
