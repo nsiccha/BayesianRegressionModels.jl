@@ -1,7 +1,8 @@
 # Adaptive partial centring of RKBRMI HSGP weights (todo 0nsdowt, increments 5
 # and 6): `adaptive_centering_problem(rk, ...)` adapts each basis weight's cell
-# at the spectral scale RK's own program computes, `<decl>.spectral_scale`, and
-# maps a grouped term's correlated or per-level-scaled weights across its levels.
+# at the spectral scale RK's own program computes, `<decl>.spectral_scale`, and,
+# under `hsgp_levels = true`, maps a grouped term's correlated or per-level-scaled
+# weights across its levels.
 #
 #     julia --project=test test/rk_adaptive_hsgp_centering.jl [filter...]
 using Test, BayesianRegressionModels, Distributions, Random, LinearAlgebra
@@ -193,6 +194,7 @@ end
         rk = RKBRMI(brmi)
         @test isempty(BRM._rk_adaptive_hsgp_blocks(rk))
         @test length(BRM._rk_adaptive_hsgp_level_blocks(rk)) == 1
+        @test BRM._rk_has_hsgp_level_terms(rk)
     end
     rk = RKBRMI(@brm(data, begin
         a ~ Normal(0, 1)
@@ -202,6 +204,7 @@ end
     end))
     @test isempty(BRM._rk_adaptive_hsgp_blocks(rk))
     @test isempty(BRM._rk_adaptive_hsgp_level_blocks(rk))
+    @test !BRM._rk_has_hsgp_level_terms(rk)
     # With nothing else to adapt, the wrapper says so.
     @test_throws r"no random-effect block or HSGP" adaptive_centering_problem(rk,
         rk_logdensity_problem(rk; ad_backend=AD), AD)
@@ -353,7 +356,8 @@ end
         problem = rk_logdensity_problem(rk; ad_backend=AD)
         for seed in (51, 52)
             controls = rand(Xoshiro(seed), n)
-            adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+            adaptive = adaptive_centering_problem(rk, problem, AD; hsgp_levels=true,
+                                                  centeredness=controls)
             rows = adaptive_centering_controls(adaptive, rk)
             @test length(rows) == n
             @test all(r -> r.family === :hsgp && r.level !== nothing, rows)
@@ -375,7 +379,10 @@ end
             end
             @test gradient ≈ fd rtol=1e-5 atol=1e-5
         end
-        # `hsgp = false` keeps the level weights in their emitted frame.
+        # The default `hsgp_levels = false` keeps the level weights in their
+        # emitted frame, and with nothing else to adapt the wrapper names the keyword.
+        @test_throws r"no random-effect block.*hsgp_levels = true" adaptive_centering_problem(
+            rk, problem, AD)
         @test_throws r"no random-effect block" adaptive_centering_problem(rk, problem, AD;
             hsgp=false)
     end
@@ -389,22 +396,32 @@ end
         sigma ~ Exponential(1.0)
         y ~ Normal(mu, sigma)
     end)
-    rows = adaptive_centering_controls(adaptive_centering_problem(rk,
-        rk_logdensity_problem(rk; ad_backend=AD), AD), rk)
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    rows = adaptive_centering_controls(adaptive_centering_problem(rk, problem, AD;
+        hsgp_levels=true), rk)
     # Six random-effect levels, the ungrouped term's two weights, then the
     # grouped term's 3 levels × 3 bases.
     @test [r.family for r in rows] == vcat(fill(:ranef, 6), fill(:hsgp, 2 + 9))
     @test all(r -> r.level === nothing, rows[7:8])
     @test all(r -> r.level !== nothing, rows[9:end])
+    # By default the grouped term keeps its emitted frame; the others adapt.
+    rows = adaptive_centering_controls(adaptive_centering_problem(rk, problem, AD), rk)
+    @test [r.family for r in rows] == vcat(fill(:ranef, 6), fill(:hsgp, 2))
 end
 
-@stestset "a multigroup coherence raises under hsgp = true" begin
+@stestset "a multigroup coherence raises under hsgp_levels = true" begin
     data = hsgp_data()
     rk = RKBRMI(@brm(data, begin
         Omega ~ LKJCholesky(3, 2.0)
         mu ~ 1 + hsgp(x; k=4, by=g, cor=multigroup(Omega, 0.7))
         y ~ Normal(mu, 0.2)
     end))
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
     @test_throws r"cor = multigroup" BRM._rk_adaptive_hsgp_level_blocks(rk)
+    @test_throws r"cor = multigroup" adaptive_centering_problem(rk, problem, AD;
+        hsgp_levels=true)
     @test isempty(BRM._rk_adaptive_hsgp_blocks(rk))
+    # The default passes the term through: nothing is left to adapt.
+    @test_throws r"no random-effect block.*hsgp_levels = true" adaptive_centering_problem(
+        rk, problem, AD)
 end

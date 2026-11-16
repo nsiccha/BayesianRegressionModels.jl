@@ -105,8 +105,9 @@ columns, scalar or correlated, `||` blocks included.
 A block whose levels are correlated (`gr(g; cor=...)`) raises, as on SBBRMI.
 HSGP basis weights, `car`, `cdar` and `gmrf` fields, cell latents and
 completions are not random-effect blocks and are not returned here; the
-wrapper adapts HSGP weights, and `car` and `cdar` cells under `fields = true`,
-as cells of their own ([`adaptive_centering_cells`](@ref)).
+wrapper adapts HSGP basis weights, grouped HSGP level cells under
+`hsgp_levels = true`, and `car` and `cdar` cells under `fields = true`, as cells
+of their own ([`adaptive_centering_cells`](@ref)).
 """
 function adaptive_centering_blocks(rk::RKBRMI,
         unc_names=_rk_layout_coordinate_names(rk))
@@ -653,8 +654,9 @@ end
 # and is carried as coordinate 0 at both bounds, as on SBBRMI.
 #
 # A grouped term whose levels are correlated (`cor=`) or whose scales a
-# hyper-predictor sets per level is mapped across its levels instead
-# (`_rk_adaptive_hsgp_level_blocks`, below). A term whose hyperparameter is a
+# hyper-predictor sets per level has no basis cells: under `hsgp_levels = true`
+# it is mapped across its levels instead (`_rk_adaptive_hsgp_level_blocks`,
+# below), and otherwise keeps its emitted frame. A term whose hyperparameter is a
 # model value (`sd(lp, hsgp(x)) = exp(a)`), whose scale no fixed bound
 # describes, keeps its emitted frame: its weights pass through unchanged.
 
@@ -718,9 +720,8 @@ function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
     bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
     out = _HSGPAdaptiveCenteringBlock[]
     for r in _rk_coordinate_records(rk.plan)
-        r.kind === :hsgp || continue
+        r.kind === :hsgp && !_rk_hsgp_level_mapped(rk, r) || continue
         o = _rk_adaptive_hsgp_term(rk, r.declaration).options
-        r.grouped && (r.level_correlation || !isempty(o.hyper_plans)) && continue
         periodic = get(o, :cov, :exp_quad) === :periodic
         modes = Int.(rk.plan.columns[o.modes])
         B = periodic ? 2 * only(modes) : prod(modes)
@@ -832,6 +833,16 @@ function _rk_adaptive_hsgp_level_scale(pos, bounds, transforms, names, r, o, hyp
                     sd_upper, z)
 end
 
+# A grouped HSGP term whose levels are correlated (`cor =`) or scaled per level
+# (a hyper-predictor): the wrapper maps it across its levels under
+# `hsgp_levels = true` (`_rk_adaptive_hsgp_level_blocks`) and never builds basis
+# cells for it (`_rk_adaptive_hsgp_blocks`).
+_rk_hsgp_level_mapped(rk::RKBRMI, r) = r.kind === :hsgp && r.grouped &&
+    (r.level_correlation ||
+     !isempty(_rk_adaptive_hsgp_term(rk, r.declaration).options.hyper_plans))
+_rk_has_hsgp_level_terms(rk::RKBRMI) =
+    any(r -> _rk_hsgp_level_mapped(rk, r), _rk_coordinate_records(rk.plan))
+
 """
     _rk_adaptive_hsgp_level_blocks(rk::RKBRMI, unc_names=<the RK layout names>)
 
@@ -850,9 +861,8 @@ function _rk_adaptive_hsgp_level_blocks(rk::RKBRMI,
     bounds = _rk_adaptive_scale_bounds(rk, transforms)
     out = _HSGPLevelAdaptiveCenteringBlock[]
     for r in _rk_coordinate_records(rk.plan)
-        r.kind === :hsgp && r.grouped || continue
+        _rk_hsgp_level_mapped(rk, r) || continue
         o = _rk_adaptive_hsgp_term(rk, r.declaration).options
-        r.level_correlation || !isempty(o.hyper_plans) || continue
         decl = r.declaration
         what = "BRM adaptive centering on RKBRMI: grouped HSGP `$decl` on `$(r.predictor)`"
         lc = get(o, :level_cor, nothing)
@@ -861,12 +871,12 @@ function _rk_adaptive_hsgp_level_blocks(rk::RKBRMI,
             "whose level correlation changes with each basis frequency (or whose ",
             "weights sit on a shared grid of inducing rows), so a per-basis level map ",
             "with one correlation factor does not describe it. Adaptive centering of ",
-            "such a term is not implemented; pass `hsgp = false` to keep every HSGP ",
-            "weight in its emitted frame.")
+            "such a term is not implemented; pass `hsgp_levels = false` (the default) ",
+            "to keep its weights in their emitted frame.")
         get(o, :cov, :exp_quad) === :exp_quad || error(
             "$what is periodic with correlated or predicted levels; its level cells ",
-            "are not built. Pass `hsgp = false` to keep every HSGP weight in its ",
-            "emitted frame.")
+            "are not built. Pass `hsgp_levels = false` (the default) to keep its ",
+            "weights in their emitted frame.")
         modes = Int.(rk.plan.columns[o.modes])
         B, G = prod(modes), length(r.levels)
         weight_names = [string(decl, ".", r.locals.weights, ".", g, ".", b)

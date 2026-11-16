@@ -245,7 +245,7 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false, h
 end
 
 """
-    adaptive_centering_cells(rk::RKBRMI, unc_names=<the RK layout names>; hsgp=true, fields=false) -> (; blocks, cells)
+    adaptive_centering_cells(rk::RKBRMI, unc_names=<the RK layout names>; hsgp=true, hsgp_levels=false, fields=false) -> (; blocks, cells)
     adaptive_centering_cells(model, unc_names) -> (; blocks, cells)
 
 The cells [`adaptive_centering_problem`](@ref) adapts for `model` (an
@@ -383,17 +383,19 @@ order of a correlated block's terms within a level; these rows describe the
 declared order, the default.
 
 A model whose wrapper also adapts grouped HSGP level cells (`cor =`, or
-per-level scales; an RKBRMI's unless `hsgp = false`), or an `SBBRMI`'s exact-total
-or S2Z cells, raises, naming them: their cells have their own scale and location
-forms and are not described here yet. Blocks the wrapper does not build raise as in
+per-level scales; an SBBRMI's always, an RKBRMI's under `hsgp_levels = true`), or
+an `SBBRMI`'s exact-total or S2Z cells, raises, naming them: their cells have their
+own scale and location forms and are not described here yet. Under an RKBRMI's
+default `hsgp_levels = false` such a term keeps its emitted frame, so it has no
+cells. Blocks the wrapper does not build raise as in
 [`adaptive_centering_blocks`](@ref).
 """
 function adaptive_centering_cells end
 
 function adaptive_centering_cells(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk);
-                                  hsgp=true, fields=false)
+                                  hsgp=true, hsgp_levels=false, fields=false)
     names = String.(unc_names)
-    _adaptive_cells_refuse(hsgp && !isempty(_rk_adaptive_hsgp_level_blocks(rk, names)) ?
+    _adaptive_cells_refuse(hsgp_levels && !isempty(_rk_adaptive_hsgp_level_blocks(rk, names)) ?
         ["grouped HSGP level cells"] : String[])
     _adaptive_centering_cells(rk, names; fields, hsgp)
 end

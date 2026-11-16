@@ -236,8 +236,10 @@ function main(families)
         df = get(FAMILY_DATA, family, panel)()
         rk = RKBRMI(FAMILIES[family](df))
         problem = rk_logdensity_problem(rk; ad_backend=AD)
-        # Field families adapt their car / cdar cells only under `fields = true`.
-        kw = family in (:car_bym2, :cdar) ? (; fields=true) : (;)
+        # Field families adapt their car / cdar cells only under `fields = true`,
+        # grouped HSGP level cells only under `hsgp_levels = true`.
+        kw = family in (:car_bym2, :cdar) ? (; fields=true) :
+             family in (:hsgp_cor, :hsgp_hyper) ? (; hsgp_levels=true) : (;)
         cells = length(adaptive_centering_controls(
             adaptive_centering_problem(rk, problem, AD; kw...), rk))
         println("== $family: $cells cells, ",

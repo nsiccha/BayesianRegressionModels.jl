@@ -12,6 +12,34 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.331
+
+- `adaptive_centering_problem(rk::RKBRMI, ...; hsgp_levels = true)` maps a
+  grouped squared-exponential HSGP term across its levels, as the SBBRMI wrapper
+  does. It applies to terms whose levels are correlated (`cor = Omega`, a
+  sampled `LKJCholesky` or a known matrix) or scaled per level (a hyper-predictor
+  such as `log(sd(hsgp(x))) ~ 1 + (1 | g)`, or the same for `length_scale`).
+  Basis column `b`'s level weights form one correlated block with factor
+  `diag(s_b) * L`, read from RK's own coordinates, and each level is centred on
+  its conditional mean given the earlier levels. These cells come after the
+  basis-weight cells (pair order: term, basis, level).
+
+  The new keyword is **off by default**, so such a term keeps its emitted frame,
+  as in 0.2.330. Measured with 6 seeds each
+  (`research/adaptive_centering/rk_families.jl`, families `hsgp_cor` and
+  `hsgp_hyper`) on data-rich panels of 4 related curves, where the plain RK
+  density already mixed (minimum bulk ESS 114-258): the level cells lowered the
+  minimum bulk ESS in 12 of 12 seeds, to 43-143. In 11 of 12 the slowest
+  coordinate was the intercept or a level's first basis weight.
+
+  Under `hsgp_levels = true`, a `cor = multigroup(...)` coherence and a periodic
+  term with correlated or predicted levels raise. Under the default they pass
+  through.
+- `adaptive_centering_cells(rk; hsgp_levels = false)` takes the same keyword.
+  Under `hsgp_levels = true`, a model with level-mapped terms raises, naming
+  "grouped HSGP level cells", as an SBBRMI model does: their rows are not
+  described yet.
+
 ## 0.2.330
 
 - `adaptive_centering_problem(rk::RKBRMI, ...)` adapts HSGP basis weights, as

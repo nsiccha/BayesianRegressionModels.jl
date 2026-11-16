@@ -630,13 +630,15 @@ end
     @test [c.family for c in plan.cells] == vcat(fill(:ranef, 5), fill(:hsgp, 4))
     _, plan, _ = rk_parity(brmi; hsgp=false)
     @test all(c -> c.family === :ranef, plan.cells) && length(plan.cells) == 5
-    # A term mapped across its levels has cells these rows do not describe yet.
+    # A term mapped across its levels (`hsgp_levels = true`) has cells these rows
+    # do not describe yet; by default it keeps its emitted frame and has none.
     rk = RKBRMI(@brm data begin
         Omega ~ LKJCholesky(3, 2.0)
         mu ~ 1 + hsgp(x; k=3, by=g, cor=Omega) + (1 | u)
         y ~ Normal(mu, 0.3)
     end)
-    @test_throws r"grouped HSGP level cells" adaptive_centering_cells(rk)
+    @test_throws r"grouped HSGP level cells" adaptive_centering_cells(rk; hsgp_levels=true)
+    @test all(c -> c.family === :ranef, adaptive_centering_cells(rk).cells)
     @test all(c -> c.family === :ranef, adaptive_centering_cells(rk; hsgp=false).cells)
 end
 
