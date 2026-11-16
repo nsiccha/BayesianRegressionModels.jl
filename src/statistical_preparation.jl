@@ -335,7 +335,7 @@ _hsgp_check_domain_count(domain::Tuple{Real,Real}, d::Int) = d == 1 ||
 _hsgp_check_domain_count(domain, d::Int) = length(domain) == d ||
     throw(ArgumentError("`domain` takes one (lo, hi) pair per axis ($d), got " *
                         "$(length(domain))"))
-_hsgp_domain_pair(domain::Tuple{Real,Real}, _) =
+_hsgp_domain_pair(domain::Tuple{Real,Real}, ::Int) =
     (Float64(domain[1]), Float64(domain[2]))
 _hsgp_domain_pair(domain, j::Int) = (Float64(domain[j][1]), Float64(domain[j][2]))
 
