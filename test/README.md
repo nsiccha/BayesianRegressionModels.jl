@@ -17,6 +17,23 @@ that groups by its input names the caller's columns for its fit-role inputs.
 Run it with
 `julia --startup-file=no --project=test test/rk_descriptor.jl`.
 
+`hsgp_basis_js.jl` checks `StatisticalPreparation.hsgp_basis`:
+- **Exactness.** It equals bit for bit an independent oracle, SB's per-axis
+  `_brm_apply_hsgp` tensored in `CartesianIndices(k)` order. This covers one to
+  three axes, `k` as an integer, vector or tuple, and a fixed `domain` or a
+  data-derived `c`.
+- **Type stability.** The keyword body's argument and local slots and return
+  type are concrete on the domain, data and `by` paths. A negative control
+  checks that the removed runtime-rank index array is still detected.
+- **Errors.** Its argument errors name the axis and the count.
+- **JavaScript.** With ReactiveKernels 0.1.289+ and Node on the PATH, a kernel
+  that computes the basis, its spectral weights, its length-scale floors and a
+  field through `ReactiveKernels.js_source` agrees with native `prepare` under
+  `js_run`. This includes a moved slice and the errors native raises: a value
+  outside the domain, axes of different lengths and `lo > hi`.
+
+Run it with `julia --startup-file=no --project=test test/hsgp_basis_js.jl`.
+
 `rk_jax_inputs.jl` checks `rk_bound_data(rk, source)` on macro and runtime-source
 models: scalar constants read by a ragged plate, ordinary scalar inputs, array
 constants, untranslated data-only definitions, and frozen/fresh/data-free
@@ -2324,6 +2341,19 @@ inputs and Python stderr.
 RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_models.jl
 ```
 
+A prepared value is a JAX pytree, not always one array: ReactiveKernels passes
+an array of tuples or records as the tuple of its columns, which can differ in
+shape or be `None`. The driver records each leaf's shape in the value's own
+structure (`[3]` for one array, `[[3], [3, 2], nothing]` for such a tuple) and
+then evaluates the functions. `jax_module_driver_pytree.jl` checks this on a
+hand-written module (two padded vector fields, a number field, their lengths
+with `None`) against an independent Julia density and gradient. It needs only
+JSON and `RK_JAX_PYTHON`, not ReactiveKernels.
+
+```sh
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/jax_module_driver_pytree.jl
+```
+
 The file requires ReactiveKernels' JAX lowering as it landed on RK main
 (RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `1c40ad337`) and refuses
 to run below it. The CDF-based laws, jit with the prepared data traced as
@@ -2705,6 +2735,13 @@ law calls a function the build module does not bind (`logsumexp`): a leaf named
 from `entry`, and a law defined in the consumer's module bound as a child
 graph. Each matches an independent mixture density with ordinary Reverse
 gradients and printed source replay.
+`rk_rebuild_types.jl` checks that fresh `RKBRMI` builds of one model (data 1,
+data 2, data 1 again) share one `rk_logdensity_problem` sampler type when the
+observation law calls a `const` branch kernel inside a data-bound arm: by
+default for data taking the same arms, under `branch_arms = :all` for data
+taking others, with values and gradients against the law written out by hand.
+It fails on ReactiveKernels 0.1.289, where every build got a new type (snag
+`rk-logdensity-pr-b8b1cc36`; fixed in ReactiveKernels 0.1.307 and 0.1.308).
 `rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
 grouped argument collection, explicit ragged joins, empty cells, broadcasting,
 elementwise argument expressions and unchanged data ports. Each case checks

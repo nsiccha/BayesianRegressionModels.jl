@@ -12,6 +12,39 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.335
+
+- `adaptive_centering_cells(rk::RKBRMI)` and `adaptive_centering_problem(rk::RKBRMI,
+  ...)` build HSGP cells (0.2.330, and `hsgp_levels = true`'s level cells) and
+  `fields = true`'s `car` cells for a model whose value statements combine its
+  formulas (`level = f[site] + g`, `mu = level + course`), which RKBRMI plans as
+  values. Such a model raised `type _RKValuePlan has no field predictors` once
+  either reached a term: the term lookup read only a formula-only model's plan.
+  Formula-only models are unchanged.
+
+## 0.2.334
+
+- `StatisticalPreparation.hsgp_basis` is type-stable for every argument shape:
+  one or more axes, `k` an integer, vector or tuple, a fixed `domain` or a
+  data-derived `c`, with or without `by`. Its results are unchanged bit for bit.
+  It now builds the basis from one flat matrix of per-axis sines, with no
+  `CartesianIndices` of a runtime tuple.
+- A `ReactiveKernels` kernel that calls `hsgp_basis(x...; k, domain)`,
+  `hsgp_sqrt_spd` and `hsgp_rho_floors` now translates through
+  `ReactiveKernels.js_source` (ReactiveKernels 0.1.289 or later), errors
+  included, so a page can recompute the basis when a slider moves the domain.
+- Its argument errors name the axis and the count instead of printing the
+  arguments: `axes have different lengths (axis 1 has 30 values, axis 2 has
+  29)`, ``` `k` must be positive, got 0 for axis 2 ```.
+- A bare `domain = (lo, hi)` with two or more axes now raises an
+  `ArgumentError` ("takes one (lo, hi) pair per axis") instead of a
+  `BoundsError`.
+- The ReactiveKernels compatibility floor is 0.1.289 and the test environment
+  pins its landed commit `239c484a`. This includes JavaScript tuple length,
+  nested tuple literals, numeric vector `fill!`, keyword-local snapshots and
+  Julia's Float64 spelling in error messages;
+  the nested ReactiveKernelsPPL package is 0.1.204.
+
 ## 0.2.333
 
 - `brm_svi_fit(...; sparse_globals = :collapsed)` updates the sparse globals (the
