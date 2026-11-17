@@ -73,10 +73,68 @@ def _brm_fit_levels_np(source):
     return levels
 
 
+def _rk_dict_key(x):
+    if isinstance(x, tuple):
+        return (1, tuple(map(_rk_dict_key, x)))
+    if isinstance(x, np.ndarray):
+        return (2, x.shape, tuple(map(_rk_dict_key, x.ravel(order="F"))))
+    if isinstance(x, (complex, np.complexfloating)):
+        if x.imag == 0 and not np.signbit(x.imag):
+            return _rk_dict_key(x.real)
+        return (3, _rk_dict_key(x.real), _rk_dict_key(x.imag))
+    if isinstance(x, (float, np.floating)):
+        if np.isnan(x):
+            return (4,)
+        if x == 0 and np.signbit(x):
+            return (5,)
+    return (0, x)
+
+class _RKDict:
+    def __init__(self, pairs=()):
+        self.data = {}
+        for key, value in pairs:
+            self[key] = value
+
+    def __len__(self):
+        return len(self.data)
+
+    def __contains__(self, key):
+        return _rk_dict_key(key) in self.data
+
+    def __getitem__(self, key):
+        return self.data[_rk_dict_key(key)][1]
+
+    def __setitem__(self, key, value):
+        self.data[_rk_dict_key(key)] = (key, value)
+
+    def get(self, key, default):
+        item = self.data.get(_rk_dict_key(key))
+        return default if item is None else item[1]
+
+    def setdefault(self, key, default):
+        return self.data.setdefault(_rk_dict_key(key), (key, default))[1]
+
+    def pop(self, key, default):
+        item = self.data.pop(_rk_dict_key(key), None)
+        return default if item is None else item[1]
+
+    def items(self):
+        return self.data.values()
+
+    def keys(self):
+        return (item[0] for item in self.items())
+
+    def values(self):
+        return (item[1] for item in self.items())
+
+    def copy(self):
+        return _RKDict(self.items())
+
+
 def _brm_level_indices_np(labels, source):
     value = _brm_fit_levels_np(source)
     levels = value
-    lookup = {}
+    lookup = _RKDict()
     for k in range(1, len(levels) + 1):
         lookup[levels[k - 1]] = k
     indices = np.zeros((len(labels),), dtype=np.int64)
