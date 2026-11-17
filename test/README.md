@@ -2341,6 +2341,19 @@ inputs and Python stderr.
 RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_models.jl
 ```
 
+A prepared value is a JAX pytree, not always one array: ReactiveKernels passes
+an array of tuples or records as the tuple of its columns, which can differ in
+shape or be `None`. The driver records each leaf's shape in the value's own
+structure (`[3]` for one array, `[[3], [3, 2], nothing]` for such a tuple) and
+then evaluates the functions. `jax_module_driver_pytree.jl` checks this on a
+hand-written module (two padded vector fields, a number field, their lengths
+with `None`) against an independent Julia density and gradient. It needs only
+JSON and `RK_JAX_PYTHON`, not ReactiveKernels.
+
+```sh
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/jax_module_driver_pytree.jl
+```
+
 The file requires ReactiveKernels' JAX lowering as it landed on RK main
 (RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `1c40ad337`) and refuses
 to run below it. The CDF-based laws, jit with the prepared data traced as

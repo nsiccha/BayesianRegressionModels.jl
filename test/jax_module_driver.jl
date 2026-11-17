@@ -79,6 +79,21 @@ def enc(x):
     flat = [(v if math.isfinite(v) else repr(v)) for v in a.astype(np.float64).flatten(order="F").tolist()]
     return {"shape": list(a.shape), "data": flat, "dtype": str(a.dtype)}
 
+# A prepared value is not always one array: an array of tuples or records is
+# the tuple of its columns (RK `_rk_columns_np`), which can differ in shape or
+# be `None`, and `np.shape` of such a tuple raises. Each array's shape is
+# recorded in the value's own structure, walked like `enc`: `[3]` for one
+# array, `[[3], [3, 2], None]` for such a tuple. A `StaticInt` (an `int` that
+# JAX treats as a pytree node with no children) is a leaf of shape `[]`.
+def shapes(x):
+    if x is None:
+        return None
+    if isinstance(x, dict):
+        return {str(k): shapes(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [shapes(v) for v in x]
+    return list(np.shape(x))
+
 def untranslated(u):
     pairs = u.items() if isinstance(u, dict) else ((x, "") for x in u)
     return {str(k): str(v) for k, v in pairs}
@@ -123,7 +138,7 @@ for data, points in zip(DATASETS, POINTS):
     # (brm-use: `potential = lambda u: -m.log_density(u, **prepared)`).
     jit = {f: jax.jit(lambda u, f=f: getattr(m, f)(u, **prepared)) for f in FUNCS + ["constrain"]}
     grad = jax.jit(jax.grad(lambda u: m.log_density(u, **prepared)))
-    r = {"prepared": {k: list(np.shape(v)) for k, v in prepared.items()}, "called": called,
+    r = {"prepared": {k: shapes(v) for k, v in prepared.items()}, "called": called,
          "dimension": int(m.dimension(prepared)) if hasattr(m, "dimension") else None, "points": []}
     for u in points:
         u = jnp.asarray(u, dtype=jnp.float64)
