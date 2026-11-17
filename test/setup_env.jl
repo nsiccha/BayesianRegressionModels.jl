@@ -457,7 +457,11 @@ const PINS = [
     # `fori_loop` (RK snag jax-source-of-an-6bfaf24a;
     # test/ordinal_explicit_range.jl).
     # RK 0.1.289: fixed-domain HSGP JavaScript, including Julia Float64 error text.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "239c484ade4c071ae404db4ce18f8c23adf7e10c"),
+    # RK 0.1.307 / 0.1.308: a fresh build of one model reuses the first build's
+    # prepared sampler type (a const branch kernel inside a data-bound arm), and
+    # branch_arms = "all" keeps side-by-side flag branches in one plate
+    # (test/rk_rebuild_types.jl, snag rk-logdensity-pr-b8b1cc36).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "934ee90d5c369bf15b27060108f9377ceec085b0"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

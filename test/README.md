@@ -2735,6 +2735,13 @@ law calls a function the build module does not bind (`logsumexp`): a leaf named
 from `entry`, and a law defined in the consumer's module bound as a child
 graph. Each matches an independent mixture density with ordinary Reverse
 gradients and printed source replay.
+`rk_rebuild_types.jl` checks that fresh `RKBRMI` builds of one model (data 1,
+data 2, data 1 again) share one `rk_logdensity_problem` sampler type when the
+observation law calls a `const` branch kernel inside a data-bound arm: by
+default for data taking the same arms, under `branch_arms = :all` for data
+taking others, with values and gradients against the law written out by hand.
+It fails on ReactiveKernels 0.1.289, where every build got a new type (snag
+`rk-logdensity-pr-b8b1cc36`; fixed in ReactiveKernels 0.1.307 and 0.1.308).
 `rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
 grouped argument collection, explicit ragged joins, empty cells, broadcasting,
 elementwise argument expressions and unchanged data ports. Each case checks

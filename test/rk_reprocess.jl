@@ -523,8 +523,11 @@ end
         value = value isa Tuple ? only(value) : value
         @test value ≈ pk_reads(conc, rows) atol=1e-12 rtol=1e-12
         # The replay is a model of its own rows: its coordinates hold the new
-        # subjects' draws, so a draw of the fit has no density there.
-        @test_throws "layout total" density(reprocess(rk, design; resample_groups=[:subject]), u)
+        # subjects' draws, so a draw of the fit has no density there. The
+        # refusal names both lengths: "packed length 9 ≠ layout total 5" up to
+        # RKPPL 0.1.204, "unconstrained length 9 ≠ 5" from 0.1.205.
+        @test_throws r"length \d+ ≠ (layout total )?\d+" density(
+            reprocess(rk, design; resample_groups=[:subject]), u)
     end
 end
 
