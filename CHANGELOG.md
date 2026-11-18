@@ -14,22 +14,24 @@ instead of failing at run time.
 
 ## 0.2.336
 
-- `brm_svi_fit(...; unit_reoptimize = k)`: each re-optimization step is now a
-  Newton step to the unit's conditional optimum at the iteration's draw of the
-  globals. The precision lands on the orthogonal design's curvature estimate
-  (each direction within a factor of 100 per step) and the mean on the optimum
-  it puts it at (within four sds of the factor before the step). Until now the
-  step was the unit's own square-root natural-gradient step, which at step 1
-  lands the precision above the curvature by (λ - Λ)²/(2Λ) and is bounded to a
-  2.5-fold change and a one-sd move. Wherever the drawn scales move a unit's
-  curvature between visits that biased the global gradient towards the joint
-  mode: on `test/nlme_svi_default_centering.jl`'s weak random intercept (32
-  groups of one row) `k = 1` walked the residual sd's log to -29 and returned a
-  population sd 0.20 of NUTS's while reporting convergence; it now returns
-  0.94 (0.97 at `k = 0`), with the strong and unbalanced cases at 0.95 and 0.93
-  (todo `12maq21`). The intercept-ridge gains are unchanged. A
-  `brm_svi_resume` of a checkpoint written before this release keeps the step
-  it ran. `unit_reoptimize = 0`, the default, is unchanged to the bit.
+- `brm_svi_fit(...; unit_reoptimize = k)` re-optimizes a copy of each batch
+  unit's factor at the iteration's draw of the globals, with `k` Newton steps to
+  its conditional optimum, and the globals step on the copy's terms. The precision
+  lands on the orthogonal design's curvature estimate (each direction within a
+  factor of 100 per step) and the mean on the optimum it puts it at (within four
+  sds of the factor before the step). The units' own factors, their coupling and
+  their centering controls now step as at `k = 0`, and the ELBO trace reads them.
+  Until now each unit's own factor took its square-root natural-gradient step in
+  place, which at step 1 lands the precision above the curvature by
+  (λ - Λ)²/(2Λ) and is bounded to a 2.5-fold change and a one-sd move. Wherever
+  the drawn scales move a unit's curvature between visits that biased the
+  globals' gradient towards the joint mode: on
+  `test/nlme_svi_default_centering.jl`'s weak random intercept (32 groups of one
+  row) `k = 1` walked the residual sd's log to -29 and returned a population sd
+  0.20 of NUTS's while reporting convergence (todo `12maq21`). It also left the
+  coupling and the controls nothing to learn from. `brm_svi_resume` of a
+  checkpoint written before this release keeps the step it ran.
+  `unit_reoptimize = 0`, the default, is unchanged to the bit.
 
 ## 0.2.335
 
