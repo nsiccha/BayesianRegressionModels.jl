@@ -370,12 +370,49 @@ _RKConstantEvaluator(name::Symbol, evaluate, value) =
 function (f::_RKConstantEvaluator{T})(args...) where {T}
     _rk_constant_result(T, f.name, f.evaluate(args...))
 end
-function _rk_constant_result(::Type{T}, name, result) where {T}
-    value = _brm_constant_value(result)
-    value isa T || error("RK backend: `$name = constant(...)` evaluated to " *
-        "$(repr(result)) (::$(typeof(result))) in the graph, but to a $T when " *
-        "the model was planned from the same inputs")
-    value::T
+
+# The graph admits the value as planning did: of the planned type `T`, an
+# array copied into a fresh `Array` (never aliasing an input), every entry
+# finite. `jax_source` translates the emitted entry that calls this into the
+# module's `prepare_data` (snag `jax-source-canno-e77e6b61`), so each step is
+# in what RK translates on the host: the planned type is decided by dispatch,
+# which RK resolves while emitting (each method's body is straight-line), and
+# the finiteness check is `@_brm_traceable` source (`src/ragged_rows.jl`).
+_rk_constant_result(::Type{T}, name, result) where {T} =
+    _brm_constant_finite(name, _rk_constant_typed(T, name, result))::T
+_rk_constant_typed(::Type{T}, _name, value::T) where {T<:Real} = value
+_rk_constant_typed(::Type{T}, name, value::AbstractArray) where {T<:Array} =
+    _rk_constant_array(T, name, collect(value))
+_rk_constant_typed(::Type{T}, name, value) where {T} =
+    _rk_constant_type_refused(T, name, value)
+_rk_constant_array(::Type{T}, _name, value::T) where {T} = value
+# Another element type (`Any[...]`) is promoted as planning promotes it.
+function _rk_constant_array(::Type{T}, name, value) where {T}
+    admitted = _brm_constant_value(value)
+    admitted isa T || _rk_constant_type_refused(T, name, value)
+    admitted::T
+end
+@noinline _rk_constant_type_refused(T, name, value) = error(
+    "RK backend: `$name = constant(...)` evaluated to $(repr(value)) " *
+    "(::$(typeof(value))) in the graph, but to a $T when the model was planned " *
+    "from the same inputs")
+@_brm_traceable function _brm_constant_finite(name::Symbol, value)
+    finite = true
+    if typeof(value) <: AbstractArray
+        for k in eachindex(value)
+            if !isfinite(value[k])
+                finite = false
+            end
+        end
+    else
+        finite = isfinite(value)
+    end
+    if !finite
+        throw(ErrorException("RK backend: `$name = constant(...)` evaluated to \
+            $(value) in the graph; a constant is one finite real number or an array \
+            of them"))
+    end
+    value
 end
 
 # The builder stays eval-free, but a runtime graph must not interpret its
@@ -416,6 +453,28 @@ function _rk_callable_source!(definitions, bindings, entry,
     checked = Expr(:call, GlobalRef(@__MODULE__, :_rk_constant_result),
         type_name, QuoteNode(f.name), body)
     push!(definitions, Expr(:function, Expr(:call, entry, closure.parameters...),
+        Expr(:block, checked)))
+    true
+end
+
+# A compiled evaluator (`@brm`) gets the same entry: it calls the evaluator,
+# bound as a leaf, and admits the result. `jax_source` reads neither the
+# wrapper's fields nor its call, so without an entry the constant stays a
+# module input (snag `jax-source-canno-e77e6b61`); with one, RK translates the
+# evaluator from its lowered code and the admission as above.
+function _rk_callable_source!(definitions, bindings, entry,
+        f::_RKConstantEvaluator{T}) where {T}
+    candidates = methods(f.evaluate)
+    length(candidates) == 1 && !only(candidates).isva || return nothing
+    formals = Base.method_argnames(only(candidates))[2:end]
+    all(Base.isidentifier, formals) || return nothing
+    taken = Set{Symbol}([formals; entry])
+    type_name = _rk_ast_fresh_name(string(entry, "_type"), taken)
+    expression = _rk_ast_fresh_name(string(entry, "_expression"), taken)
+    push!(bindings, type_name => T, expression => f.evaluate)
+    checked = Expr(:call, GlobalRef(@__MODULE__, :_rk_constant_result),
+        type_name, QuoteNode(f.name), Expr(:call, expression, formals...))
+    push!(definitions, Expr(:function, Expr(:call, entry, formals...),
         Expr(:block, checked)))
     true
 end

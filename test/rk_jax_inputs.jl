@@ -136,3 +136,145 @@ end
     end
     @test isequal(data, saved)
 end
+
+# A `constant(...)` a data-only assignment reads is computed in the RK graph
+# from fit-role copies of its inputs. `prepare_data` computes it too, for both
+# builders, so the module does not take it as an input (snag
+# `jax-source-canno-e77e6b61`: it listed every such constant in UNTRANSLATED).
+module JAXConstantModels
+using BayesianRegressionModels, Statistics
+const SOURCES = (
+    scalar_fields=quote
+        loc = constant(x_loc)
+        scale = constant(x_scale)
+        xs = (x - loc) / scale
+        mu ~ 1 + xs
+        y ~ Normal(mu, 1.0)
+    end,
+    column_moments=quote
+        loc = constant(mean(x))
+        scale = constant(std(x))
+        xs = (x - loc) / scale
+        mu ~ 1 + xs
+        y ~ Normal(mu, 1.0)
+    end,
+    array_constant=quote
+        centre = constant([mean(x), x_scale])
+        xs = (x - sum(centre)) / x_scale
+        mu ~ 1 + xs
+        y ~ Normal(mu, 1.0)
+    end,
+    plate=quote
+        loc = constant(w_loc)
+        scale = constant(w_scale)
+        ws = (w - loc) / scale
+        a ~ Normal(0, 1)
+        b ~ Normal(0, 1)
+        @plate for i in eachindex(t)
+            m = a .* t[i] .+ b .* ws[i]
+            y[i] ~ normal(m, 1.0)
+        end
+    end,
+)
+const MACROS = (
+    scalar_fields=d -> @brm(d, begin
+        loc = constant(x_loc)
+        scale = constant(x_scale)
+        xs = (x - loc) / scale
+        mu ~ 1 + xs
+        y ~ Normal(mu, 1.0)
+    end),
+    column_moments=d -> @brm(d, begin
+        loc = constant(mean(x))
+        scale = constant(std(x))
+        xs = (x - loc) / scale
+        mu ~ 1 + xs
+        y ~ Normal(mu, 1.0)
+    end),
+    array_constant=d -> @brm(d, begin
+        centre = constant([mean(x), x_scale])
+        xs = (x - sum(centre)) / x_scale
+        mu ~ 1 + xs
+        y ~ Normal(mu, 1.0)
+    end),
+    plate=d -> @brm(d, begin
+        loc = constant(w_loc)
+        scale = constant(w_scale)
+        ws = (w - loc) / scale
+        a ~ Normal(0, 1)
+        b ~ Normal(0, 1)
+        @plate for i in eachindex(t)
+            m = a .* t[i] .+ b .* ws[i]
+            y[i] ~ normal(m, 1.0)
+        end
+    end),
+)
+# The same models with each constant supplied as a data field.
+const TWINS = (
+    scalar_fields=quote
+        xs = (x - loc) / scale
+        mu ~ 1 + xs
+        y ~ Normal(mu, 1.0)
+    end,
+    plate=quote
+        ws = (w - loc) / scale
+        a ~ Normal(0, 1)
+        b ~ Normal(0, 1)
+        @plate for i in eachindex(t)
+            m = a .* t[i] .+ b .* ws[i]
+            y[i] ~ normal(m, 1.0)
+        end
+    end,
+)
+end
+
+@testset "constants read by data-only assignments are prepare_data host code" begin
+    rows = (; x=[1.0, 2.0, 3.0, 4.0], y=[0.1, 0.3, 0.2, 0.5], x_loc=2.5, x_scale=1.2)
+    subjects = (; w=[60.0, 75.0, 90.0], w_loc=72.0, w_scale=12.0,
+        t=[[0.5, 1.0], [0.5], [1.0, 2.0, 3.0]], y=[[0.2, 0.4], [0.1], [0.3, 0.5, 0.2]])
+    M = JAXConstantModels
+    twin_data = (
+        scalar_fields=merge(rows, (; loc=rows.x_loc, scale=rows.x_scale)),
+        column_moments=merge(rows, (; loc=M.mean(rows.x), scale=M.std(rows.x))),
+        array_constant=merge(rows, (; loc=M.mean(rows.x) + rows.x_scale, scale=rows.x_scale)),
+        plate=merge(subjects, (; loc=subjects.w_loc, scale=subjects.w_scale)),
+    )
+    constants = (scalar_fields=(:loc, :scale), column_moments=(:loc, :scale),
+        array_constant=(:centre,), plate=(:loc, :scale))
+    for case in keys(M.SOURCES)
+        data = case === :plate ? subjects : rows
+        twin_source = case === :plate ? M.TWINS.plate : M.TWINS.scalar_fields
+        twin = RKBRMI(brm(twin_source; mod=M)(twin_data[case]))
+        twin_query = prepare_query(twin.model, rk_bound_plan(twin), :sampler)
+        for build in (M.MACROS[case], brm(M.SOURCES[case]; mod=M))
+            saved = deepcopy(data)
+            rk = RKBRMI(build(data))
+            source = jax_source(rk.model, rk_bound_plan(rk))
+            @test occursin("\nUNTRANSLATED = {}\n", source.text)
+            inputs = rk_bound_data(rk, source)
+            @test all(name -> !haskey(inputs, name), constants[case])
+            query = prepare_query(rk.model, rk_bound_plan(rk), :sampler)
+            for u in ([0.1, -0.2], [0.7, 0.3])
+                native = Base.invokelatest(query, u)
+                @test native == Base.invokelatest(twin_query, u)
+                if rk_jax_available()
+                    result = rk_jax_evaluate(source, "log_density", (u, values(inputs)...);
+                        grad=true, prepare=true)
+                    @test result.value ≈ native rtol=1e-12
+                    @test result.grad ≈ rk_fd_gradient(
+                        v -> Base.invokelatest(query, v), u) rtol=1e-6 atol=1e-6
+                else
+                    @test_skip "RK_JAX_PYTHON names no Python with jax"
+                end
+            end
+            # `prepare_data` admits the constant as the graph does
+            # (`runtime_constants.jl` checks the native refusal).
+            if case === :column_moments && rk_jax_available()
+                bad = merge(inputs, (; x_fit=[1.0, Inf, 3.0, 4.0]))
+                @test_throws "loc = constant(...)" rk_jax_evaluate(source, "log_density",
+                    ([0.1, -0.2], values(bad)...); prepare=true)
+            end
+            @test isequal(data, saved)
+        end
+    end
+end

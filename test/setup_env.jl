@@ -551,7 +551,16 @@ const PINS = [
     # 48fe7ef5, a Reverse gradient lost through a fresh array a call fills, as
     # RKPPL's MvNormal slice priors do (snag rkppl-mvnormal-s-1df3d9b3). Linux
     # x86_64 only, like 3a825a54.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "9b573c631bbaae8bed2df3104244563f1d93efea"),  # dogfood
+    # b80617ba / libEnzyme 5639cd2f, the dogfood tip of 2026-11-18, contains
+    # 9b573c63 and cb2b2b1e, the `blas_overwritten_output` repair (Enzyme snag
+    # reverse-blas-rul-f21de298): the reverse rules of `gemv`, `gemm`, `symv`,
+    # `symm` and `syrk` at `beta == 0`, and of `blascopy!`, clear the adjoint of
+    # the output the call overwrote instead of scaling it by `beta`. Before it,
+    # one non-finite gradient left a NaN in the shadow of a buffer that
+    # DifferentiationInterface reuses, so every later gradient of the same
+    # `rk_logdensity_problem` kept NaN entries (BRM snag
+    # rk-logdensity-pr-a8c1995e; test/rk_nonfinite_gradient_recovery.jl).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b80617bad0ceec1325b5d1bedbc9aabf74bf0093"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

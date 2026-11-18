@@ -43,7 +43,7 @@ function brm_gmrf_predict(rk::RKBRMI, draws::AbstractMatrix, field::Symbol; east
 end
 
 function _brm_gmrf_footprint_record(rk::RKBRMI, field::Symbol)
-    records = [r for r in _rk_coordinate_records(rk.plan)
+    records = [r for r in _rk_coordinate_records(rk)
         if r.kind in (:gmrf, :gmrf_footprint, :gmrf_multiresolution) && r.predictor === field]
     isempty(records) && throw(ArgumentError(
         "brm_gmrf_predict: the model has no model-scope gmrf term on `$field`"))

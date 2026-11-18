@@ -210,7 +210,7 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     forced = integrate === :auto ? Symbol[] : Symbol[_brm_plan_names(integrate)...]
     sampled = Symbol[_brm_plan_names(sample)...]
     named(t, names) = t.declaration in names || t.grouping in names
-    records = [r for r in _rk_coordinate_records(backend.plan) if r.kind in _BRM_SPL_LATENT]
+    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT]
     isempty(records) && _brm_nlme_error("brm_laplace_plan: the model has no random-effect " *
         "block, `cdar` walk, `car` field or declared vector to integrate")
     terms = map(records) do r
