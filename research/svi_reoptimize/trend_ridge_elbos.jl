@@ -13,24 +13,7 @@ include(joinpath(ROOT, "test", "nlme_fixtures.jl"))
 using LinearAlgebra, Random, Statistics, Printf
 import LogDensityProblems
 
-function svi_ridge_data(rng, N; nobs=100, gm=0.17, gs=0.02, noise=0.1)
-    x = [1 .+ rand(rng, nobs) for _ in 1:N]
-    lg = gm .+ gs .* randn(rng, N)
-    lvl = 0.5 .* randn(rng, N)
-    y = [lvl[i] .+ exp(lg[i]) .* x[i] .+ noise .* randn(rng, nobs) for i in 1:N]
-    (; unit=["u$i" for i in 1:N], x, y, zero1=[[0.0] for _ in 1:N])
-end
-svi_ridge_model(data) = @brm data begin
-    level ~ 1 + (1 | unit)
-    gain_mean ~ Normal(0, 0.5)
-    gain_spread ~ Exponential(1)
-    noise ~ Exponential(1)
-    @plate for i in eachindex(level)
-        z ~ Normal(zero1[i], 1)
-        steps = gain_mean .+ gain_spread .* z
-        y[i] ~ Normal(level[i] .+ exp(steps[1]) .* x[i], noise)
-    end
-end
+include(joinpath(ROOT, "test", "nlme_svi_ridge_fixture.jl"))
 const OPT = (; subject_group=:unit, batch_size=4, ndraws=200, stationarity=false,
     centering=nothing)
 
