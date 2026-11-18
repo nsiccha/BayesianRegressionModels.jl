@@ -1,7 +1,9 @@
 # Public synthetic random-intercept regression from brm-svi-fit-defa-7beb59f3.
 # Population uncertainty is checked against independently sampled NUTS, in
-# weak, strong and unbalanced groups. The fixed-scale Gaussian width oracle
-# lives in nlme_svi_centering_algebra.jl.
+# weak, strong and unbalanced groups, with and without re-optimized units
+# (`unit_reoptimize = 1`). The fixed-scale Gaussian width oracle lives in
+# nlme_svi_centering_algebra.jl; the weak case's exact posterior and its structured
+# mean-field optimum in research/svi_reoptimize/weak_exact.jl.
 # RUN: julia --project=test test/nlme_svi_default_centering.jl [filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using Random, Statistics, WarmupHMC, TreeArrays, MCMCDiagnosticTools
@@ -92,6 +94,19 @@ function check_default_population(label, counts)
             "nuts_divergent=$divergent")
         @test error < 0.6
         @test 0.6 < ratio < 1.4
+        # Re-optimized units (`unit_reoptimize = 1`) against the same reference. Until
+        # the re-optimization step landed on its curvature estimate (todo 12maq21), the
+        # weak case's residual scale walked to 0 and this ratio read 0.20.
+        reopt = brm_svi_fit(rk; subject_group=:g, batch_size=8, rng=Xoshiro(2),
+            ndraws=4000, unit_reoptimize=1)
+        rs = population_summary(reopt.draws[idx, :])
+        rratio, rerror = rs.sd / nuts.sd, abs(rs.mean - nuts.mean) / nuts.sd
+        println("DEFAULT_CENTERING case=$label unit_reoptimize=1 mean_error=$rerror " *
+            "sd_ratio=$rratio svi_sd=$(rs.sd) iterations=$(reopt.diagnostics.iterations) " *
+            "converged=$(reopt.diagnostics.converged)")
+        @test reopt.diagnostics.converged
+        @test rerror < 0.6
+        @test 0.6 < rratio < 1.4
         if label == "strong"
             plain = brm_svi_fit(rk; subject_group=:g, batch_size=8, rng=Xoshiro(2),
                 ndraws=4000, centering=nothing, coupling=nothing)

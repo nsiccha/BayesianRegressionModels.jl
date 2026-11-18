@@ -776,19 +776,64 @@ _brm_svi_unit_calls(q, i, c) =
 # the step is pulled back along the ridge, and the global means crawl (todo
 # 122p9l3: 199-1,161 nats from q* on an exactly Gaussian toy under every
 # schedule). With `unit_reoptimize = k`, each batch unit on the orthogonal design
-# first takes `k` whole natural-gradient steps (`_brm_svi_unit_step_full!`, step 1,
-# the trust regions still bound it) at the iteration's draw of the globals, before
-# the terms the global gradient reads are formed. Its factor is then near its
+# first takes `k` whole natural-gradient steps (`_brm_svi_unit_step_conditional!`,
+# step 1, the trust regions still bound it) at the iteration's draw of the globals,
+# before the terms the global gradient reads are formed. Its factor is then near its
 # conditional optimum given that draw, so the global gradient is the profile
 # gradient along the ridge (structured stochastic VI, Hoffman and Blei 2015). On a
 # unit Gaussian given the globals one step reaches the optimum. Under linear
 # coupling the step moves `M_i`, so the coupled mean `M_i + V_i ζ_i` moves with it,
 # and `V_i` keeps learning from the re-optimized means. Units on the single pair
 # or structured units are not re-optimized. The default 0 is the step as before.
+#
+# The step lands its precision on the curvature it estimated. The unit's own step
+# (`_brm_svi_unit_step_full!`) is the square-root form of the improved Bayesian
+# learning rule, Λ + βG + β²/2 G Λ⁻¹ G, which keeps Λ positive definite for any
+# estimate but at β = 1 leaves it above the estimate by (λ - Λ)²/(2Λ) along a
+# direction of curvature λ: exact only where Λ already was. Re-optimization starts
+# every visit from the factor the unit's previous visit left at another draw of the
+# globals, so wherever the drawn scales move the unit's curvature the factor lands
+# too narrow, at the very draw whose gradient the globals step on, and their
+# gradient reads too little of the unit's spread. Too little spread is the joint
+# mode's profile, which a residual scale that the data pin only together with a
+# group scale (one row per unit) climbs down without end. On the weak random
+# intercept of test/nlme_svi_default_centering.jl (32 units of one row) the
+# residual sd's log fell about 0.6 per 1,000 iterations from the first window, to
+# -29 after 59,700 iterations, the group sd took all the spread, every centering
+# control went to 1, and the population mean's sd ended at 0.20 of NUTS's while the
+# trimmed ELBO fell from -111 to -140 (todo 12maq21). A fit whose controls lack
+# `reoptimize_first_order` (a checkpoint of BRM 0.2.326 to 0.2.335) keeps that step.
 _brm_svi_unit_reoptimize(c) = get(c, :unit_reoptimize, 0)
+_brm_svi_reoptimize_first_order(c) = get(c, :reoptimize_first_order, false)
+
+# The re-optimization step: the natural-gradient step of `_brm_svi_unit_step_full!`
+# to first order in the precision, Λ + βG = U (I + βĜ) Uᵀ, with the same β and mean
+# step, so that at β = 1 the precision is the estimate S₊ itself. Ĝ = S₊ - I ≥ -I,
+# so I + βĜ is positive semidefinite for β ≤ 1; along a direction whose estimate
+# falls below half the current precision it is held at half, the smallest factor
+# the square-root form takes in one step.
+function _brm_svi_unit_step_conditional!(q, i, gz, S; positive=true)
+    isempty(q.M[i]) && return q
+    U = LowerTriangular(q.U[i])
+    all(isfinite, S) || throw(ArgumentError(
+        "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
+    Ŝ = Symmetric((S .+ S') ./ 2)
+    F = eigen(Symmetric((positive ? _brm_svi_positive_part(Ŝ) : Ŝ) - I))
+    r = maximum(abs, F.values)
+    β = r > 0 ? min(1.0, _BRM_SVI_UNIT_TRUST / r) : 1.0
+    f = max.(1 .+ β .* F.values, 0.5)
+    R = qr(Matrix((U * F.vectors * Diagonal(sqrt.(f)))')).R
+    L = LowerTriangular(R' * Diagonal(sign.(diag(R))))
+    Δ = β .* (L' \ (L \ gz))
+    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
+    q.U[i] .= L
+    q.Λ[i] .= L * L'
+    q.M[i] .+= Δ
+    q
+end
 
 function _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, centering,
-                                    frame, positive_part)
+                                    frame, positive_part; first_order=true)
     D = length(t.globals)
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         designs[k] === nothing && return
@@ -802,7 +847,9 @@ function _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, cent
             # A non-finite evaluation stops this unit's re-optimization; the
             # iteration's own terms report it (`_brm_svi_check_finite`).
             r.problem === nothing && all(isfinite, r.S) && all(isfinite, r.gz) || break
-            _brm_svi_unit_step_full!(q, i, r.gz, r.S, 1.0; positive=positive_part)
+            first_order ?
+                _brm_svi_unit_step_conditional!(q, i, r.gz, r.S; positive=positive_part) :
+                _brm_svi_unit_step_full!(q, i, r.gz, r.S, 1.0; positive=positive_part)
         end
     end
 end
@@ -1171,7 +1218,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
         sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
         structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
-        coupling_scale=1.0, coupling_baseline=true, reoptimize=0)
+        coupling_scale=1.0, coupling_baseline=true, reoptimize=0, reoptimize_first_order=true)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -1201,7 +1248,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             [_brm_svi_unit_design(rng, length(q.M[i])) for _ in 1:reoptimize] : nothing
             for i in batch]
         _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, centering,
-                                   frame, positive_part)
+                                   frame, positive_part; first_order=reoptimize_first_order)
     end
     centered = Vector{Any}(nothing, length(batch))
     # `sparse_globals = :collapsed`: each batch unit's site over its sparse globals
@@ -1511,7 +1558,8 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
         stationarity=true, coupling_baseline=true, coupling_warmup=true,
-        exploration_drift=stationarity, unit_reoptimize=0, sparse_globals=:sites)
+        exploration_drift=stationarity, unit_reoptimize=0, reoptimize_first_order=true,
+        sparse_globals=:sites)
     B = min(batch_size, N)
     W = window === nothing ? max(cld(N, B), 100) : window
     # A default iterate-gated run may need more than 100 windows, especially
@@ -1525,7 +1573,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
        trend_skip=patience, stationarity, budget_polish=stationarity,
        coupling_baseline, coupling_warmup, exploration_drift, unit_reoptimize,
-       sparse_globals)
+       reoptimize_first_order, sparse_globals)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1671,7 +1719,8 @@ function _brm_svi_advance!(run, t, c)
             rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
             sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
             coupling_baseline=_brm_svi_coupling_baseline(c),
-            reoptimize=_brm_svi_unit_reoptimize(c))
+            reoptimize=_brm_svi_unit_reoptimize(c),
+            reoptimize_first_order=_brm_svi_reoptimize_first_order(c))
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))

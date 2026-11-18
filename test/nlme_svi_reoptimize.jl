@@ -89,3 +89,31 @@ end
     @test all(r -> 0.8 < r < 1.2, ratio(reopt))
     @test reopt.diagnostics.unit_gradient_calls > stock.diagnostics.unit_gradient_calls
 end
+
+# The re-optimization step lands each unit on its estimated curvature (todo 12maq21);
+# the controls record it, so a stopped run resumes exactly, and a checkpoint written
+# before the control (BRM 0.2.326 to 0.2.335) resumes on the square-root step it ran.
+@stestset "checkpoints: a re-optimized run resumes exactly; an older one keeps its step" begin
+    data = ridge_data(; G=20, n=5)
+    rk = RKBRMI(ridge_model(data))
+    opt = (; subject_group=:g, rng=Xoshiro(5), max_iterations=300, ndraws=20,
+           unit_reoptimize=1)
+    full = brm_svi_fit(rk; opt...)
+    @test full.diagnostics.optimizer.controls.reoptimize_first_order === true
+    stopped = brm_svi_fit(rk; opt..., stop_after=120)
+    @test stopped.diagnostics.iterations == 120
+    resumed = brm_svi_resume(rk, stopped; ndraws=20)
+    @test resumed.draws == full.draws
+    @test resumed.diagnostics.iterations == full.diagnostics.iterations
+    @test resumed.diagnostics.elbo == full.diagnostics.elbo
+    s = brm_svi_optimizer_checkpoint(stopped)
+    c = s.controls
+    old = BRMSVIOptimizerState(s.format, s.identity, s.previous,
+        NamedTuple{filter(!=(:reoptimize_first_order), keys(c))}(c), s.run)
+    @test BRM._brm_svi_reoptimize_first_order(old.controls) === false
+    kept = brm_svi_resume(rk, old; ndraws=20)
+    @test kept.diagnostics.iterations == full.diagnostics.iterations
+    @test all(isfinite, kept.draws)
+    @test kept.diagnostics.elbo[1:120] == full.diagnostics.elbo[1:120]
+    @test kept.diagnostics.elbo[121:end] != full.diagnostics.elbo[121:end]
+end
