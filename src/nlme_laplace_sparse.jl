@@ -228,7 +228,7 @@ const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector, :gmrf,
 
 # The model's latent blocks over the named grouping columns.
 function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
-    records = [r for r in _rk_coordinate_records(backend.plan) if r.kind in _BRM_SPL_LATENT]
+    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT]
     available = unique(Symbol[_brm_spl_record_group(r) for r in records])
     for g in integrate
         g in available || _brm_nlme_error("brm_laplace_problem: integrate names " *
@@ -394,7 +394,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     # The plan may integrate only some declarations over the same grouping.
     selected = Set(_brm_spl_record_declaration(r) for r in records)
     sampled = any(r -> r.kind in _BRM_SPL_LATENT && _brm_spl_record_declaration(r) ∉ selected,
-        _rk_coordinate_records(backend.plan))
+        _rk_coordinate_records(backend))
     families, ports = _brm_slap_ports(backend, responses)
     u0 = zeros(Float64, length(names))
     kernels = _rk_slap_kernels(backend, Tuple(ports), (), omega, u0, ad_backend)

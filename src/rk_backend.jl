@@ -551,11 +551,18 @@ end
 #   `density_factors`), built on first use. `brm_nlme_view`'s scan of factors
 #   that read a unit and every SVI target's ownership read it; each build
 #   plans the whole program again (about 5 s warm on a 33-unit model).
+# - `coordinates`: the backend's complete coordinate inventory
+#   (`_rk_coordinate_records(rk)`), from one emission of its plan. Each
+#   inventory emits the whole program, consumer `_rk_callable_source!`
+#   providers included, and the start, preparation point, transport and
+#   adaptive-centring readers ask for it repeatedly. `reprocess` fills a
+#   replay's from the emission that checks its program.
 mutable struct _BRMPreparedSlot
     nlme::Any
     const lock::ReentrantLock
     const factors::_RKOnce
-    _BRMPreparedSlot() = new(nothing, ReentrantLock(), _RKOnce())
+    const coordinates::_RKOnce
+    _BRMPreparedSlot() = new(nothing, ReentrantLock(), _RKOnce(), _RKOnce())
 end
 Base.deepcopy_internal(::_BRMPreparedSlot, ::IdDict) = _BRMPreparedSlot()
 
