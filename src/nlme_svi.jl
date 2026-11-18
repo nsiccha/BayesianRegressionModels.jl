@@ -811,8 +811,8 @@ _brm_svi_unit_calls(q, i, c) =
 # within [1/2, 2] per step and the mean within one sd 0.48-0.60 off with 0.50-0.60,
 # and the Newton step below -0.06 to 0.02 off with 0.98-1.01 (4 data seeds).
 #
-# A fit whose controls lack `reoptimize_newton` (a checkpoint of BRM 0.2.326 to
-# 0.2.335) keeps the square-root step it ran.
+# A fit whose controls lack `reoptimize_newton` (a checkpoint written before this
+# step, from BRM 0.2.326 on) keeps the square-root step it ran.
 _brm_svi_unit_reoptimize(c) = get(c, :unit_reoptimize, 0)
 _brm_svi_reoptimize_newton(c) = get(c, :reoptimize_newton, false)
 
@@ -2196,17 +2196,21 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   controls apply to new units. The factor restriction changes the
   approximation, not the model density.
 - `unit_reoptimize` — `k`, default 0 (off). Each batch unit on the orthogonal
-  design first takes `k` whole natural-gradient steps at the iteration's draw of
-  the globals, before the gradient the globals step on is formed, so that
-  gradient reads every batch unit near its conditional optimum given that draw
-  (structured stochastic VI, Hoffman and Blei 2015). It is for a ridge between a
-  global and every unit, where the data pin only a combination such as an
-  intercept plus each unit's effect: with the units' factors lagging each global
-  move, the global means crawl along the ridge under every schedule, and
-  re-optimized units follow them. On a unit Gaussian given the globals one step
-  reaches the optimum. Each step costs the unit's 2d evaluations again (counted
-  in `unit_gradient_calls`). It needs `unit_curvature = :orthogonal`; units on
-  the single pair and structured units are not re-optimized.
+  design first takes `k` Newton steps to its conditional optimum at the
+  iteration's draw of the globals, before the gradient the globals step on is
+  formed, so that gradient reads every batch unit near its conditional optimum
+  given that draw (structured stochastic VI, Hoffman and Blei 2015). It is for a
+  ridge between a global and every unit, where the data pin only a combination
+  such as an intercept plus each unit's effect: with the units' factors lagging
+  each global move, the global means crawl along the ridge under every schedule,
+  and re-optimized units follow them. A step sets the unit's precision to the
+  design's curvature estimate (each direction within a factor of 100 per step)
+  and its mean to the optimum that puts it at (within four sds of the factor
+  before the step), so on a unit Gaussian given the globals one step reaches the
+  optimum. Each step costs the unit's 2d evaluations again (counted in
+  `unit_gradient_calls`). It needs `unit_curvature = :orthogonal`; units on the
+  single pair and structured units are not re-optimized. A checkpoint written
+  before the Newton step resumes on the square-root step it ran.
 - `sparse_globals` — how the globals few units read (expected readers per
   batch below one: a window's boundary state, a read-pair `gmrf` field state, a
   separator; `diagnostics.sparse_globals` lists them) take their step.

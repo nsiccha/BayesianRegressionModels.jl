@@ -105,7 +105,7 @@ end
 # the scale's gradient (src/nlme_svi.jl, `_brm_svi_unit_step_newton!`). Measured
 # (this seed; research/svi_reoptimize/step_variants.jl has four): the optimum's log σ
 # is -0.542 with sd 0.503, the Newton step's -0.556 with 0.508, the square-root
-# step's (BRM 0.2.326 to 0.2.335) -0.540 with 0.304.
+# step's (before the Newton step) -0.540 with 0.304.
 @testset "re-optimized units leave a weakly pinned scale at its optimum" begin
     rng, N = Xoshiro(23), 16
     y = [[0.4randn(rng) + randn(rng)] for _ in 1:N]

@@ -92,15 +92,16 @@ end
 
 # The re-optimization step lands each unit on its estimated curvature (todo 12maq21);
 # the controls record it, so a stopped run resumes exactly, and a checkpoint written
-# before the control (BRM 0.2.326 to 0.2.335) resumes on the square-root step it ran.
+# before the control (from BRM 0.2.326 on) resumes on the square-root step it ran.
 @stestset "checkpoints: a re-optimized run resumes exactly; an older one keeps its step" begin
     data = ridge_data(; G=20, n=5)
     rk = RKBRMI(ridge_model(data))
-    opt = (; subject_group=:g, rng=Xoshiro(5), max_iterations=300, ndraws=20,
-           unit_reoptimize=1)
-    full = brm_svi_fit(rk; opt...)
+    # A fresh stream per fit: a shared one would start the second fit elsewhere.
+    fit(; kwargs...) = brm_svi_fit(rk; subject_group=:g, rng=Xoshiro(5),
+        max_iterations=300, ndraws=20, unit_reoptimize=1, kwargs...)
+    full = fit()
     @test full.diagnostics.optimizer.controls.reoptimize_newton === true
-    stopped = brm_svi_fit(rk; opt..., stop_after=120)
+    stopped = fit(; stop_after=120)
     @test stopped.diagnostics.iterations == 120
     resumed = brm_svi_resume(rk, stopped; ndraws=20)
     @test resumed.draws == full.draws

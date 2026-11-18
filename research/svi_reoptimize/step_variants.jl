@@ -69,7 +69,7 @@ function scale_elbo_optimum(y)
 end
 
 nseeds = isempty(ARGS) ? 3 : parse(Int, ARGS[1])
-variants = [("square root (BRM 0.2.326-0.2.335), k = 1", 1, true, 2.0, 0.5, 1.0, false),
+variants = [("square root (before the Newton step), k = 1", 1, true, 2.0, 0.5, 1.0, false),
             ("square root, k = 3", 3, true, 2.0, 0.5, 1.0, false),
             ("first order, trust 2x / floor 1/2", 1, false, 2.0, 0.5, 1.0, false),
             ("[1/100, 100], mean trust 1 new sd", 1, false, 100.0, 0.01, 1.0, true),
