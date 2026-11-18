@@ -2742,6 +2742,15 @@ default for data taking the same arms, under `branch_arms = :all` for data
 taking others, with values and gradients against the law written out by hand.
 It fails on ReactiveKernels 0.1.289, where every build got a new type (snag
 `rk-logdensity-pr-b8b1cc36`; fixed in ReactiveKernels 0.1.307 and 0.1.308).
+`rk_nonfinite_gradient_recovery.jl` checks that one evaluation of an
+`rk_logdensity_problem` whose answer is not finite, or that throws, leaves the
+next gradient at a good point bit for bit what it was before, also in a
+`deepcopy` taken after it: a correlated random-effect block with a scale at 800
+or 1e300, and a rate that overflows or that a guard refuses. Each extreme point
+must give a non-finite answer or throw, and the pinned Enzyme must carry the
+`blas_overwritten_output` repair. It fails on Enzyme dogfood before `cb2b2b1e`,
+whose reverse BLAS rules kept a `NaN` in a reused buffer's shadow (snag
+`rk-logdensity-pr-a8c1995e`; the pin in `setup_env.jl`).
 `rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
 grouped argument collection, explicit ragged joins, empty cells, broadcasting,
 elementwise argument expressions and unchanged data ports. Each case checks
