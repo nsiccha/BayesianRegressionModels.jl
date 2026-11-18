@@ -31,14 +31,24 @@ include("nlme_svi_rare_kind_fixture.jl")
     c = fit.diagnostics.coupling
     rare = findfirst(==(data.rare_unit), fit.diagnostics.unit_levels)
     u = c.units[rare]
-    # coupling sd / conditional sd of each coupled row of the rare unit
-    widening = [sqrt(max(u.marginal_sd[r]^2 / u.conditional_sd[r]^2 - 1, 0.0)) for r in u.rows]
+    names = String.(fit.diagnostics.model.view.coordinates[fit.diagnostics.units[rare]])
+    # The rare kind's rows: its population values, which that unit alone reads, and
+    # its one event's non-centred steps. (The unit's other events are of kinds every
+    # unit shares; their steps' dependence on those kinds' means and spreads is real
+    # and may exceed one conditional sd.)
+    j = findfirst(==(3), data.event_kind[data.rare_unit])
+    kind3 = ["gain_mean.3", "gain_spread.3", "offset_mean.3", "offset_spread.3",
+        "z_gain.$(data.rare_unit).$j", "z_offset.$(data.rare_unit).$j"]
+    # coupling sd / conditional sd of each of those rows
+    widening = Dict(names[r] => sqrt(max(u.marginal_sd[r]^2 / u.conditional_sd[r]^2 - 1, 0.0))
+        for r in u.rows if names[r] in kind3)
     println("RARE_KIND phi=", round.(phi; digits=3), " ratio=", round.(ratio; digits=3),
-        " rare_rows_coupling_over_conditional=", round.(widening; digits=3),
+        " kind3_coupling_over_conditional=", Dict(k => round(v; digits=3) for (k, v) in widening),
         " converged=", fit.diagnostics.converged, " iterations=", fit.diagnostics.iterations)
     @test 0.5 < phi[2] < 0.8          # truth 0.6; coupling = nothing gives 0.674
     @test 1.13 < ratio[2] < 1.23      # truth 1.18
-    @test maximum(widening) < 1       # was 1.46 (polished) on 0.2.330
+    @test length(widening) == length(kind3)
+    @test maximum(values(widening)) < 1   # offset_spread.3 was 1.46 (polished) on 0.2.330
     @test any(V -> any(!iszero, V), fit.diagnostics.q.coupling.V)
     @test fit.diagnostics.finished
 end
