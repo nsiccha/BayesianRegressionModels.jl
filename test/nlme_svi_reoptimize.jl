@@ -99,7 +99,7 @@ end
     opt = (; subject_group=:g, rng=Xoshiro(5), max_iterations=300, ndraws=20,
            unit_reoptimize=1)
     full = brm_svi_fit(rk; opt...)
-    @test full.diagnostics.optimizer.controls.reoptimize_first_order === true
+    @test full.diagnostics.optimizer.controls.reoptimize_newton === true
     stopped = brm_svi_fit(rk; opt..., stop_after=120)
     @test stopped.diagnostics.iterations == 120
     resumed = brm_svi_resume(rk, stopped; ndraws=20)
@@ -109,8 +109,8 @@ end
     s = brm_svi_optimizer_checkpoint(stopped)
     c = s.controls
     old = BRMSVIOptimizerState(s.format, s.identity, s.previous,
-        NamedTuple{filter(!=(:reoptimize_first_order), keys(c))}(c), s.run)
-    @test BRM._brm_svi_reoptimize_first_order(old.controls) === false
+        NamedTuple{filter(!=(:reoptimize_newton), keys(c))}(c), s.run)
+    @test BRM._brm_svi_reoptimize_newton(old.controls) === false
     kept = brm_svi_resume(rk, old; ndraws=20)
     @test kept.diagnostics.iterations == full.diagnostics.iterations
     @test all(isfinite, kept.draws)

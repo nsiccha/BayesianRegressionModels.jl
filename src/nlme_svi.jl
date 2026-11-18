@@ -776,9 +776,9 @@ _brm_svi_unit_calls(q, i, c) =
 # the step is pulled back along the ridge, and the global means crawl (todo
 # 122p9l3: 199-1,161 nats from q* on an exactly Gaussian toy under every
 # schedule). With `unit_reoptimize = k`, each batch unit on the orthogonal design
-# first takes `k` whole natural-gradient steps (`_brm_svi_unit_step_conditional!`,
-# step 1, the trust regions still bound it) at the iteration's draw of the globals,
-# before the terms the global gradient reads are formed. Its factor is then near its
+# first takes `k` Newton steps (`_brm_svi_unit_step_newton!`, below) at the
+# iteration's draw of the globals, before the terms the global gradient reads are
+# formed. Its factor is then near its
 # conditional optimum given that draw, so the global gradient is the profile
 # gradient along the ridge (structured stochastic VI, Hoffman and Blei 2015). On a
 # unit Gaussian given the globals one step reaches the optimum. Under linear
@@ -786,46 +786,60 @@ _brm_svi_unit_calls(q, i, c) =
 # and `V_i` keeps learning from the re-optimized means. Units on the single pair
 # or structured units are not re-optimized. The default 0 is the step as before.
 #
-# The step lands its precision on the curvature it estimated. The unit's own step
-# (`_brm_svi_unit_step_full!`) is the square-root form of the improved Bayesian
-# learning rule, Λ + βG + β²/2 G Λ⁻¹ G, which keeps Λ positive definite for any
-# estimate but at β = 1 leaves it above the estimate by (λ - Λ)²/(2Λ) along a
-# direction of curvature λ: exact only where Λ already was. Re-optimization starts
-# every visit from the factor the unit's previous visit left at another draw of the
-# globals, so wherever the drawn scales move the unit's curvature the factor lands
-# too narrow, at the very draw whose gradient the globals step on, and their
-# gradient reads too little of the unit's spread. Too little spread is the joint
-# mode's profile, which a residual scale that the data pin only together with a
-# group scale (one row per unit) climbs down without end. On the weak random
-# intercept of test/nlme_svi_default_centering.jl (32 units of one row) the
+# The step is a Newton step to the unit's conditional optimum: its precision lands on
+# the curvature it estimated and its mean on the optimum that curvature puts it at.
+# The unit's own step (`_brm_svi_unit_step_full!`) cannot serve. It is the
+# square-root form of the improved Bayesian learning rule, Λ + βG + β²/2 G Λ⁻¹ G,
+# which at β = 1 leaves Λ above the estimate by (λ - Λ)²/(2Λ) along a direction of
+# curvature λ, exact only where Λ already was. Its trust regions (the precision
+# changes at most 2.5-fold or halves per step, the mean moves at most one sd) bound
+# a stochastic step. Re-optimization starts every visit from the factor the unit's
+# previous visit left at another draw of the globals, so wherever the drawn scales
+# move the unit's curvature those biases meet the very draw whose gradient the
+# globals step on. A factor left too narrow reads too little of the unit's spread,
+# the joint mode's profile, down which a residual scale that the data pin only
+# together with a group scale (one row per unit) climbs without end. On the weak
+# random intercept of test/nlme_svi_default_centering.jl (32 units of one row) the
 # residual sd's log fell about 0.6 per 1,000 iterations from the first window, to
-# -29 after 59,700 iterations, the group sd took all the spread, every centering
+# -29 after 59,700 iterations; the group sd took all the spread, every centering
 # control went to 1, and the population mean's sd ended at 0.20 of NUTS's while the
-# trimmed ELBO fell from -111 to -140 (todo 12maq21). A fit whose controls lack
-# `reoptimize_first_order` (a checkpoint of BRM 0.2.326 to 0.2.335) keeps that step.
+# trimmed ELBO fell from -111 to -140 (todo 12maq21). Bounds that bind in either
+# direction bias the same way: on one-row units z_i ~ N(0, σ²), y_i ~ N(z_i, 1)
+# whose q(log σ) is wide (sd about 0.5; research/svi_reoptimize/step_variants.jl,
+# against the exact structured optimum), the square-root step's log σ ended up to
+# 0.55 optimal sds off with sd ratio 0.52-0.60 (3 data seeds), landing the precision
+# within [1/2, 2] per step and the mean within one sd 0.48-0.60 off with 0.50-0.60,
+# and the Newton step below -0.06 to 0.02 off with 0.98-1.01 (4 data seeds).
+#
+# A fit whose controls lack `reoptimize_newton` (a checkpoint of BRM 0.2.326 to
+# 0.2.335) keeps the square-root step it ran.
 _brm_svi_unit_reoptimize(c) = get(c, :unit_reoptimize, 0)
-_brm_svi_reoptimize_first_order(c) = get(c, :reoptimize_first_order, false)
+_brm_svi_reoptimize_newton(c) = get(c, :reoptimize_newton, false)
 
-# The re-optimization step: the natural-gradient step of `_brm_svi_unit_step_full!`
-# to first order in the precision, Λ + βG = U (I + βĜ) Uᵀ, with the same β and mean
-# step, so that at β = 1 the precision is the estimate S₊ itself. Ĝ = S₊ - I ≥ -I,
-# so I + βĜ is positive semidefinite for β ≤ 1; along a direction whose estimate
-# falls below half the current precision it is held at half, the smallest factor
-# the square-root form takes in one step.
-function _brm_svi_unit_step_conditional!(q, i, gz, S; positive=true)
+# How far one re-optimization step may move a unit's precision along a direction
+# (a factor within [1/b, b]) and its mean (in sds of the factor before the step). A
+# quadratic unit's estimate is exact, and these bounds only guard a noisy estimate
+# on a non-quadratic one: a curvature read as zero, which would leave the factor
+# singular, or a Newton step from far off its optimum.
+const _BRM_SVI_REOPT_PRECISION_BOUND = 100.0
+const _BRM_SVI_REOPT_MEAN_TRUST = 4.0
+
+# The re-optimization step: whitened, the precision becomes U S₊ Uᵀ, the estimate's
+# positive part with each eigenvalue held within the bound, and the mean moves by the
+# Newton step Λ⁻¹ gz at that precision.
+function _brm_svi_unit_step_newton!(q, i, gz, S; positive=true)
     isempty(q.M[i]) && return q
     U = LowerTriangular(q.U[i])
     all(isfinite, S) || throw(ArgumentError(
         "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
     Ŝ = Symmetric((S .+ S') ./ 2)
-    F = eigen(Symmetric((positive ? _brm_svi_positive_part(Ŝ) : Ŝ) - I))
-    r = maximum(abs, F.values)
-    β = r > 0 ? min(1.0, _BRM_SVI_UNIT_TRUST / r) : 1.0
-    f = max.(1 .+ β .* F.values, 0.5)
+    F = eigen(positive ? _brm_svi_positive_part(Ŝ) : Ŝ)
+    b = _BRM_SVI_REOPT_PRECISION_BOUND
+    f = clamp.(F.values, 1 / b, b)
     R = qr(Matrix((U * F.vectors * Diagonal(sqrt.(f)))')).R
     L = LowerTriangular(R' * Diagonal(sign.(diag(R))))
-    Δ = β .* (L' \ (L \ gz))
-    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
+    Δ = L' \ (L \ gz)
+    Δ .*= min(1.0, _BRM_SVI_REOPT_MEAN_TRUST / norm(U' * Δ))
     q.U[i] .= L
     q.Λ[i] .= L * L'
     q.M[i] .+= Δ
@@ -833,7 +847,7 @@ function _brm_svi_unit_step_conditional!(q, i, gz, S; positive=true)
 end
 
 function _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, centering,
-                                    frame, positive_part; first_order=true)
+                                    frame, positive_part; newton=true)
     D = length(t.globals)
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         designs[k] === nothing && return
@@ -847,8 +861,8 @@ function _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, cent
             # A non-finite evaluation stops this unit's re-optimization; the
             # iteration's own terms report it (`_brm_svi_check_finite`).
             r.problem === nothing && all(isfinite, r.S) && all(isfinite, r.gz) || break
-            first_order ?
-                _brm_svi_unit_step_conditional!(q, i, r.gz, r.S; positive=positive_part) :
+            newton ?
+                _brm_svi_unit_step_newton!(q, i, r.gz, r.S; positive=positive_part) :
                 _brm_svi_unit_step_full!(q, i, r.gz, r.S, 1.0; positive=positive_part)
         end
     end
@@ -1218,7 +1232,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
         sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
         structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
-        coupling_scale=1.0, coupling_baseline=true, reoptimize=0, reoptimize_first_order=true)
+        coupling_scale=1.0, coupling_baseline=true, reoptimize=0, reoptimize_newton=true)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -1248,7 +1262,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             [_brm_svi_unit_design(rng, length(q.M[i])) for _ in 1:reoptimize] : nothing
             for i in batch]
         _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, centering,
-                                   frame, positive_part; first_order=reoptimize_first_order)
+                                   frame, positive_part; newton=reoptimize_newton)
     end
     centered = Vector{Any}(nothing, length(batch))
     # `sparse_globals = :collapsed`: each batch unit's site over its sparse globals
@@ -1558,7 +1572,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
         stationarity=true, coupling_baseline=true, coupling_warmup=true,
-        exploration_drift=stationarity, unit_reoptimize=0, reoptimize_first_order=true,
+        exploration_drift=stationarity, unit_reoptimize=0, reoptimize_newton=true,
         sparse_globals=:sites)
     B = min(batch_size, N)
     W = window === nothing ? max(cld(N, B), 100) : window
@@ -1573,7 +1587,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
        trend_skip=patience, stationarity, budget_polish=stationarity,
        coupling_baseline, coupling_warmup, exploration_drift, unit_reoptimize,
-       reoptimize_first_order, sparse_globals)
+       reoptimize_newton, sparse_globals)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1720,7 +1734,7 @@ function _brm_svi_advance!(run, t, c)
             sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
             coupling_baseline=_brm_svi_coupling_baseline(c),
             reoptimize=_brm_svi_unit_reoptimize(c),
-            reoptimize_first_order=_brm_svi_reoptimize_first_order(c))
+            reoptimize_newton=_brm_svi_reoptimize_newton(c))
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
