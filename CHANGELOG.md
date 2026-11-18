@@ -12,22 +12,55 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.338
+
+- The batched SAEM population gradient of a `brm_nlme_model` now uses plain
+  updates for its private gradient buffers when its reverse-mode Enzyme backend
+  leaves the choice open. Previously Enzyme used atomic updates in a process
+  with multiple threads. On builds that fuse derivative arithmetic, this could
+  change the last bits of the gradient and the result of a seeded SAEM fit.
+  For models evaluated through dynamic dispatch, the setting reaches the
+  model body with Enzyme dogfood `157b971e` or a later build carrying
+  `Enzyme.has_dogfood_repair(:atomic_add_dynamic_callees)`.
+  Explicit backend settings still take precedence.
+
+## 0.2.337
+
+- A fresh `brm_svi_fit`'s `LinearCoupling` divides each coupled row's step by
+  the mean square of that row's updates so far, in its conditional sds, wherever
+  it exceeds one, and a coupling step moves a unit's conditional mean by at most
+  a quarter of its factor's sd (it was one sd). At the constant settling step a
+  row's coupling wanders around its optimum by about `step × m / 4` squared
+  conditional sds, `m` that mean square. On a funnel row the data barely inform,
+  such as a population spread that one unit alone reads beside its non-centred
+  event step, `m` reached 16 to 25 and grew with the wander, and rare draws deep
+  in the funnel moved the row by up to a sd at once. That unit's rows then
+  reached 2 to 4.5 conditional sds, its over-dispersed draws pulled a 32-unit
+  event panel's population AR(1) from 0.67 (`coupling = nothing`) to 0.95, and
+  the ELBO fell 70 to 250 nats below the independent fit's. The scale is read
+  before a visit's own update joins it, so every fixed point is unchanged; rows
+  whose updates stay within one conditional sd step as before unless a step would
+  move the mean by more than the quarter sd. **Breaking (results):** a fresh
+  default fit with such a row differs from earlier versions'. Optimizer
+  checkpoints keep their saved step (unscaled, one-sd bound).
+
 ## 0.2.336
 
-- The batched SAEM population gradient of a `brm_nlme_model` (NLMEEstimation's
-  `BatchedEvaluation` route) asks Enzyme for plain shadow updates,
-  `set_atomic_add(mode, false)`: its shadows are private to the call. Before,
-  Enzyme compiled them as atomic updates in any process with more than one
-  thread, and on a dogfood Enzyme with derivative contraction (`1be97c08` and
-  later) an atomic update rounds the multiply and the add separately where a
-  plain one fuses them. The same gradient then differed in its last bits
-  between a 1- and a 4-thread process, and so did a seeded SAEM fit. With an
-  Enzyme that passes the setting on to dynamically dispatched callees (dogfood
-  `157b971e` and later; `Enzyme.has_dogfood_repair(:atomic_add_dynamic_callees)`)
-  the gradient no longer depends on the process's thread count. With an earlier
-  Enzyme the setting reaches only the statically compiled packing and sum, not
-  the model body behind `invokelatest`. Results in a 1-thread process are
-  unchanged bit for bit.
+- `jax_source(rk.model, rk_bound_plan(rk))` translates a `name = constant(expr)`
+  that a data-only assignment reads (`xs = (x - loc) / scale` with
+  `loc = constant(x_loc)`), for `@brm` and `brm(source; mod)` models: the
+  module's `prepare_data` computes it from the fit-role copies of its inputs
+  and refuses a non-finite value as the native graph does, so it is no longer a
+  module input. Before, each such constant was listed in `m.UNTRANSLATED` and
+  `rk_bound_data(rk, src)` supplied it from Julia; read inside a `@plate` cell,
+  it made `jax_source` raise `JAXEmissionError: isa cannot be decided`. An
+  `expr` RK cannot translate still stays an input, with its reason. Native
+  values are unchanged. The emitted RK program of a `@brm` model with such a
+  constant now defines one function per constant that calls the compiled
+  expression, as a `brm(source; mod)` model's already did. The native error for
+  a non-finite constant in the graph now says so ("evaluated to … in the graph;
+  a constant is one finite real number or an array of them") instead of
+  reporting a type mismatch.
 
 ## 0.2.335
 

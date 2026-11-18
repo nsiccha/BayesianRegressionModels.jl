@@ -52,6 +52,38 @@
 # unit's conditional mean at a typical ζ by more than one sd of its factor is
 # shortened, as the mean's step is (`_BRM_SVI_UNIT_MEAN_TRUST`).
 #
+# At a constant β the coupling does not settle at V_i*: its noise keeps it
+# wandering around V_i*. A row's squared wander is about β m / 4 of its
+# conditional variance, m being the mean square of its updates in its conditional
+# sds (a_r² / σ_r², a = Λ⁻¹ (∇̄ - b)). Polishing averages the wander out, but
+# settling runs at constant β. On a Gaussian row m is of order one or less, and
+# the wander is small. A row the data barely inform and whose conditional is a
+# funnel, such as a population spread that one unit alone reads with its
+# non-centred step, is different: its updates' rms reached 4 to 5 conditional sds
+# on snag default-linearco-49897cce's 32-unit event panel. The wander also feeds
+# itself, because a wider coupled draw lands deeper in the funnel, where the
+# gradients are larger (rms about 1 at step 0.1). The row's coupling sd then
+# reached 1.4 to 2.2 times its conditional sd within a few hundred visits, with
+# entries that were noise (median |t| of their updates 0.5), and the unit's
+# over-dispersed draws pulled the population AR(1) towards 1. So a fresh coupling
+# keeps each coupled row's mean square m over all its updates so far and divides
+# that row's step by m wherever m exceeds one, which holds its squared wander near
+# β/4. The scale is read before the visit's own update enters it, so it does not
+# depend on the current draw and every fixed point stays. Such a row's updates
+# are heavy-tailed: a rare draw deep in the funnel gives one far larger than the
+# rest. The whole-history mean keeps those in m, where a window of the last 50
+# visits forgot them between spikes. A fresh coupling's step also moves the
+# conditional mean at a typical ζ by at most `_BRM_SVI_COUPLING_TRUST` (a quarter)
+# of the factor's sd rather than a whole one: a typical step moves it by
+# β |a| ‖ζ‖ / 2k, a tenth or less, so the bound binds only on such a spike. A
+# whole-sd spike, reverted at the scaled step's slow rate, otherwise held the row
+# near one sd. On that panel the 50-visit window with the one-sd bound let a
+# row reach 1.4 sds once (SVI seed 1, iteration 64,000).
+# A row whose updates stay within one conditional sd steps as before unless a step
+# would move the mean by more than the quarter sd. A noisier row approaches its
+# fixed point more slowly: far from it, its distance is part of m. Optimizer
+# checkpoints without this state keep the unscaled step and the one-sd bound.
+#
 # Fresh runs hold V_i at zero during exploration, establishing the independent
 # factors before learning their dependence in settling and polishing. On the
 # event/Kalman regression, coupling from the start sent the globals toward a
@@ -86,7 +118,12 @@ own map). Fresh fits hold `V_i` at zero during exploration, then learn it when
 the unit is in the batch during settling and polishing. Its scaled
 natural-gradient step has size `step` (about `step / 2k` of the way to its
 quadratic fixed point per visit, for `k` coupling noise components), with a
-mean-point gradient baseline that removes noise from unsettled unit means.
+mean-point gradient baseline that removes noise from unsettled unit means. A
+coupled row whose updates are noisier than one conditional sd (a population spread
+that one unit alone reads, in a funnel with its non-centred step) has its step
+divided by their mean square, and a fresh coupling's step moves a unit's
+conditional mean by at most a quarter of its sd, so the coupling's noise cannot
+widen that row.
 It keeps the dependence between a
 population value and the units that the data pin only together, whatever the
 model's authoring, which independent factors lose. The global factor's and the
@@ -201,8 +238,20 @@ function _brm_svi_with_coupling(t, q, coupling::LinearCoupling)
     columns = [_brm_svi_coupling_columns(t, i) for i in eachindex(t.units)]
     rows = [_brm_svi_coupling_rows(t, i) for i in eachindex(t.units)]
     V = [zeros(length(rows[i]), length(columns[i]) + r) for i in eachindex(t.units)]
-    t, merge(q, (; coupling=(; coupling.step, columns, rows, V)))
+    # Each coupled row's running mean square of its update in conditional sds, and
+    # the visits it has been updated on (the noise scale, above).
+    noise = [zeros(length(rows[i])) for i in eachindex(t.units)]
+    updates = zeros(Int, length(t.units))
+    t, merge(q, (; coupling=(; coupling.step, columns, rows, V, noise, updates)))
 end
+
+# How far one step of a fresh coupling may move a unit's conditional mean at a
+# typical draw of the globals, in sds of its factor (the noise scale, above).
+const _BRM_SVI_COUPLING_TRUST = 0.25
+
+# Whether a run's coupling scales its rows' steps by their noise: fresh couplings
+# since snag default-linearco-49897cce; older optimizer checkpoints lack the state.
+_brm_svi_coupling_scaled(coupling) = hasproperty(coupling, :noise)
 
 # A sparse global steps on its readers' sites (src/nlme_svi_sites.jl), and a site's
 # curvature is Stein's estimate along that global's own draw ε, the reader's
@@ -271,6 +320,47 @@ function _brm_svi_coupling_direction(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot,
     exp.(2 .* f.ρ[rows]) .* x .+ B * (B' * x)
 end
 
+# The diagonal of the coupled rows' direction operator, (Λ_RR)⁻¹: their
+# conditional variances. A structured unit's is that of its covariance block Σ_RR,
+# the operator its direction uses.
+function _brm_svi_coupling_variances(q, i, rows)
+    length(rows) == length(q.M[i]) && return _brm_svi_unit_variances(q.U[i])
+    _brm_svi_coupling_variances(q.Λ[i], q.U[i], rows)
+end
+_brm_svi_coupling_variances(Λ::AbstractMatrix, U, rows) =
+    vec(sum(abs2, inv(cholesky(Symmetric(Λ[rows, rows])).L); dims=1))
+_brm_svi_coupling_variances(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows) =
+    (f = U.factor; exp.(2 .* f.ρ[rows]) .+ vec(sum(abs2, view(f.Β, rows, :); dims=2)))
+
+# y' A y for a step y of the coupled rows, A the inverse of their direction
+# operator: Λ_RR, or for a structured unit Σ_RR⁻¹ (by Woodbury's identity).
+_brm_svi_coupling_norm2(q, i, rows, y) = _brm_svi_coupling_norm2(q.Λ[i], q.U[i], rows, y)
+_brm_svi_coupling_norm2(Λ::AbstractMatrix, U, rows, y) = dot(y, Symmetric(Λ[rows, rows]) * y)
+function _brm_svi_coupling_norm2(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows, y)
+    f = U.factor
+    d = exp.(2 .* f.ρ[rows])
+    B = f.Β[rows, :]
+    w = y ./ d
+    C = cholesky(Symmetric(I + B' * (B ./ d)))
+    dot(y, w) - sum(abs2, C.L \ (B' * w))
+end
+
+# Each coupled row's step scale: one over the mean square of its updates so far in
+# conditional sds where that exceeds one, otherwise one (also before its first
+# update). A row stepped at s β with updates of mean square m wanders by about
+# s β m / 4 squared sds, so s = 1/m holds that at β/4 whatever the noise (1/rms
+# would leave it growing like rms).
+_brm_svi_coupling_row_scales(coupling, i) = 1 ./ max.(1.0, coupling.noise[i])
+
+# This visit's update a joins unit i's rows' mean squares, in their conditional sds.
+function _brm_svi_coupling_noise!(coupling, q, i, rows, a)
+    n = coupling.updates[i] += 1
+    σ2 = _brm_svi_coupling_variances(q, i, rows)
+    m = coupling.noise[i]
+    @. m += (a^2 / σ2 - m) / n
+    m
+end
+
 # The step of unit i's coupling from ∇̄, its gradient averaged over the visit's
 # antithetic draws at ζ, with its factor before this visit's step.
 function _brm_svi_coupling_step!(coupling, q, i, ∇̄, ζ, β)
@@ -283,11 +373,22 @@ function _brm_svi_coupling_step!(coupling, q, i, ∇̄, ζ, β)
     all(isfinite, a) || throw(ArgumentError(
         "brm_svi: non-finite unit gradient in its coupling step"))
     den = 2length(ζ)
+    # The rows' scales from their earlier updates, read before this one joins them.
+    s, trust = nothing, _BRM_SVI_UNIT_MEAN_TRUST
+    if _brm_svi_coupling_scaled(coupling)
+        s, trust = _brm_svi_coupling_row_scales(coupling, i), _BRM_SVI_COUPLING_TRUST
+        _brm_svi_coupling_noise!(coupling, q, i, rows, a)
+    end
     # At a fresh ζ' the conditional mean moves by ΔV ζ', whose rms in the
-    # factor's sds is β sqrt(∇̄_R' a) ‖ζ‖ / den.
-    reach = sqrt(max(dot(view(∇̄, rows), a), 0.0)) * sqrt(n2) / den
+    # factor's sds is β sqrt(∇̄_R' a) ‖ζ‖ / den for the unscaled step.
+    if s === nothing || all(isone, s)
+        reach = sqrt(max(dot(view(∇̄, rows), a), 0.0)) * sqrt(n2) / den
+    else
+        a = a .* s
+        reach = sqrt(max(_brm_svi_coupling_norm2(q, i, rows, a), 0.0)) * sqrt(n2) / den
+    end
     reach > 0 || return q
-    β = min(β, _BRM_SVI_UNIT_MEAN_TRUST / reach)
+    β = min(β, trust / reach)
     BLAS.ger!(β / den, a, ζ, V)
     q
 end
@@ -333,9 +434,12 @@ function _brm_svi_coupling_consistent(q, t)
     coupling = _brm_svi_coupling(q)
     coupling === nothing && return true
     r = size(q.Β, 2)
+    scaled = _brm_svi_coupling_scaled(coupling)
     length(coupling.V) == length(coupling.columns) == length(coupling.rows) ==
         length(t.units) &&
+        (!scaled || length(coupling.noise) == length(coupling.updates) == length(t.units)) &&
         all(i -> size(coupling.V[i]) == (length(coupling.rows[i]), length(coupling.columns[i]) + r) &&
+            (!scaled || length(coupling.noise[i]) == length(coupling.rows[i])) &&
             all(j -> 1 <= j <= length(t.units[i]), coupling.rows[i]) &&
             all(k -> 1 <= k <= length(t.globals), coupling.columns[i]), eachindex(t.units))
 end

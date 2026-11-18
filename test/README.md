@@ -40,7 +40,12 @@ constants, untranslated data-only definitions, and frozen/fresh/data-free
 replays. It checks exact module input names, read-only data, reuse of computed
 values, native binding/checkpoint identity stability, and native/JAX densities
 and gradients against independent formulas. Set `RK_JAX_PYTHON` to a Python with
-JAX for the numerical module checks. `rk_jax.jl` covers the broader module
+JAX for the numerical module checks. Its last testset builds `constant(...)`
+values a data-only assignment reads (scalar data fields, column moments, an
+array, a `@plate` covariate) with both builders and checks that `prepare_data`
+computes them (`UNTRANSLATED = {}`, no constant among the inputs), that native
+densities equal the supplied-field twin's, and that a non-finite fit input is
+refused in Python as natively. `rk_jax.jl` covers the broader module
 contract, including retained plate vectors from one module on fitted and
 replay data with different subject/visit counts, and `jax_module_driver.jl`
 uses the same public accessor. The retained-vector check requires RK 0.1.231.
@@ -1936,12 +1941,9 @@ cells and a modeled scale shared by the observations in each cell. A periodic
 checked at `type_stability = :error`, the sparse Laplace probe's data prefix
 included. `runtime_numeric_settings.jl` checks that model's cell factors against
 its whole likelihood in the test environment, so a landing that runs only that
-environment still reaches them. It also pins that the batched population
-gradient is taken with Enzyme's plain shadow updates
-(`set_atomic_add(mode, false)`) and returns the gradient of that mode. This
-environment's Enzyme predates derivative contraction, where atomic and plain
-updates round alike, so the 1- versus 4-thread difference that change removes
-(snag `event-kernel-pop-1ec6dab9`) cannot show here.
+environment still reaches them. The NLME extension test checks the batched
+population gradient's Enzyme mode selection, preservation of explicit modes,
+and agreement with an explicitly plain-mode derivative on a plate PK fixture.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 
@@ -2747,6 +2749,15 @@ default for data taking the same arms, under `branch_arms = :all` for data
 taking others, with values and gradients against the law written out by hand.
 It fails on ReactiveKernels 0.1.289, where every build got a new type (snag
 `rk-logdensity-pr-b8b1cc36`; fixed in ReactiveKernels 0.1.307 and 0.1.308).
+`rk_nonfinite_gradient_recovery.jl` checks that one evaluation of an
+`rk_logdensity_problem` whose answer is not finite, or that throws, leaves the
+next gradient at a good point bit for bit what it was before, also in a
+`deepcopy` taken after it: a correlated random-effect block with a scale at 800
+or 1e300, and a rate that overflows or that a guard refuses. Each extreme point
+must give a non-finite answer or throw, and the pinned Enzyme must carry the
+`blas_overwritten_output` repair. It fails on Enzyme dogfood before `cb2b2b1e`,
+whose reverse BLAS rules kept a `NaN` in a reused buffer's shadow (snag
+`rk-logdensity-pr-a8c1995e`; the pin in `setup_env.jl`).
 `rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
 grouped argument collection, explicit ragged joins, empty cells, broadcasting,
 elementwise argument expressions and unchanged data ports. Each case checks

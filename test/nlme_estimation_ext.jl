@@ -337,11 +337,8 @@ end
     # multiply and the add separately where a plain one fuses them, so the
     # batched population gradient of one seeded SAEM fit differed in its last
     # bits between a 1- and a 4-thread process. The derivative's shadows are
-    # private to the call, so the extension asks for plain updates. This
-    # environment's Enzyme predates that contraction, where both updates round
-    # alike, so the cross-process difference cannot show here: this pins the
-    # mode the gradient is taken with, and that the public gradient is the one
-    # taken with it.
+    # private to the call. Check the backend selection and compare the
+    # batched gradient with the same objective differentiated in plain mode.
     isdefined(Enzyme, :set_atomic_add) || error(
         "this testset needs an Enzyme with `set_atomic_add` (the dogfood line test/setup_env.jl pins)")
     m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
