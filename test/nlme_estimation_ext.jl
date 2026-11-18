@@ -329,6 +329,49 @@ end
     end
 end
 
+@stestset "batched population gradient takes plain shadow updates" begin
+    # Snag event-kernel-pop-1ec6dab9. In a process with more than one
+    # default-pool thread, Enzyme compiles every shadow accumulation as an
+    # atomic update unless the mode says otherwise. On a dogfood Enzyme with
+    # derivative contraction (1be97c08 and later) an atomic update rounds the
+    # multiply and the add separately where a plain one fuses them, so the
+    # batched population gradient of one seeded SAEM fit differed in its last
+    # bits between a 1- and a 4-thread process. The derivative's shadows are
+    # private to the call, so the extension asks for plain updates. This
+    # environment's Enzyme predates that contraction, where both updates round
+    # alike, so the cross-process difference cannot show here: this pins the
+    # mode the gradient is taken with, and that the public gradient is the one
+    # taken with it.
+    isdefined(Enzyme, :set_atomic_add) || error(
+        "this testset needs an Enzyme with `set_atomic_add` (the dogfood line test/setup_env.jl pins)")
+    m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    stock = NLMEEstimation.ad_backend(m)
+    owned = NLMEEXT._owned_shadow_backend(stock)
+    @test Enzyme.atomic_add(stock.mode) === nothing
+    @test owned.mode === Enzyme.set_atomic_add(stock.mode, false)
+    @test Enzyme.runtime_activity(owned.mode) === Enzyme.runtime_activity(stock.mode)
+    # A mode that already chose is kept, and so is a forward mode.
+    for chosen in (true, false)
+        backend = AutoEnzyme(; mode=Enzyme.set_atomic_add(stock.mode, chosen))
+        @test NLMEEXT._owned_shadow_backend(backend) === backend
+    end
+    forward = AutoEnzyme(; mode=Enzyme.Forward)
+    @test NLMEEXT._owned_shadow_backend(forward) === forward
+    θ, σ = plate_pk_point(m)
+    subjects = [3, 1]
+    H = 0.1 .* reshape(collect(1.0:4.0), 2, :) .- 0.2
+    value, gradient = NLMEEstimation._saem_population_value_gradient(
+        BatchedEvaluation(), m, subjects, θ, σ, H)
+    plain_value, plain_gradient = NLMEEXT.DI.value_and_gradient(
+        NLMEEXT._population_objective, owned, vcat(θ, σ),
+        NLMEEXT.DI.Constant(NLMEEXT._population_context(m)),
+        NLMEEXT.DI.Constant(subjects),
+        NLMEEXT.DI.Constant(NLMEEXT._batch_eta(m, subjects, H)),
+        NLMEEXT.DI.Constant(length(θ)))
+    @test value === plain_value
+    @test gradient == plain_gradient
+end
+
 @stestset "protocol subsets preserve values and bounded allocations as units grow" begin
     measured = map((3, 9, 27)) do n
         d = NLME_PLATE_DATA

@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.336
+
+- The batched SAEM population gradient of a `brm_nlme_model` (NLMEEstimation's
+  `BatchedEvaluation` route) asks Enzyme for plain shadow updates,
+  `set_atomic_add(mode, false)`: its shadows are private to the call. Before,
+  Enzyme compiled them as atomic updates in any process with more than one
+  thread, and on a dogfood Enzyme with derivative contraction (`1be97c08` and
+  later) an atomic update rounds the multiply and the add separately where a
+  plain one fuses them. The same gradient then differed in its last bits
+  between a 1- and a 4-thread process, and so did a seeded SAEM fit. With an
+  Enzyme that passes the setting on to dynamically dispatched callees (dogfood
+  `157b971e` and later; `Enzyme.has_dogfood_repair(:atomic_add_dynamic_callees)`)
+  the gradient no longer depends on the process's thread count. With an earlier
+  Enzyme the setting reaches only the statically compiled packing and sum, not
+  the model body behind `invokelatest`. Results in a 1-thread process are
+  unchanged bit for bit.
+
 ## 0.2.335
 
 - `adaptive_centering_cells(rk::RKBRMI)` and `adaptive_centering_problem(rk::RKBRMI,

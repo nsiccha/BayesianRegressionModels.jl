@@ -1936,7 +1936,12 @@ cells and a modeled scale shared by the observations in each cell. A periodic
 checked at `type_stability = :error`, the sparse Laplace probe's data prefix
 included. `runtime_numeric_settings.jl` checks that model's cell factors against
 its whole likelihood in the test environment, so a landing that runs only that
-environment still reaches them.
+environment still reaches them. It also pins that the batched population
+gradient is taken with Enzyme's plain shadow updates
+(`set_atomic_add(mode, false)`) and returns the gradient of that mode. This
+environment's Enzyme predates derivative contraction, where atomic and plain
+updates round alike, so the 1- versus 4-thread difference that change removes
+(snag `event-kernel-pop-1ec6dab9`) cannot show here.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 
