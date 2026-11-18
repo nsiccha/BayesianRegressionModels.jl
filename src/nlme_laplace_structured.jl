@@ -312,7 +312,7 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     omega = findall(r -> r === :subject_scale || r === :subject_correlation, view.role)
     # The units' blocks only: a block over a grouping in `shared_groups` is
     # population coordinates.
-    records = [r for r in _rk_coordinate_records(backend.plan)
+    records = [r for r in _rk_coordinate_records(backend)
         if r.kind === :ranef && r.group ∉ view.shared_groups]
     effects = Tuple(_brm_nlme_ranef_declaration(r) for r in records)
     families, ports = _brm_slap_ports(backend, responses)

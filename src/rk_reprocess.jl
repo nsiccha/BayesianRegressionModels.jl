@@ -132,7 +132,9 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
             _rk_completion_mode(rk.plan)), car_units)
     end
     retained = _rk_retained_program(rk)
-    replayed = _rk_emit_ast(plan)
+    # This emission's coordinate inventory is the replay's, so preparing the
+    # replay (its start, its preparation point) emits nothing again.
+    replayed, records = _rk_emit_with_records(plan)
     _rk_check_replay_program(_rk_replay_statements(retained, rk.plan),
         _rk_replay_statements(replayed, plan); prefix)
     _rk_check_replay_priors(replayed, plan, _rk_scalar_data(parent(rk)), new_data; prefix)
@@ -141,8 +143,8 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     # The fit's program, translated once, binds the replay's data too, unless
     # a callable differs under the same name.
     program = _rk_same_callables(retained, replayed) ? rk.program : _RKOnce()
-    replay = RKBRMI(parent(rk), plan, rk.model; program, source=brm_source(rk),
-        model_plan=rk.model_plan)
+    replay = _rk_seed_coordinate_records!(RKBRMI(parent(rk), plan, rk.model; program,
+        source=brm_source(rk), model_plan=rk.model_plan), records)
     # Same coordinates, so the fit's draws mean the same thing on the replay.
     # Resampled groups size their effects by the new data's levels; a
     # forecast covariate's missing entries are the design's.
@@ -159,8 +161,9 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     # entries in place of the fit's), and a reused build describes its
     # original binding only: build the kernel for this binding, sharing the
     # fit's translated program.
-    RKBRMI(parent(rk), plan, _rk_rebuild_model(replay); program=replay.program,
-        bound=replay.bound, source=brm_source(rk), model_plan=plan)
+    _rk_seed_coordinate_records!(RKBRMI(parent(rk), plan, _rk_rebuild_model(replay);
+        program=replay.program, bound=replay.bound, source=brm_source(rk),
+        model_plan=plan), records)
 end
 
 # The kernel of a backend's own binding (ReactiveKernels package extension).

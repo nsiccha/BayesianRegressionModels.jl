@@ -82,19 +82,40 @@ _rk_strip_adaptive_records!(records) =
 
 _rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan};
         term_starts=false, adaptive=false) =
-    let records = Any[]
-        _rk_emit_ast(plan; coordinates=records)
-        term_starts || filter!(r -> r.kind !== :term_start, records)
-        adaptive || _rk_strip_adaptive_records!(records)
-        records
-    end
+    _rk_select_records!(last(_rk_emit_with_records(plan)); term_starts, adaptive)
 # An unconditioned program fits no declaration: each one is drawn in generated
 # quantities, so its inventory is empty, as the fitted pass leaves it for a
 # declaration no response reads (`_rk_drop_unfitted_records!`).
 _rk_coordinate_records(::_RKUnconditionedPlan; term_starts=false, adaptive=false) = Any[]
-_rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
+# A backend's inventory is its plan's, emitted once (`_BRMPreparedSlot`); each
+# call gets its own vector to filter.
+_rk_coordinate_records(rk::RKBRMI; term_starts=false, adaptive=false) =
+    _rk_select_records!(copy(_rk_once!(() -> _rk_coordinate_records(rk.plan;
+        term_starts=true, adaptive=true), rk.prepared.coordinates)); term_starts, adaptive)
+_rk_coordinate_records(plan; term_starts=false, adaptive=false) =
+    _brm_transport_error(:unsupported_coverage,
     "brm_coordinate_transport: an RK plan of kind `$(nameof(typeof(plan)))` has " *
     "no cross-backend coordinate inventory")
+
+function _rk_select_records!(records; term_starts, adaptive)
+    term_starts || filter!(r -> r.kind !== :term_start, records)
+    adaptive || _rk_strip_adaptive_records!(records)
+    records
+end
+
+# A plan's emitted program and its complete coordinate inventory, from one
+# emission; `nothing` for a plan with no inventory.
+function _rk_emit_with_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan})
+    records = Any[]
+    _rk_emit_ast(plan; coordinates=records), records
+end
+_rk_emit_with_records(plan::_RKUnconditionedPlan) = (_rk_emit_ast(plan), Any[])
+_rk_emit_with_records(plan) = (_rk_emit_ast(plan), nothing)
+
+# A backend whose inventory came from an emission already made.
+_rk_seed_coordinate_records!(rk::RKBRMI, ::Nothing) = rk
+_rk_seed_coordinate_records!(rk::RKBRMI, records) =
+    (_rk_once!(() -> records, rk.prepared.coordinates); rk)
 
 # The levels of a random-effect record's grouping, the rows of its
 # standardized draws `z`. A joined `|ID|` block's levels are its columns'
@@ -475,7 +496,7 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
         "brm_coordinate_transport: build both backends from the same BRMI instance")
     rk_names = Vector{Symbol}(_rk_layout_coordinate_names(rk))
     stan = _brm_stan_coordinate_names(stan_names)
-    records = _rk_coordinate_records(rk.plan)
+    records = _rk_coordinate_records(rk)
     d = brm_descriptor(sb)
     stan_pos = Dict{String,Int}(n => i for (i, n) in enumerate(stan))
     length(stan_pos) == length(stan) || error(
