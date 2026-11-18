@@ -11,7 +11,8 @@
 # coupling in default|none, counts in weak|strong|unbalanced. Writes
 # OUTDIR/nuts_<counts>.jls once and OUTDIR/<label>.jls per case. As the test does,
 # the NUTS reference runs after the first SVI fit of its data, on the same backend;
-# a reference whose completion quorum fails is reported and left NaN.
+# a reference whose completion quorum fails is reported and left NaN, and
+# PROBE_NUTS=0 skips it.
 const OUT = ARGS[1]
 mkpath(OUT)
 const CASES = split(ARGS[2], ",")
@@ -39,6 +40,8 @@ const COUNTS = Dict("weak" => fill(1, 32), "strong" => fill(50, 32),
 function nuts_reference(name, rk, n)
     path = joinpath(OUT, "nuts_$name.jls")
     isfile(path) && return deserialize(path)
+    get(ENV, "PROBE_NUTS", "1") == "0" &&
+        return (; mean=fill(NaN, n), sd=fill(NaN, n), draws=zeros(n, 0))
     reference = try
         nuts_run(rk)
     catch err
