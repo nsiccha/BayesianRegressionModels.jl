@@ -66,7 +66,11 @@ const CG = CouplingGradientArithmetic
                 curvature, coupling_baseline=enabled)
             push!(enabled ? baseline : plain, only(q.coupling.V[1]) - 0.4)
         end
-        @test sqrt(mean(abs2, plain)) > 0.5
+        # Without the baseline the unit's mean error shakes the coupling by as much
+        # as one step may move it: a fresh coupling's step moves the conditional
+        # mean by at most a quarter sd (snag default-linearco-49897cce), so that
+        # shake is about 0.24 here (0.5 and more under the earlier one-sd bound).
+        @test sqrt(mean(abs2, plain)) > 0.2
         @test maximum(abs, baseline) < 1e-12
     end
 end

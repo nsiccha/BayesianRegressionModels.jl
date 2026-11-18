@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.337
+## 0.2.338
 
 - `brm_svi_fit(...; unit_reoptimize = k)` re-optimizes a copy of each batch
   unit's factor at the iteration's draw of the globals, with `k` Newton steps to
@@ -32,6 +32,26 @@ instead of failing at run time.
   coupling and the controls nothing to learn from. `brm_svi_resume` of a
   checkpoint written before this release keeps the step it ran.
   `unit_reoptimize = 0`, the default, is unchanged to the bit.
+
+## 0.2.337
+
+- A fresh `brm_svi_fit`'s `LinearCoupling` divides each coupled row's step by
+  the mean square of that row's updates so far, in its conditional sds, wherever
+  it exceeds one, and a coupling step moves a unit's conditional mean by at most
+  a quarter of its factor's sd (it was one sd). At the constant settling step a
+  row's coupling wanders around its optimum by about `step × m / 4` squared
+  conditional sds, `m` that mean square. On a funnel row the data barely inform,
+  such as a population spread that one unit alone reads beside its non-centred
+  event step, `m` reached 16 to 25 and grew with the wander, and rare draws deep
+  in the funnel moved the row by up to a sd at once. That unit's rows then
+  reached 2 to 4.5 conditional sds, its over-dispersed draws pulled a 32-unit
+  event panel's population AR(1) from 0.67 (`coupling = nothing`) to 0.95, and
+  the ELBO fell 70 to 250 nats below the independent fit's. The scale is read
+  before a visit's own update joins it, so every fixed point is unchanged; rows
+  whose updates stay within one conditional sd step as before unless a step would
+  move the mean by more than the quarter sd. **Breaking (results):** a fresh
+  default fit with such a row differs from earlier versions'. Optimizer
+  checkpoints keep their saved step (unscaled, one-sd bound).
 
 ## 0.2.336
 
