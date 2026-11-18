@@ -9,14 +9,17 @@
 #
 # case = label:k:centering:coupling[:counts], centering in default|none|nodelay,
 # coupling in default|none, counts in weak|strong|unbalanced. Writes
-# OUTDIR/nuts_<counts>.jls once and OUTDIR/<label>.jls per case.
-const ROOT = get(ENV, "BRM_ROOT", pwd())
-include(joinpath(ROOT, "test", "nlme_fixtures.jl"))
-using Random, Statistics, Serialization, WarmupHMC, MCMCDiagnosticTools, Printf
-
+# OUTDIR/nuts_<counts>.jls once and OUTDIR/<label>.jls per case. As the test does,
+# the NUTS reference runs after the first SVI fit of its data, on the same backend;
+# a reference whose completion quorum fails is reported and left NaN.
 const OUT = ARGS[1]
 mkpath(OUT)
 const CASES = split(ARGS[2], ",")
+# test/testset_filter.jl reads ARGS as testset filters.
+empty!(ARGS)
+const ROOT = get(ENV, "BRM_ROOT", pwd())
+include(joinpath(ROOT, "test", "nlme_fixtures.jl"))
+using Random, Statistics, Serialization, WarmupHMC, MCMCDiagnosticTools, Printf
 
 function default_centering_data(counts; seed=1)
     rng = Xoshiro(seed)
@@ -33,17 +36,26 @@ end
 const COUNTS = Dict("weak" => fill(1, 32), "strong" => fill(50, 32),
     "unbalanced" => repeat([1, 50], 16))
 
-function nuts_reference(name, rk)
+function nuts_reference(name, rk, n)
     path = joinpath(OUT, "nuts_$name.jls")
     isfile(path) && return deserialize(path)
-    problems = [rk_logdensity_problem(rk; ad_backend=NLME_AD) for _ in 1:4]
-    init = brm_start(rk; chains=4, rng=Xoshiro(3))
-    reference = completion_warmup_mcmc([Xoshiro(10 + c) for c in 1:4], problems;
-        min_completed=4, n_draws=1000, blas_threads=1, init)
+    reference = try
+        nuts_run(rk)
+    catch err
+        println("NUTS reference for $name failed: ", sprint(showerror, err))
+        return (; mean=fill(NaN, n), sd=fill(NaN, n), draws=zeros(n, 0))
+    end
     X = hcat([Matrix{Float64}(r.posterior_position) for r in reference.results]...)
     ref = (; mean=vec(mean(X; dims=2)), sd=vec(std(X; dims=2)), draws=X)
     serialize(path, ref)
     ref
+end
+
+function nuts_run(rk)
+    problems = [rk_logdensity_problem(rk; ad_backend=NLME_AD) for _ in 1:4]
+    init = brm_start(rk; chains=4, rng=Xoshiro(3))
+    reference = completion_warmup_mcmc([Xoshiro(10 + c) for c in 1:4], problems;
+        min_completed=4, n_draws=1000, blas_threads=1, init)
 end
 
 control(x) = BRM._brm_svi_control(x)
@@ -53,7 +65,6 @@ for spec in CASES
     label, k, cmode, pmode = parts[1], parse(Int, parts[2]), parts[3], parts[4]
     cname = length(parts) >= 5 ? parts[5] : "weak"
     rk = RKBRMI(default_centering_model(default_centering_data(COUNTS[cname])))
-    ref = nuts_reference(cname, rk)
     kw = Dict{Symbol,Any}()
     cmode == "none" && (kw[:centering] = nothing)
     cmode == "nodelay" && (kw[:centering] = LearnedCentering(; delay=false))
@@ -75,6 +86,7 @@ for spec in CASES
     end
     fit = brm_svi_fit(save, rk; subject_group=:g, batch_size=8, rng=Xoshiro(2), ndraws=4000,
         unit_reoptimize=k, kw...)
+    ref = nuts_reference(cname, rk, length(fit.coordinates))
     names = fit.coordinates[fit.diagnostics.globals]
     gpos = fit.diagnostics.globals
     println("CASE $label k=$k centering=$cmode coupling=$pmode counts=$cname " *
