@@ -19,7 +19,13 @@ instead of failing at run time.
   its conditional optimum, and the globals step on the copy's terms. The precision
   lands on the orthogonal design's curvature estimate (each direction within a
   factor of 100 per step) and the mean on the optimum it puts it at (within four
-  sds of the factor before the step). The units' own factors, their coupling and
+  sds of the factor before the step). A step stands only where it raises the
+  unit's objective at that draw (its expected log density plus entropy); otherwise
+  the globals read the factor before it, at first the unit's own. On a unit
+  Gaussian given the globals every step stands; on `test/nlme_svi_trend.jl`'s
+  ridge, whose units pin `exp(m + s z_i)`, half the unchecked copies early on were
+  worse than the unit's own factor and pulled the noise scale up until most seeds
+  stopped far from the posterior. The units' own factors, their coupling and
   their centering controls now step as at `k = 0`, and the ELBO trace reads them.
   Until now each unit's own factor took its square-root natural-gradient step in
   place, which at step 1 lands the precision above the curvature by
