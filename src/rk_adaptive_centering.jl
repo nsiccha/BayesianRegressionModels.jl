@@ -23,7 +23,7 @@ end
 # ordinary and stratified blocks, and the adaptive-only records of
 # multi-membership (`:mm_ranef`) and R2D2-scaled (`:r2d2_ranef`) blocks.
 _rk_adaptive_records(rk::RKBRMI) =
-    [r for r in _rk_coordinate_records(rk.plan; adaptive=true)
+    [r for r in _rk_coordinate_records(rk; adaptive=true)
      if r.kind in (:ranef, :stratified_ranef, :mm_ranef, :r2d2_ranef)]
 
 # A record's grouping levels, the rows of its draws `z`: a multi-membership
@@ -400,7 +400,7 @@ end
 function _rk_adaptive_population(rk::RKBRMI, pos)
     transforms = _rk_layout_coordinate_transforms(rk)
     out = Dict{Tuple{Symbol,Symbol},Int}()
-    for r in _rk_coordinate_records(rk.plan)
+    for r in _rk_coordinate_records(rk)
         r.kind === :population || continue
         index = get(r, :index, ())
         name = isempty(index) ? String(r.declaration) :
@@ -422,7 +422,7 @@ end
 function _rk_adaptive_factor_levels(rk::RKBRMI, predictor, group_rows, G, pos,
                                     transforms)
     out = Vector{Int}[]
-    for r in _rk_coordinate_records(rk.plan)
+    for r in _rk_coordinate_records(rk)
         r.kind === :population_block && r.predictor === predictor || continue
         level = _rk_adaptive_factor_level(rk, r, group_rows, G, pos, transforms)
         isnothing(level) || push!(out, level)
@@ -570,7 +570,7 @@ function _rk_adaptive_car_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_nam
     bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
     population = _rk_adaptive_population(rk, pos)
     out = _CARAdaptiveCenteringBlock[]
-    for r in _rk_coordinate_records(rk.plan)
+    for r in _rk_coordinate_records(rk)
         r.kind === :car || continue
         r.separation === nothing || error(
             "BRM adaptive centering on RKBRMI: car field `$(r.declaration)` is ",
@@ -616,7 +616,7 @@ function _rk_adaptive_cdar_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
     pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
     bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
     out = _CDARAdaptiveCenteringBlock[]
-    for r in _rk_coordinate_records(rk.plan)
+    for r in _rk_coordinate_records(rk)
         r.kind === :cdar || continue
         P, W = length(r.levels), length(r.steps)
         eta_names = [string(r.declaration, ".", r.locals.eta, ".", p, ".", w)
@@ -723,7 +723,7 @@ function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
     pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
     bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
     out = _HSGPAdaptiveCenteringBlock[]
-    for r in _rk_coordinate_records(rk.plan)
+    for r in _rk_coordinate_records(rk)
         r.kind === :hsgp && !_rk_hsgp_level_mapped(rk, r) || continue
         o = _rk_adaptive_hsgp_term(rk, r.declaration).options
         periodic = get(o, :cov, :exp_quad) === :periodic
@@ -845,7 +845,7 @@ _rk_hsgp_level_mapped(rk::RKBRMI, r) = r.kind === :hsgp && r.grouped &&
     (r.level_correlation ||
      !isempty(_rk_adaptive_hsgp_term(rk, r.declaration).options.hyper_plans))
 _rk_has_hsgp_level_terms(rk::RKBRMI) =
-    any(r -> _rk_hsgp_level_mapped(rk, r), _rk_coordinate_records(rk.plan))
+    any(r -> _rk_hsgp_level_mapped(rk, r), _rk_coordinate_records(rk))
 
 """
     _rk_adaptive_hsgp_level_blocks(rk::RKBRMI, unc_names=<the RK layout names>)
@@ -864,7 +864,7 @@ function _rk_adaptive_hsgp_level_blocks(rk::RKBRMI,
     transforms = _rk_layout_coordinate_transforms(rk)
     bounds = _rk_adaptive_scale_bounds(rk, transforms)
     out = _HSGPLevelAdaptiveCenteringBlock[]
-    for r in _rk_coordinate_records(rk.plan)
+    for r in _rk_coordinate_records(rk)
         _rk_hsgp_level_mapped(rk, r) || continue
         o = _rk_adaptive_hsgp_term(rk, r.declaration).options
         decl = r.declaration

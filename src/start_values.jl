@@ -469,7 +469,7 @@ function _brm_rk_start(rk::RKBRMI, inits::NamedTuple;
         component_inits=(), lenient=false)
     u0 = _brm_start_base_vector(base, length(_rk_layout_coordinate_names(rk)), "RK layout")
     _brm_rk_start_unconditioned(rk.plan, inits, term_inits, component_inits)
-    records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk.plan; term_starts=true)]
+    records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk; term_starts=true)]
     values = _rk_constrained_values(rk, u0)
     writes = Tuple{Symbol,Tuple,Any}[]
     effects = NamedTuple[]

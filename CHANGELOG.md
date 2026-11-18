@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.336
+
+- `jax_source(rk.model, rk_bound_plan(rk))` translates a `name = constant(expr)`
+  that a data-only assignment reads (`xs = (x - loc) / scale` with
+  `loc = constant(x_loc)`), for `@brm` and `brm(source; mod)` models: the
+  module's `prepare_data` computes it from the fit-role copies of its inputs
+  and refuses a non-finite value as the native graph does, so it is no longer a
+  module input. Before, each such constant was listed in `m.UNTRANSLATED` and
+  `rk_bound_data(rk, src)` supplied it from Julia; read inside a `@plate` cell,
+  it made `jax_source` raise `JAXEmissionError: isa cannot be decided`. An
+  `expr` RK cannot translate still stays an input, with its reason. Native
+  values are unchanged. The emitted RK program of a `@brm` model with such a
+  constant now defines one function per constant that calls the compiled
+  expression, as a `brm(source; mod)` model's already did. The native error for
+  a non-finite constant in the graph now says so ("evaluated to … in the graph;
+  a constant is one finite real number or an array of them") instead of
+  reporting a type mismatch.
+
 ## 0.2.335
 
 - `adaptive_centering_cells(rk::RKBRMI)` and `adaptive_centering_problem(rk::RKBRMI,
