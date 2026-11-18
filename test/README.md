@@ -40,7 +40,12 @@ constants, untranslated data-only definitions, and frozen/fresh/data-free
 replays. It checks exact module input names, read-only data, reuse of computed
 values, native binding/checkpoint identity stability, and native/JAX densities
 and gradients against independent formulas. Set `RK_JAX_PYTHON` to a Python with
-JAX for the numerical module checks. `rk_jax.jl` covers the broader module
+JAX for the numerical module checks. Its last testset builds `constant(...)`
+values a data-only assignment reads (scalar data fields, column moments, an
+array, a `@plate` covariate) with both builders and checks that `prepare_data`
+computes them (`UNTRANSLATED = {}`, no constant among the inputs), that native
+densities equal the supplied-field twin's, and that a non-finite fit input is
+refused in Python as natively. `rk_jax.jl` covers the broader module
 contract, including retained plate vectors from one module on fitted and
 replay data with different subject/visit counts, and `jax_module_driver.jl`
 uses the same public accessor. The retained-vector check requires RK 0.1.231.
