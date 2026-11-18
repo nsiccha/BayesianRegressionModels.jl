@@ -68,14 +68,16 @@ end
 end
 
 # Snag default-linearco-49897cce: a fresh coupling (with `noise` and `updates`) divides
-# each row's step by its updates' running mean square in conditional sds where that
-# exceeds one, reading the scale before the visit's own update enters it.
+# each row's step by the mean square of its updates so far in conditional sds where
+# that exceeds one, reading the scale before the visit's own update enters it, and
+# bounds a step's move of the conditional mean by a quarter of the factor's sd.
 scaled_coupling(d, k; step=0.5) = (; step, columns=[collect(1:k)], rows=[collect(1:d)],
     V=[zeros(d, k)], noise=[zeros(d)], updates=[0])
 
 @stestset "linear coupling: a quiet row's scaled step equals the unscaled one" begin
-    # Updates within one conditional sd: the same arithmetic, bit for bit, as a
-    # coupling without the noise state (an older optimizer checkpoint's).
+    # Updates within one conditional sd, steps within the quarter-sd bound: the same
+    # arithmetic, bit for bit, as a coupling without the noise state (an older
+    # optimizer checkpoint's).
     rng = Xoshiro(3)
     d, k = 3, 5
     A = randn(rng, d, d)
@@ -93,6 +95,13 @@ scaled_coupling(d, k; step=0.5) = (; step, columns=[collect(1:k)], rows=[collect
     @test all(<=(1), scaled.noise[1])
     @test scaled.V[1] == plain.V[1]
     @test scaled.updates[1] == 200
+    # A spike (the unscaled coupling would move the mean by one sd) moves a fresh
+    # coupling's conditional mean at a typical ζ by at most a quarter sd.
+    spike = scaled_coupling(d, k)
+    ζ = randn(rng, k)
+    BRM._brm_svi_coupling_step!(spike, q, 1, 1e6 .* ones(d), ζ, 1.0)
+    @test sqrt(tr(spike.V[1]' * Λ * spike.V[1])) <= 0.25 + 1e-9
+    @test sqrt(tr(spike.V[1]' * Λ * spike.V[1])) > 0.2
 end
 
 @stestset "linear coupling: a noisy row's coupling stays near its fixed point" begin

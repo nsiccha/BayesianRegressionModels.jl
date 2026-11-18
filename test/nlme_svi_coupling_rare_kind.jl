@@ -4,8 +4,9 @@
 # its non-centred steps) widened them to 1.4-2.2 times their conditional sd during
 # settling, and the over-dispersed unit pulled the population AR(1) to 0.95 (truth 0.6;
 # `coupling = nothing` 0.674, data seed 1, SVI seed 1, 100,000 iterations). With each
-# coupled row's step divided by its updates' mean square where that exceeds one, the
-# coupled fit stays where the independent one is.
+# coupled row's step divided by its updates' mean square where that exceeds one, and
+# each step's move of the conditional mean bounded by a quarter sd, the coupled fit
+# stays where the independent one is.
 # RUN: julia --project=test test/nlme_svi_coupling_rare_kind.jl
 using Test, Treebars
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
