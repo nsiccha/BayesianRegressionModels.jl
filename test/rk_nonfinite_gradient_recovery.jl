@@ -56,11 +56,6 @@ const DATA = (; subject=repeat(1:8; inner=5),
     y=round.(1 .+ 0.5 .* sin.(3 .* (1:NOBS) .+ 1); digits=3))
 const AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
-@testset "the pinned Enzyme carries blas_overwritten_output" begin
-    @test isdefined(Enzyme, :has_dogfood_repair) &&
-        Enzyme.has_dogfood_repair(:blas_overwritten_output)
-end
-
 # `extremes`: coordinate name => values that each give a non-finite answer;
 # `throwing`: coordinate name => values whose evaluation throws.
 function check_recovery(label, builder; extremes, throwing=())
@@ -100,6 +95,13 @@ function check_recovery(label, builder; extremes, throwing=())
     end
 end
 
+# One outer testset, so a missing repair still runs and reports the gradient checks.
+@testset "rk_nonfinite_gradient_recovery" begin
+@testset "the pinned Enzyme carries blas_overwritten_output" begin
+    @test isdefined(Enzyme, :has_dogfood_repair) &&
+        Enzyme.has_dogfood_repair(:blas_overwritten_output)
+end
+
 @testset "a non-finite gradient does not carry over" begin
     # `tau` far out makes the correlated block's density NaN.
     check_recovery("mixed", NonfiniteRecovery.mixed;
@@ -109,4 +111,5 @@ end
     check_recovery("guarded", NonfiniteRecovery.guarded;
         extremes=["log_k" => (800.0, 1e300)],
         throwing=["log_k" => (-800.0,)])
+end
 end
