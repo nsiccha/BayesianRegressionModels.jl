@@ -67,6 +67,105 @@ end
     @test expected_step(6a) < 0
 end
 
+# Snag default-linearco-49897cce: a fresh coupling (with `noise` and `updates`) divides
+# each row's step by the mean square of its updates so far in conditional sds where
+# that exceeds one, reading the scale before the visit's own update enters it, and
+# bounds a step's move of the conditional mean by a quarter of the factor's sd.
+scaled_coupling(d, k; step=0.5) = (; step, columns=[collect(1:k)], rows=[collect(1:d)],
+    V=[zeros(d, k)], noise=[zeros(d)], updates=[0])
+
+@stestset "linear coupling: a quiet row's scaled step equals the unscaled one" begin
+    # Updates within one conditional sd, steps within the quarter-sd bound: the same
+    # arithmetic, bit for bit, as a coupling without the noise state (an older
+    # optimizer checkpoint's).
+    rng = Xoshiro(3)
+    d, k = 3, 5
+    A = randn(rng, d, d)
+    Λ = A * A' + d * I
+    q = (; M=[zeros(d)], Λ=[Matrix(Λ)], U=[Matrix(cholesky(Symmetric(Λ)).L)])
+    scaled = scaled_coupling(d, k)
+    plain = (; step=0.5, columns=[collect(1:k)], rows=[collect(1:d)], V=[zeros(d, k)])
+    σ = sqrt.(diag(inv(Λ)))
+    for _ in 1:200
+        ζ = randn(rng, k)
+        ∇̄ = Λ * (0.3 .* σ .* randn(rng, d))      # a = Λ⁻¹ ∇̄ well within one sd
+        BRM._brm_svi_coupling_step!(scaled, q, 1, ∇̄, ζ, 0.5)
+        BRM._brm_svi_coupling_step!(plain, q, 1, ∇̄, ζ, 0.5)
+    end
+    @test all(<=(1), scaled.noise[1])
+    @test scaled.V[1] == plain.V[1]
+    @test scaled.updates[1] == 200
+    # A spike (the unscaled coupling would move the mean by one sd) moves a fresh
+    # coupling's conditional mean at a typical ζ by at most a quarter sd.
+    spike = scaled_coupling(d, k)
+    ζ = randn(rng, k)
+    BRM._brm_svi_coupling_step!(spike, q, 1, 1e6 .* ones(d), ζ, 1.0)
+    @test sqrt(tr(spike.V[1]' * Λ * spike.V[1])) <= 0.25 + 1e-9
+    @test sqrt(tr(spike.V[1]' * Λ * spike.V[1])) > 0.2
+end
+
+@stestset "linear coupling: a noisy row's coupling stays near its fixed point" begin
+    # Two rows whose ELBO-optimal coupling is zero; the first row's updates have rms
+    # 5 conditional sds (pure noise, as on a one-member funnel), the second's 0.3.
+    # Unscaled, the noisy row wanders by about sqrt(β/4) * 5 of its sd; scaled, by
+    # about sqrt(β/4) (0.35), while the quiet row is unchanged.
+    rng = Xoshiro(5)
+    d, k = 2, 20
+    Λ = [4.0 0.5; 0.5 1.0]
+    q = (; M=[zeros(d)], Λ=[Λ], U=[Matrix(cholesky(Symmetric(Λ)).L)])
+    σ = sqrt.(diag(inv(Λ)))
+    scaled = scaled_coupling(d, k)
+    plain = (; step=0.5, columns=[collect(1:k)], rows=[collect(1:d)], V=[zeros(d, k)])
+    ratio(c, r) = norm(c.V[1][r, :]) / σ[r]
+    peak_scaled, peak_plain = zeros(d), zeros(d)
+    for it in 1:20_000
+        ζ = randn(rng, k)
+        for c in (scaled, plain)
+            # the pull of the coupled draw back to V* = 0, plus the noise
+            a = -(c.V[1] * ζ) .+ [5.0, 0.3] .* σ .* randn(rng, d)
+            BRM._brm_svi_coupling_step!(c, q, 1, Λ * a, ζ, 0.5)
+        end
+        if it > 2_000
+            peak_scaled .= max.(peak_scaled, [ratio(scaled, r) for r in 1:d])
+            peak_plain .= max.(peak_plain, [ratio(plain, r) for r in 1:d])
+        end
+    end
+    @test peak_plain[1] > 2.0                     # unscaled: well above one sd
+    @test peak_scaled[1] < 1.0                    # scaled: below one sd throughout
+    @test sqrt(scaled.noise[1][1]) > 3            # the row's noise is still measured
+    @test peak_scaled[2] < 0.5 && peak_plain[2] < 0.5
+end
+
+@stestset "linear coupling: the noise scale keeps the ELBO optimum" begin
+    # The cubic conditional of the testset above, with a row scale of 1/2 (running
+    # mean square 2) held fixed: the expected step is halved, its zero stays at 3a.
+    q = (; M=[zeros(1)], Λ=[ones(1, 1)], U=[ones(1, 1)])
+    c = (; step=0.5, columns=[[1]], rows=[[1]], V=[zeros(1, 1)], noise=[[2.0]], updates=[100])
+    a, β, h = 0.01, 0.001, 0.004
+    function expected_step(slope)
+        total = 0.0
+        for g in -8:h:8
+            c.V[1] .= slope
+            c.noise[1] .= 2.0
+            BRM._brm_svi_coupling_step!(c, q, 1, [a*g^3 - slope*g], [g], β)
+            total += (only(c.V[1]) - slope) / β * pdf(Normal(), g) * h
+        end
+        total
+    end
+    @test abs(expected_step(3a)) < 1e-9
+    @test expected_step(0.0) > 0
+    @test expected_step(6a) < 0
+    # The scale halves the step: compare with the unscaled coupling at slope 0.
+    c0 = (; step=0.5, columns=[[1]], rows=[[1]], V=[zeros(1, 1)])
+    total0 = 0.0
+    for g in -8:h:8
+        c0.V[1] .= 0.0
+        BRM._brm_svi_coupling_step!(c0, q, 1, [a*g^3], [g], β)
+        total0 += only(c0.V[1]) / β * pdf(Normal(), g) * h
+    end
+    @test expected_step(0.0) ≈ total0 / 2 rtol=1e-12
+end
+
 # A Gaussian random intercept with known group sd and noise sd: the posterior is
 # Gaussian, and a unit factor conditional on the intercept with a linear mean holds
 # it exactly, so the coupled fit's intercept sd is the closed-form marginal one,
