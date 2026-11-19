@@ -19,13 +19,6 @@
 # LKJ(K, eta) restricted to `a` margins is LKJ(a, eta + (K - a)/2).
 # ==============================================================================
 
-# The prior address of a prior statement (`effect(...)`, `sd(...)`,
-# `cor(...)`, `term_*`): its raw slot Symbols, head first.
-function _brm_prune_prior_address(@nospecialize(op))
-    lhs, _ = getargs(op, 2)
-    Tuple(getargs(lhs))
-end
-
 # The kernel cell of a model operation, or `nothing`: its `~` operation and
 # kernel call, the cell formals, the columns bound to them, and the body
 # statements (`_sb_kernel_lambda_parts`, which shares the original statements).
@@ -236,8 +229,9 @@ end
 The model `brmi` restricted to the responses `keep`: their observation
 statements, every statement and term their likelihoods depend on, and the prior
 statements addressing what remains, with the model values those read (a
-`name = constant(...)` prior centre, a scale parameter). Everything else — the other responses, the
-predictors, parameters and random-effect margins only they read — is not in the
+`name = constant(...)` prior centre, a scale parameter). An `optional(...)`
+prior applies only if its address exists in the kept model. Everything else —
+the other responses, predictors, parameters and random-effect margins only they read — is not in the
 returned model at all, so its emitted programs, `brm_descriptor` and
 `brm_description` show only the kept model. Without pruning, omitting a
 response's column keeps its parts out of the sampler but re-draws them in
@@ -276,6 +270,7 @@ sb = SBBRMI(pk_tumor)
 ```
 """
 function prune_responses(brmi::BRMI; keep=nothing, marginalize::Bool=false)
+    brmi = _brm_resolve_optional_priors(brmi; keep_markers=true)
     responses = isnothing(keep) ? _brm_prune_bound_responses(brmi) : keep
     _brm_prune_responses(brmi, responses; marginalize)
 end
@@ -346,7 +341,7 @@ Base.@nospecializeinfer function _brm_prune_responses(@nospecialize(brmi::BRMI),
         end
         length(roots) == before || continue
         kept = Set(op.name for op in program.operations if op.name in reachable)
-        selected = _brm_prune_priors(program, kept, priors; marginalize)
+        selected = _brm_prune_priors(brmi, program, kept, priors; marginalize)
         reads = _brm_prune_prior_reads(selected.statements, names)
         issubset(reads, kept) && return _brm_prune_assemble(brmi, kept, selected; marginalize)
         union!(roots, reads)
@@ -365,7 +360,8 @@ end
 # The prior statements whose addresses survive in `kept`, keyed by operation
 # name (a shared block's correlation prior restricted to its kept margins), and
 # the shared `|ID|` blocks that lose margins.
-Base.@nospecializeinfer function _brm_prune_priors(program, kept, priors; marginalize::Bool)
+Base.@nospecializeinfer function _brm_prune_priors(@nospecialize(brmi::BRMI), program, kept,
+                                                  priors; marginalize::Bool)
     predictors = Set(op.name for op in program.operations
                      if op.role === :predictor && op.name in kept)
     declarations = program.context.group_declarations
@@ -391,10 +387,20 @@ Base.@nospecializeinfer function _brm_prune_priors(program, kept, priors; margin
 
     keep_prior = Dict{Symbol,Any}()
     cor_seen = Set{Symbol}()
+    kept_model = nothing
     for op in priors
-        address = _brm_prune_prior_address(op.expression)
+        lhs, rhs = getargs(op.expression, 2)
+        address = getargs(lhs)
+        # A wildcard may have matched only a pruned predictor. Drop the prior
+        # before following its law's dependencies or restricting a joint budget.
+        if _brm_is_optional_prior(lhs)
+            if isnothing(kept_model)
+                entries = filter(p -> first(p) in kept, _brm_operation_entries(brmi))
+                kept_model = BRMI((; entries...))
+            end
+            _brm_prior_address_present(kept_model, collect(Symbol, address)) || continue
+        end
         head = first(address)
-        _, rhs = getargs(op.expression, 2)
         joint = _as_expr_column(rhs)
         joint_budget = !isnothing(joint) && getf(joint) === r2d2
         if head === :cor
