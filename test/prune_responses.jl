@@ -11,7 +11,7 @@
 using Test
 using BayesianRegressionModels
 using Random
-using Distributions: Exponential, Normal, LKJCholesky, truncated
+using Distributions: Exponential, Normal, LKJCholesky, Uniform, truncated
 using Statistics: mean
 
 const BRM = BayesianRegressionModels
@@ -433,4 +433,46 @@ end
         y ~ Normal(mu, sigma)
     end
     @test stan(prune_responses(bounded(observed))) == stan(bounded_y(observed))
+end
+
+@testset "optional priors apply only to addresses in the kept model" begin
+    linear = @brm begin
+        mu ~ 1 + x
+        y ~ Normal(mu, 1)
+    end
+    smooth = @brm begin
+        nu ~ 1 + hsgp(x; k=5)
+        z ~ Normal(nu, 1)
+    end
+    priors = @brm begin
+        scale_limit = constant(3.0)
+        optional(length_scale(:, hsgp(x))) ~ Uniform(0.5, scale_limit)
+        optional(effect(mu, x)) ~ Normal(0, 0.7)
+    end
+    linear_ref = merge(linear, @brm begin
+        effect(mu, x) ~ Normal(0, 0.7)
+    end)
+    smooth_ref = merge(smooth, @brm begin
+        scale_limit = constant(3.0)
+        length_scale(:, hsgp(x)) ~ Uniform(0.5, scale_limit)
+    end)
+    build = merge(linear, smooth, priors)
+    joint = build(observed)
+    for pruned in (prune_responses(merge(linear, priors)(observed); marginalize=true),
+                   prune_responses(joint), prune_responses(joint; keep=:y),
+                   prune_responses(prune_responses(joint; keep=(:y, :z)); keep=:y))
+        @test !(:scale_limit in keys(pruned.operations))
+        @test stan(pruned) == stan(linear_ref(observed))
+        @test rk_source(pruned) == rk_source(linear_ref(observed))
+    end
+    kept_smooth = prune_responses(build(both); keep=:z)
+    @test :scale_limit in keys(kept_smooth.operations)
+    @test stan(kept_smooth) == stan(smooth_ref(both))
+    @test rk_source(kept_smooth) == rk_source(smooth_ref(both))
+
+    # Only the optional marker authorizes skipping an absent prior address.
+    required = merge(linear, @brm begin
+        length_scale(:, hsgp(x)) ~ Uniform(0.5, 3.0)
+    end)
+    @test_throws "matches no `hsgp(x)` term" prune_responses(required(observed))
 end

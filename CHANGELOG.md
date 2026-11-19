@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.340
+
+- `prune_responses` skips an `optional(...)` prior when its address is
+  absent from the input model or disappears with the responses being pruned.
+  Matching priors and the model values they use stay with the kept responses.
+
 ## 0.2.339
 
 - `brm_svi_fit(...; unit_reoptimize = k)` re-optimizes a copy of each batch

@@ -36,10 +36,12 @@ end
     _brm_resolve_optional_priors(brmi::BRMI) -> BRMI
 
 Drop every `optional(...)` prior statement whose address the model provably
-lacks, and turn the kept ones into ordinary statements. Returns `brmi` itself
-when it carries no optional statement, so resolving twice is free.
+lacks, and turn the kept ones into ordinary statements. Formula transformations
+can keep the markers to match those addresses again after changing the model.
+Returns `brmi` itself when it carries no optional statement.
 """
-Base.@nospecializeinfer function _brm_resolve_optional_priors(@nospecialize(brmi::BRMI))
+Base.@nospecializeinfer function _brm_resolve_optional_priors(@nospecialize(brmi::BRMI);
+                                                             keep_markers::Bool=false)
     entries = _brm_operation_entries(brmi)
     any(entry -> !isnothing(_brm_optional_prior_op(last(entry))), entries) ||
         return brmi
@@ -53,8 +55,9 @@ Base.@nospecializeinfer function _brm_resolve_optional_priors(@nospecialize(brmi
         lhs, rhs = getargs(op, 2)
         address = collect(Symbol, getargs(lhs))
         _brm_prior_address_present(brmi, address) || continue
-        push!(kept, key => NamedColumn(name(op_nc),
-            ExprColumn(~, ExprColumn(effect, getargs(lhs)...), rhs)))
+        resolved = keep_markers ? op_nc : NamedColumn(name(op_nc),
+            ExprColumn(~, ExprColumn(effect, getargs(lhs)...), rhs))
+        push!(kept, key => resolved)
     end
     _brm_select_documentation(brmi, (; kept...))
 end
