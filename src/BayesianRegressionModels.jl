@@ -7,6 +7,7 @@ include("authored_documentation.jl")
 include("macro.jl")
 include("builder_interpreter.jl")
 include("components.jl")
+include("component_settings.jl")
 include("groups.jl")
 include("ar1_normal.jl")
 

@@ -5583,6 +5583,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     _sb_prune_cell_formula_inputs!(data, preproc, stmts)
+    _sb_prune_guard_inputs!(data, preproc, stmts)
     _sb_drop_shadowed_data!(data, preproc, stmts)
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
     # collected as reprocess provenance). See `_sb_is_stan_data_value`. This also

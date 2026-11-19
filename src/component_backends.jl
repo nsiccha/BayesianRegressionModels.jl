@@ -166,6 +166,22 @@ end
 Base.deepcopy_internal(record::_BRMComponentReplay, ::IdDict) = record
 _brm_component_replay_key(target) = Symbol(:__brm_component__, target)
 
+# Inputs consulted only to select declarations belong to the builder. Avoid
+# sending an unused settings record to Stan while retaining a column that a
+# different statement of the parent model actually reads.
+function _sb_prune_guard_inputs!(data, preproc, statements)
+    read = nothing
+    for entry in values(preproc)
+        entry.kind === :brm_component || continue
+        record = entry.const_
+        record.component.builder.f isa _BRMGuardedComponentBody || continue
+        read === nothing && (read = _rk_source_symbols!(Set{Symbol}(), Expr(:block, statements...)))
+        for arg in _brm_component_arguments(record.component, record.rhs)
+            arg isa NamedColumn && !(name(arg) in read) && delete!(data, name(arg))
+        end
+    end
+end
+
 function _sb_submodel_rhs!(statements, data, target::Symbol,
         component::BRMComponent, call)
     instance = _brm_component_instance(component, call)
@@ -218,6 +234,17 @@ function _sb_replay_component!(new_data, new_preproc, handled, key, entry, sb, d
     end
     rhs = _brm_rebind_value(record.rhs, _BRMReplayData(df, scalars))
     args = _brm_component_arguments(record.component, rhs)
+    body = record.component.builder.f
+    if body isa _BRMGuardedComponentBody
+        original = _brm_component_arguments(record.component, record.rhs)
+        before = _brm_guarded_statements(body, Dict(zip(body.inputs, original)))
+        supplied = Dict(input => (value isa NamedColumn && _brm_df_has_column(df, name(value)) ?
+            _brm_df_column(df, name(value)) : value)
+            for (input, value) in zip(body.inputs, args))
+        after = _brm_guarded_statements(body, supplied)
+        before == after || throw(ArgumentError(
+            "component `$(record.target)` has different declarations for these settings; build a new model"))
+    end
     inputs = Dict{Symbol,Any}()
     for (input, value) in zip(record.component.inputs, args)
         backing = value isa NamedColumn ? parent(value) : value
@@ -354,10 +381,15 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
         if _rk_fitted_definition(statement, fitted) === nothing]
     body = _rk_rename_symbols(Expr(:block, local_statements...), renames)
     push!(body.args, _rk_component_return(component))
-    params = Symbol[component.inputs...]
     arguments = _brm_component_arguments(component, call)
-    args = Any[_rk_value_expr!(bindings, _brm_prepare_expr(value), taken)
-        for value in arguments]
+    # A configuration record can select declarations without being a numeric
+    # input of the resulting PPL program. Keep its value on the original call
+    # for rebuilding the model, and pass only the selected body's inputs.
+    used = component.builder.f isa _BRMGuardedComponentBody ?
+        findall(input -> _brm_has_operation(instance, input), component.inputs) :
+        eachindex(component.inputs)
+    params = Symbol[component.inputs[i] for i in used]
+    args = Any[_rk_value_expr!(bindings, _brm_prepare_expr(arguments[i]), taken) for i in used]
     columns = merge(_rk_source_data_columns(plan, emitted), Dict(_rk_extent_bindings(plan)))
     column_names = Dict{Symbol,Any}(input => arg for (input, arg) in zip(params, args))
     local_reads = _rk_source_symbols!(Set{Symbol}(), body)
