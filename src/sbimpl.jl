@@ -7859,6 +7859,13 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
 `SBBRMI` that REUSES the already-transpiled Stan model (byte-identical
 `stan_code` when shapes are stable) with the new data dict.
 
+With the default replay options, tasks may share a fitted `SBBRMI` or
+`GenerativePlan`, replay it on separate frames and call `stan_data` on each
+result without a caller lock.
+Treat the fitted artifact, shared input columns, and arrays borrowed from them
+as read-only. Custom preprocessing functions and lowering hooks must support
+concurrent calls and keep mutable scratch private to the call.
+
 - `freeze_constants=true` (default — prediction / replay): apply the **training**
   constant to `new_df` (z-score with training mean/sd, map factor codes via the
   training level set, rebuild the spline/HSGP basis on the training

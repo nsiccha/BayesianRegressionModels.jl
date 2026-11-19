@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.338
+
+- Tasks may replay one read-only fitted `SBBRMI` or `GenerativePlan` on
+  separate frames with `freeze_constants=true` and read each result with
+  `stan_data` concurrently. Custom preprocessing and tracing hooks must
+  support concurrent calls.
+
 ## 0.2.337
 
 - A fresh `brm_svi_fit`'s `LinearCoupling` divides each coupled row's step by
