@@ -7945,6 +7945,7 @@ refused); drawing new levels of one (`resample_groups`) is not supported.
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                    resample_groups=(),resample_covariates=(),
                    held_out=sb.held_out)
+    new_df = _brm_collection_replay_data(brm_source(sb), new_df)
     new_df = _sb_replay_data(sb, new_df, freeze_constants)
     groups = _sb_resample_group_set(resample_groups)
     covariates = union(_sb_existing_covariates(sb.preproc),

@@ -228,7 +228,7 @@ For a component definition itself, the first record has path `()` and no call.
 No backend compilation or manually maintained source registry is required.
 """
 Base.@nospecializeinfer brm_components(@nospecialize(model::BRMI)) =
-    map(_brm_public_component_record, _brm_component_records(model))
+    _brm_collection_public_records(model, _brm_component_records(model))
 brm_components(builder::BRMBuilder, data) = brm_components(builder(data))
 brm_components(component::BRMComponent) =
     map(_brm_public_component_record, _brm_component_records(component))

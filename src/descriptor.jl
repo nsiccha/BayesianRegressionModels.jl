@@ -302,7 +302,14 @@ struct BRMOutput
     dims::Union{Nothing,Tuple{Vararg{Int}}}
     predictors::Tuple{Vararg{Symbol}}
     term::Union{Nothing,Symbol}
+    # A labelled member of a collection shares a physical carrier with its
+    # peers. Its coordinates select this entry of the outer plate dimension.
+    member::Union{Nothing,Int}
 end
+BRMOutput(name, kind, type, size, constraints, generative, source, role,
+          declaration, logical, labels, segments, component, dims, predictors, term) =
+    BRMOutput(name, kind, type, size, constraints, generative, source, role,
+              declaration, logical, labels, segments, component, dims, predictors, term, nothing)
 
 # Preserve the earlier positional constructors for downstream code that creates
 # display-only BRMOutput values. `segments`, `logical`, `component`, `dims`,
@@ -495,8 +502,8 @@ of the emitted model.
 struct BRMSubmodel
     name::Union{Nothing,Symbol}
     model::Any
-    target::Symbol
-    path::Tuple{Vararg{Symbol}}
+    target::Union{Symbol,Int}
+    path::Tuple
     parent::Union{Nothing,Int}
     trigger::Union{Nothing,String}
     declaration::GenerativeDeclaration
@@ -504,7 +511,11 @@ struct BRMSubmodel
     declarations::Tuple{Vararg{GenerativeDeclaration}}
     outputs::Tuple{Vararg{BRMOutput}}
     source::Union{Nothing,String}
+    native_path::Tuple{Vararg{Symbol}}
 end
+BRMSubmodel(name, model, target, path, parent, trigger, declaration, inputs,
+            declarations, outputs, source) = BRMSubmodel(name, model, target, path,
+    parent, trigger, declaration, inputs, declarations, outputs, source, (path..., target))
 
 # ---- the descriptor ---------------------------------------------------------
 
@@ -804,7 +815,7 @@ _brm_submodel_declarations(_model, _inputs) = ()
 
 function _brm_submodels(plan, outputs)
     entries = NamedTuple[]
-    components = Dict(call.path => call.definition for call in brm_components(plan.parent))
+    components = Dict(call.path => call.definition for call in _brm_component_records(plan.parent))
     function visit!(declaration, scope, path, parent_index, root, trigger, stack)
         model = _brmd_binding(declaration.family, scope)
         _brm_consumer_submodel(model) || return nothing
@@ -856,9 +867,42 @@ function _brm_submodels(plan, outputs)
         end
         isnothing(best) || push!(owned[best], o)
     end
-    Tuple(BRMSubmodel(e.name, e.model, e.target, Tuple(e.path), e.parent, e.trigger,
+    native = Tuple(BRMSubmodel(e.name, e.model, e.target, Tuple(e.path), e.parent, e.trigger,
                       e.declaration, e.inputs, e.declarations, Tuple(owned[i]), e.source)
           for (i, e) in enumerate(entries))
+    _brm_collection_submodels(native, _brm_collection_paths(brmi))
+end
+
+function _brm_collection_submodels(native, axes)
+    isempty(axes) && return native
+    entries = BRMSubmodel[]
+    indices = Dict{Tuple,Int}()
+    for (i, entry) in enumerate(native)
+        path = entry.native_path
+        axis = length(path) < 2 ? nothing : get(axes, path[1:2], nothing)
+        if isnothing(axis)
+            parent = isnothing(entry.parent) ? nothing : indices[(entry.parent, nothing)]
+            push!(entries, BRMSubmodel(entry.name, entry.model, entry.target, entry.path, parent,
+                entry.trigger, entry.declaration, entry.inputs, entry.declarations, entry.outputs,
+                entry.source, path))
+            indices[(i, nothing)] = length(entries)
+        else
+            for (j, key) in enumerate(axis.keys)
+                address = (axis.collection, key, path[3:end]...)
+                parent = isnothing(entry.parent) ? nothing : indices[(entry.parent, key)]
+                outputs = map(entry.outputs) do o
+                    BRMOutput(o.name, o.kind, o.type, o.size, o.constraints, o.generative,
+                        o.source, o.role, o.declaration, o.logical, o.labels, o.segments,
+                        o.component, o.dims, o.predictors, o.term, j)
+                end
+                push!(entries, BRMSubmodel(entry.name, entry.model, last(address), Base.front(address),
+                    parent, entry.trigger, entry.declaration, entry.inputs, entry.declarations,
+                    outputs, entry.source, path))
+                indices[(i, key)] = length(entries)
+            end
+        end
+    end
+    Tuple(entries)
 end
 
 # Label a population-effect output's elements, when BRM can. `popcoefnames`
@@ -2222,7 +2266,7 @@ _brm_submodel_spelling(d::BRMDescriptor, s::BRMSubmodel) =
 
 _brm_submodel_entry(d::BRMDescriptor, address::Symbol) =
     _brm_submodel_pick(d, address, [s for s in d.submodels if s.target === address])
-_brm_submodel_entry(d::BRMDescriptor, address::Tuple{Vararg{Symbol}}) =
+_brm_submodel_entry(d::BRMDescriptor, address::Tuple{Vararg{Union{Int,Symbol}}}) =
     _brm_submodel_pick(d, address,
                        [s for s in d.submodels if _brm_submodel_address(s) == address])
 function _brm_submodel_entry(d::BRMDescriptor, address::BRMSubmodel)
@@ -2280,7 +2324,7 @@ function _brm_submodel_carriers(d::BRMDescriptor, s::BRMSubmodel, name::Symbol)
     isnothing(bound) || name in bound || (name = _brm_submodel_returned_local(d, s, name))
     isnothing(bound) || name in bound || return BRMOutput[]
     owned = Set{Symbol}(o.name for o in s.outputs)
-    resolved = Symbol(join((_brm_submodel_address(s)..., name), "_"))
+    resolved = Symbol(join((s.native_path..., name), "_"))
     found = _brm_binding_carriers(d.stan, Set{Symbol}(o.name for o in d.stan.outputs),
                                   Set{Symbol}(keys(d.stan.model)), resolved, owned)
     BRMOutput[o for o in s.outputs if o.name in found]
@@ -2443,7 +2487,7 @@ function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=no
 end
 
 _brm_emitted_coordinates(output::BRMOutput, constrained_names) = begin
-    stem = String(output.name)
+    stem = isnothing(output.member) ? String(output.name) : string(output.name, ".", output.member)
     prefix = stem * "."
     Int[i for (i, name) in enumerate(constrained_names)
         if string(name) == stem || startswith(string(name), prefix)]

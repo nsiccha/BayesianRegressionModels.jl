@@ -48,19 +48,20 @@ function _brm_guarded_statements(body::_BRMGuardedComponentBody, inputs)
     _brm_select_declarations!(Any[], body.statements, inputs)
 end
 
-function _brm_select_declarations!(out, statement, inputs)
+function _brm_select_declarations!(out, statement, inputs, decisions=nothing)
     if Meta.isexpr(statement, :block)
         for child in statement.args
-            _brm_select_declarations!(out, child, inputs)
+            _brm_select_declarations!(out, child, inputs, decisions)
         end
     elseif _brm_declaration_guard(statement)
         condition, yes, other... = _brm_undoc(statement).args
         flag = _brm_guard_value(condition, inputs)
         flag isa Bool || throw(ArgumentError("@brm: declaration guard `$condition` must be Bool"))
+        isnothing(decisions) || push!(decisions, flag)
         if flag
-            _brm_select_declarations!(out, yes, inputs)
+            _brm_select_declarations!(out, yes, inputs, decisions)
         elseif !isempty(other)
-            _brm_select_declarations!(out, only(other), inputs)
+            _brm_select_declarations!(out, only(other), inputs, decisions)
         end
     elseif !(statement isa LineNumberNode)
         push!(out, statement)

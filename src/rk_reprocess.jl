@@ -92,6 +92,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         resample_groups=(), resample_covariates=(), keep_observed::Bool=false,
         held_out=_rk_held_out_names(rk.plan))
     prefix = "RK reprocess"
+    new_data = _brm_collection_replay_data(brm_source(rk), new_data)
     covariates = _rk_forecast_covariates(rk.plan, resample_covariates, keep_observed; prefix)
     isempty(covariates) || freeze_constants || throw(ArgumentError("$prefix: " *
         "`resample_covariates` forecasts with the fit's frozen constants; " *
