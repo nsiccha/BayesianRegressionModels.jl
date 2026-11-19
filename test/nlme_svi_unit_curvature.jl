@@ -5,9 +5,7 @@
 #     julia --project=test test/nlme_svi_unit_curvature.jl
 module SVIUnitCurvature
 using Random, LinearAlgebra, Statistics
-# The stationarity checks the included SVI source runs (src/nlme_svi_stationarity.jl,
-# since BRM 0.2.298's drift gate) read MCMCDiagnosticTools' split-Rhat.
-import MCMCDiagnosticTools
+include(joinpath(@__DIR__, "svi_arithmetic_imports.jl"))
 struct BRMI end
 struct RKBRMI end
 struct BRMNLMEModel end
@@ -17,39 +15,8 @@ include(joinpath(@__DIR__, "..", "src", "nlme_svi.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_sd_bound.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_unit_streaming.jl"))
 
-# Units whose terms are Gaussian in their coordinates: unit i is
-# log N(z | 0, σ² C) + log N(y_i | z, I) with σ = exp(g[1]), the one global, under a
-# N(0, 1) prior on log σ. C is an AR(1) correlation, so the scale's optimum reads
-# the units' widths along C⁻¹'s rough, high-precision directions, as a chain's
-# length scale and innovation sd do.
-struct ScaledUnits
-    globals::Vector{Int}
-    units::Vector{Vector{Int}}
-    plan::NamedTuple
-    plans::Vector{NamedTuple}
-    work::Vector{Nothing}
-    Ci::Matrix{Float64}
-    y::Vector{Vector{Float64}}
-end
-function ScaledUnits(Ci, y)
-    d, N = size(Ci, 1), length(y)
-    units = [collect(1+(i-1)*d+1:1+i*d) for i in 1:N]
-    plan = (; footprints=[vcat(1, u) for u in units])
-    ScaledUnits([1], units, plan, [plan], [nothing], Ci, y)
-end
+include(joinpath(@__DIR__, "svi_scaled_units.jl"))
 include("svi_arithmetic_support.jl")
-
-_brm_svi_global_term(::ScaledUnits, g) = (-g[1]^2 / 2, [-g[1]])
-function _brm_svi_unit_term!(gg, gz, t::ScaledUnits, i, g, z, plan, work)
-    d, s2 = length(z), exp(2g[1])
-    Cz = t.Ci * z
-    quad = dot(z, Cz)
-    r = t.y[i] .- z
-    fill!(gg, 0.0)
-    gg[1] = quad / s2 - d
-    gz .= .-Cz ./ s2 .+ r
-    -quad / (2s2) - d * g[1] - sum(abs2, r) / 2
-end
 
 # Units whose terms saturate: a unit prior on every coordinate, plus rows
 # -(A tanh(aⱼ'z / s))² / 2 whose directions aⱼ span a subspace, so a pair's gradient
@@ -319,3 +286,4 @@ end
     @test UC._brm_svi_default_unit_step(:orthogonal) == 1.0
     @test UC._brm_svi_default_unit_step(:pair) == 0.1
 end
+

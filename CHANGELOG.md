@@ -12,6 +12,33 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.339
+
+- `brm_svi_fit(...; unit_reoptimize = k)` re-optimizes a copy of each batch
+  unit's factor at the iteration's draw of the globals, with `k` Newton steps to
+  its conditional optimum, and the globals step on the copy's terms. The precision
+  lands on the orthogonal design's curvature estimate (each direction within a
+  factor of 100 per step) and the mean on the optimum it puts it at (within four
+  sds of the factor before the step). A step stands only where it raises the
+  unit's objective at that draw (its expected log density plus entropy); otherwise
+  the globals read the factor before it, at first the unit's own. On a unit
+  Gaussian given the globals every step stands; on `test/nlme_svi_trend.jl`'s
+  ridge, whose units pin `exp(m + s z_i)`, half the unchecked copies early on were
+  worse than the unit's own factor and pulled the noise scale up until most seeds
+  stopped far from the posterior. The units' own factors, their coupling and
+  their centering controls now step as at `k = 0`, and the ELBO trace reads them.
+  Until now each unit's own factor took its square-root natural-gradient step in
+  place, which at step 1 lands the precision above the curvature by
+  (λ - Λ)²/(2Λ) and is bounded to a 2.5-fold change and a one-sd move. Wherever
+  the drawn scales move a unit's curvature between visits that biased the
+  globals' gradient towards the joint mode: on
+  `test/nlme_svi_default_centering.jl`'s weak random intercept (32 groups of one
+  row) `k = 1` walked the residual sd's log to -29 and returned a population sd
+  0.20 of NUTS's while reporting convergence (todo `12maq21`). It also left the
+  coupling and the controls nothing to learn from. `brm_svi_resume` of a
+  checkpoint written before this release keeps the step it ran.
+  `unit_reoptimize = 0`, the default, is unchanged to the bit.
+
 ## 0.2.338
 
 - Tasks may replay one read-only fitted `SBBRMI` or `GenerativePlan` on

@@ -3,6 +3,7 @@
 # this arithmetic test needs no model lowering or external dependency setup.
 module SVIArithmetic
 using Random, LinearAlgebra, Statistics
+include(joinpath(@__DIR__, "svi_arithmetic_imports.jl"))
 struct BRMI end
 struct RKBRMI end
 struct BRMNLMEModel end

@@ -1,19 +1,22 @@
 # `brm_svi_fit(...; unit_reoptimize = k)` (todo 122p9l3, design decision
-# `093fulx`): each dense batch unit takes `k` whole natural-gradient steps at the
-# iteration's draw of the globals before the global gradient is formed, so a
-# ridge between a global and every unit (an intercept beside per-unit effects
+# `093fulx`; repaired in todo 12maq21): each dense batch unit is re-optimized at the
+# iteration's draw of the globals, a copy of its factor taking `k` Newton steps to
+# its conditional optimum given that draw, and the globals step on the copy's terms,
+# so a ridge between a global and every unit (an intercept beside per-unit effects
 # the data pin only in `a + u[g]`) no longer holds the global back. Checked on an
 # exactly Gaussian toy whose posterior means and sds are known in closed form:
 # the stock step is the positive control (its intercept's sd is far too small and
-# its iterates have not settled), the re-optimized step recovers both. Also: the
-# default changes nothing, the extra evaluations are counted, and the options
-# that cannot honour it refuse it.
+# its iterates have not settled), the re-optimized step recovers both. Also: on a
+# unit far from Gaussian a copy's step that would lower its unit's objective stands
+# down, the default changes nothing, the extra evaluations are counted, the options
+# that cannot honour it refuse it, and checkpoints resume exactly.
 #
 #     julia --project=test test/nlme_svi_reoptimize.jl [testset filter...]
 using Test, BayesianRegressionModels, Random, Statistics, LinearAlgebra
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
 const BRM = BayesianRegressionModels
 include(joinpath(@__DIR__, "testset_filter.jl"))
+include(joinpath(@__DIR__, "nlme_svi_ridge_fixture.jl"))
 
 function ridge_data(; G=200, n=20, P=4, seed=1)
     rng = Xoshiro(seed)
@@ -88,4 +91,52 @@ end
     @test all(<(0.15), error(reopt))
     @test all(r -> 0.8 < r < 1.2, ratio(reopt))
     @test reopt.diagnostics.unit_gradient_calls > stock.diagnostics.unit_gradient_calls
+end
+
+# The re-optimization step lands each unit on its estimated curvature (todo 12maq21);
+# the controls record it, so a stopped run resumes exactly, and a checkpoint written
+# before the control (from BRM 0.2.326 on) resumes on the square-root step it ran.
+@stestset "checkpoints: a re-optimized run resumes exactly; an older one keeps its step" begin
+    data = ridge_data(; G=20, n=5)
+    rk = RKBRMI(ridge_model(data))
+    # A fresh stream per fit: a shared one would start the second fit elsewhere.
+    fit(; kwargs...) = brm_svi_fit(rk; subject_group=:g, rng=Xoshiro(5),
+        max_iterations=300, ndraws=20, unit_reoptimize=1, kwargs...)
+    full = fit()
+    @test full.diagnostics.optimizer.controls.reoptimize_newton === true
+    stopped = fit(; stop_after=120)
+    @test stopped.diagnostics.iterations == 120
+    resumed = brm_svi_resume(rk, stopped; ndraws=20)
+    @test resumed.draws == full.draws
+    @test resumed.diagnostics.iterations == full.diagnostics.iterations
+    @test resumed.diagnostics.elbo == full.diagnostics.elbo
+    s = brm_svi_optimizer_checkpoint(stopped)
+    c = s.controls
+    old = BRMSVIOptimizerState(s.format, s.identity, s.previous,
+        NamedTuple{filter(!=(:reoptimize_newton), keys(c))}(c), s.run)
+    @test BRM._brm_svi_reoptimize_newton(old.controls) === false
+    kept = brm_svi_resume(rk, old; ndraws=20)
+    @test kept.diagnostics.iterations == full.diagnostics.iterations
+    @test all(isfinite, kept.draws)
+    @test kept.diagnostics.elbo[1:120] == full.diagnostics.elbo[1:120]
+    @test kept.diagnostics.elbo[121:end] != full.diagnostics.elbo[121:end]
+end
+
+# A unit far from Gaussian: test/nlme_svi_trend.jl's ridge, whose units' rows pin
+# `exp(m + s z_i)`. Off its optimum one Newton step on such a unit is a guess. When
+# every copy's step stood, half the copies in the first 900 iterations read a lower
+# objective than the unit's own factor, their residuals pulled the noise sd from 0.83
+# to 2.3 (the data's is 0.1), and this fit stopped by its ELBO at exp(m) 0.32, ELBO
+# -495 (seeds 1-6: 3 ended more than 0.1 off; research/svi_reoptimize/
+# trend_ridge_coupling.jl). With the step standing only where it raises the unit's
+# objective, seeds 1-6 read 1.163-1.170 against the 400-window k = 0 fit's 1.166.
+@stestset "a non-Gaussian unit: a copy's step stands only where it raises the unit's objective" begin
+    rk = RKBRMI(svi_ridge_model(svi_ridge_data(Xoshiro(101), 8)))
+    opt = (; subject_group=:unit, batch_size=4, ndraws=200, stationarity=false,
+        centering=nothing)
+    reopt = brm_svi_fit(rk; rng=Xoshiro(1), opt..., unit_reoptimize=1)
+    long = brm_svi_fit(rk; rng=Xoshiro(1), opt..., min_windows=400)
+    gm(f) = median(exp.(rk_restore_draws(rk, f.draws).gain_mean))
+    @test reopt.diagnostics.converged
+    @test abs(gm(reopt) - gm(long)) < 0.02
 end

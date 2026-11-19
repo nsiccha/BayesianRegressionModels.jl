@@ -3,10 +3,7 @@
 # RUN: julia --project=test test/nlme_svi_coupling_gradient.jl
 module CouplingGradientArithmetic
 using Random, LinearAlgebra, Statistics
-# src/nlme_svi_collapsed.jl (BRM 0.2.333) defines Serialization methods and a
-# SparseMatrixCSC field at top level.
-import Serialization, SparseArrays
-using SparseArrays: SparseMatrixCSC
+include(joinpath(@__DIR__, "svi_arithmetic_imports.jl"))
 struct BRMI end
 struct RKBRMI end
 struct BRMNLMEModel end
