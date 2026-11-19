@@ -314,13 +314,15 @@ function _rk_image_callable(@nospecialize(f))
     isconst(mod, name) && isdefined(mod, name) && getglobal(mod, name) === f
 end
 
-# A source provider's ordinary function may contain arbitrary Julia macros.
-# Their expansion can read external state, so recreate such definitions.
+# Reuse declarative submodels and kernels. An ordinary Julia definition can
+# evaluate a signature or keep mutable globals in its definition module. It
+# must keep the fresh namespace it would get outside a workload.
 _rk_image_definition(x) = BRM._brm_image_syntax(x)
 function _rk_image_definition(x::Expr)
+    x.head in (:function, :global, :module, :toplevel) && return false
     if x.head === :macrocall
         head = first(x.args)
-        BRM._brm_is_doc(x) || BRM._rk_source_macro(head, :ReactiveKernels, Symbol("@kernel")) ||
+        (BRM._brm_is_doc(x) && x.args[3] isa String) || BRM._rk_source_macro(head, :ReactiveKernels, Symbol("@kernel")) ||
             BRM._rk_source_macro(head, :ReactiveKernelsPPL, Symbol("@rkppl")) || return false
     end
     all(_rk_image_definition, x.args)

@@ -69,5 +69,8 @@
     @test !any(entry -> BRM._brm_same_syntax(entry.source, BRM._brm_source_block(W.WITH_MACRO)), table.builders)
     @test !BRM._brm_same_syntax(:(f(1)), :(f(1.0)))
     @test !BRM._brm_image_syntax(:(f($(data.x))))
+    @test !ext._rk_image_definition(:(function native(x::choose_type())
+        x
+    end))
     @test !ext._rk_image_callable(let captured = data.x; () -> captured end)
 end
