@@ -26,13 +26,14 @@
 #   - an artifact without the records (built before them) still refuses plain
 #     replay with the carry-through hint, and still resamples.
 #
-# Run: julia --project=test test/sb_hook_reprocess.jl
+# Run: julia --threads=4 --project=test test/sb_hook_reprocess.jl
 # Set BRM_HOOK_REPROCESS_RUNTIME=0 to skip the compiled-model set.
 
 using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
+include("concurrent_builds.jl")
 
 const RUNTIME = get(ENV, "BRM_HOOK_REPROCESS_RUNTIME", "1") != "0"
 
@@ -293,6 +294,30 @@ end
     @test replay.data[KEYS.seg_amp] == build(HR.builder, HR.rescheduled).data[KEYS.seg_amp]
     refit = reprocess(sb, HR.rescheduled; freeze_constants=false)
     @test refit.data[:amount_scale] == 4.0
+end
+
+@testset "concurrent frozen replays of one fitted model or plan" begin
+    sb = build(HR.builder, HR.train)
+    plan = generative_plan(sb)
+    # Read-only grid columns are shared. Each job supplies its own amounts.
+    frames = [merge(HR.dense, (; event_amount=[i .* a for a in HR.events.event_amount]))
+              for i in 1:16]
+    original_frames = deepcopy(frames)
+    for fitted in (sb, plan)
+        training = deepcopy(BayesianRegressionModels.stan_data(fitted))
+        replay_data(frame) = BayesianRegressionModels.stan_data(
+            reprocess(fitted, frame; freeze_constants=true))
+        expected = deepcopy(map(replay_data, frames))
+        actual = concurrent_builds(replay_data, frames)
+        @test actual == expected
+        base = HR.segment_rows(HR.dense.subject, HR.dense.time, HR.dense.event_time,
+                               HR.dense.event_amount)
+        @test all(i -> actual[i][KEYS.seg_amp] == i .* base.seg_amp, eachindex(frames))
+        @test all(data -> data[:amount_scale] == training[:amount_scale] == 2.0, actual)
+        @test BayesianRegressionModels.stan_data(fitted) == training
+        @test replay_data(first(frames)) == first(expected)
+    end
+    @test frames == original_frames
 end
 
 @testset "the term resamples new subjects through generated quantities" begin
