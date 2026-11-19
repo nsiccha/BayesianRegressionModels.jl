@@ -132,6 +132,30 @@ module RKImageWorkload
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 import RKImageModels
 const RK = RKBRMI(RKImageModels.provided(RKImageModels.PK))
+module First
+    shift(x, a) = x .+ a
+end
+module Second
+    shift(x, a) = 2 .* x .+ a
+end
+const CALLABLE = "a ~ Normal(0, 1); sigma ~ Exponential(1); mu = shift(x, a); y ~ Normal(mu, sigma)"
+const EXPANSIONS = Ref(0)
+macro next_value()
+    EXPANSIONS[] += 1
+end
+const WITH_MACRO = "c = constant(@next_value()); y ~ Normal(c, 1)"
+const FORMULA = "sigma ~ Exponential(1); mu ~ 1 + center(x); y ~ Normal(mu, sigma)"
+template(data) = brm(FORMULA; mod=@__MODULE__)(data)
+function exercise_replay()
+    data = (; x=[2., 3., 4.], y=[1., 0., 2.])
+    state = brm_fitted_state(RKBRMI(template(data)))
+    RKBRMI(template(data), state)
+    other = brm(CALLABLE; mod=First)(data)
+    RKBRMI(other, brm_fitted_state(RKBRMI(other)))
+    brm(WITH_MACRO; mod=@__MODULE__)
+    nothing
+end
+exercise_replay()
 end
 """
 
@@ -284,7 +308,8 @@ mktempdir() do root
             end
             fresh = RKBRMI(RKImageModels.provided(RKImageModels.PK))
             @test concentrations(RKImageWorkload.RK) == concentrations(fresh)
-            """)
+            include($(repr(joinpath(@__DIR__, "rk_fitted_image_checks.jl"))))
+            """; JULIA_NUM_THREADS="2")
         ok || println(log)
         @test ok
     end

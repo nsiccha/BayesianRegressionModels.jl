@@ -820,6 +820,10 @@ _brm(x::Expr; df=nothing) = begin
     end
 end
 
+_brm_parse_info(groupings) = (; alllocals=OrderedDict{Symbol,Symbol}(),
+    jointkeys=Set{Symbol}(), captures=Set{Symbol}(), groupings,
+    grouped_reads=Set{Symbol}(), inventory=_brm_inventory())
+
 # The parsed formula as the pieces `_brm` assembles into code and `brm`
 # interprets: the `__df__ -> BRMI` builder body, the authored source, and, for
 # an unnamed builder, the expression of its column inventory.
@@ -836,15 +840,10 @@ function _brm_builder_code(x::Expr; df=nothing)
     x = _brm_strip_docs(x)
     # `T::shares(total) ~ Law(…)` in a `@plate` cell (cell_total_coordinates.jl).
     x = _brm_desugar_cell_bijections(x)
-    alllocals = OrderedDict{Symbol,Symbol}()
-    jointkeys = Set{Symbol}()
-    captures = Set{Symbol}()
-    groupings = _brm_plate_groupings(x)
-    grouped_reads = Set{Symbol}()
+    info = _brm_parse_info(_brm_plate_groupings(x))
+    (; alllocals, captures, groupings, grouped_reads, inventory) = info
     # `mi(x)::shares(total, rows) ~ Law(…)` (cell_total_coordinates.jl).
     x = _brm_desugar_mi_totals(x, groupings, grouped_reads)
-    inventory = _brm_inventory()
-    info = (;alllocals, jointkeys, captures, groupings, grouped_reads, inventory)
     x = parse!(x; info)
     # A builder fragment may declare groupings that a cell in another fragment
     # reads: `merge` re-parses the composed source, which checks them again.
@@ -934,7 +933,8 @@ function _brm_depwarn_kernel_doblock()
     nothing
 end
 
-parse!(x::Expr; info) = if x.head == :block
+parse!(x::Expr; info) = _brm_parse!(x, info)
+_brm_parse!(x::Expr, info) = if x.head == :block
     Expr(:block, parse!.(x.args; info)...)
 elseif _is_brm_plate(x)
     groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,_BRMPlateGrouping}()
@@ -2555,7 +2555,8 @@ function parselocals!(x::Symbol; info, val)
         val === :maybelocal ? info.inventory.responses : info.inventory.assigned, x)
     get!(info.alllocals, x, val)
 end
-parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
+parselocals!(x::Expr; info, val) = _brm_parselocals!(x, info, val)
+_brm_parselocals!(x::Expr, info, val) = if Meta.isexpr(x, :->)
     # Shield a `do`-block lambda (see `_x`): its params are bound inside the
     # block and its body is verbatim SLIC — registering those symbols as data
     # columns would be wrong. Genuine outer params are registered by their own

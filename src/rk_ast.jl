@@ -147,17 +147,30 @@ function _rk_validate_source_definitions(emitted)
     nothing
 end
 
-# A planned column can describe geometry while its emitted assignment owns
-# the executable value. Bind only source inputs, so a cached preparation can
-# never shadow that assignment on replay or rebinding. A column no statement
-# reads (a kernel's port for a response its cells observe directly) is no
-# input either: binding it would make it a data argument of the program.
-function _rk_source_data_columns(plan, emitted)
+# Names read by an emitted program. These depend only on its code; the values
+# supplied for them always come from the current plan.
+struct _RKSourceInputs
+    computed::Set{Symbol}
+    read::Set{Symbol}
+    scalar_inputs::Set{Symbol}
+end
+function _RKSourceInputs(emitted::_RKEmittedProgram)
     computed = Set{Symbol}()
-    for statement in emitted.main.args
-        _rk_source_assignments!(computed, statement)
+    for stmt in emitted.main.args
+        _rk_source_assignments!(computed, stmt)
     end
     read = _rk_source_symbols!(Set{Symbol}(), [emitted.defs; emitted.main])
+    declared = copy(computed)
+    foreach(stmt -> _rk_source_outputs!(declared, stmt), emitted.main.args)
+    _RKSourceInputs(computed, read, setdiff!(_rk_program_value_reads(emitted), declared))
+end
+_rk_source_data_columns(plan, emitted::_RKEmittedProgram) =
+    _rk_source_data_columns(plan, _RKSourceInputs(emitted))
+
+# Bind only source inputs. A column describing geometry must never shadow
+# the emitted assignment that owns its executable value.
+function _rk_source_data_columns(plan, source::_RKSourceInputs)
+    (; computed, read) = source
     columns = Dict{Symbol,Any}()
     for (name, value) in plan.columns
         (name in computed || !(name in read)) && continue
@@ -171,15 +184,8 @@ function _rk_source_data_columns(plan, emitted)
     end
     # A number the program reads by name is an input of it. A name bound to a
     # number pins a declaration of that name, so those are never inputs.
-    inputs = _rk_input_bindings(plan)
-    if !isempty(inputs)
-        reads = _rk_program_value_reads(emitted)
-        declared = copy(computed)
-        foreach(statement -> _rk_source_outputs!(declared, statement), emitted.main.args)
-        for (name, value) in inputs
-            name in reads && !(name in declared) && !haskey(columns, name) &&
-                (columns[name] = value)
-        end
+    for (name, value) in _rk_input_bindings(plan)
+        name in source.scalar_inputs && !haskey(columns, name) && (columns[name] = value)
     end
     # A generated input may size a declaration, which no value read counts.
     for (name, value) in _rk_generated_inputs(plan)
