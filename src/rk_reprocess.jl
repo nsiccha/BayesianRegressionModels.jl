@@ -287,9 +287,9 @@ function _rk_retained_program end
 function _rk_bound_coordinate_names end
 
 _rk_same_callables(a::_RKEmittedProgram, b::_RKEmittedProgram) =
-    length(a.bindings) == length(b.bindings) &&
-    all(((x, y),) -> first(x) === first(y) && last(x) === last(y),
-        zip(a.bindings, b.bindings))
+    _rk_same_bindings(a.bindings, b.bindings)
+_rk_same_bindings(a, b) = length(a) == length(b) &&
+    all(((x, y),) -> first(x) === first(y) && last(x) === last(y), zip(a, b))
 
 _rk_replay_predictors(plan::_RKStructuralPlan) = plan.predictors
 _rk_replay_predictors(plan::_RKValuePlan) = plan.regression.predictors

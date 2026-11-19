@@ -57,13 +57,46 @@ function brm(source::Expr; mod::Module)
         "function; pass the model block itself (`quote … end`), or write the " *
         "definition with `@brm`")
     Meta.isexpr(source, :(=)) && (source = Expr(:block, source))
-    code = _brm_builder_code(source)
-    columns = _brm_interpret(_brm_expand(code.columns, mod), _BRMScope(mod))
-    BRMBuilder(_BRMInterpretedBuilder(_brm_expand(code.body, mod), mod),
-               code.source, columns, mod)
+    _brm_interpreted_builder(source, mod)
 end
 brm(source::AbstractString; mod::Module) = brm(_brm_source_block(source); mod)
 brm(df, source::Union{Expr,AbstractString}; mod::Module) = brm(source; mod)(df)
+
+# BRM's plumbing expands to an interpreter program whose globals still resolve
+# in each builder's caller. A caller macro can execute arbitrary code during
+# expansion; run those macros at every open and never save their results.
+struct _BRMCallerMacro <: Exception end
+struct _BRMCallerModule end
+
+function _brm_builder_from_expanded(code, mod)
+    columns = _brm_interpret(code.columns, _BRMScope(mod))
+    BRMBuilder(_BRMInterpretedBuilder(code.body, mod), code.source, columns, mod)
+end
+
+function _brm_interpreted_builder(source, mod)
+    eligible = _brm_image_syntax(source)
+    if eligible
+        entry = _brm_image_find(:builders, source)
+        # Builders expose mutable syntax. Each one owns its copy.
+        isnothing(entry) || return _brm_builder_from_expanded(deepcopy(entry.code), mod)
+    end
+    code = _brm_builder_code(source)
+    if eligible && !isnothing(_brm_image_target())
+        expanded = try
+            (; body=_brm_expand(code.body, nothing), columns=_brm_expand(code.columns, nothing),
+                code.source)
+        catch err
+            err isa _BRMCallerMacro || rethrow()
+            nothing
+        end
+        if expanded !== nothing
+            _brm_image_record(:builders, _BRMImageBuilder(deepcopy(source), deepcopy(expanded)))
+            return _brm_builder_from_expanded(expanded, mod)
+        end
+    end
+    columns = _brm_interpret(_brm_expand(code.columns, mod), _BRMScope(mod))
+    BRMBuilder(_BRMInterpretedBuilder(_brm_expand(code.body, mod), mod), code.source, columns, mod)
+end
 
 # The builder function of an interpreted `BRMBuilder`: the `_brm` body with
 # every macro expanded, walked once per data container.
@@ -84,22 +117,23 @@ end
 # them too; `@__MODULE__` is `mod`. A user macro (inside a constant's
 # expression) expands as the compiler would, in `mod`. Quoted code (a `@plate`
 # cell body) is data, so its `@scan` blocks stay.
-_brm_expand(x, mod::Module) = x
-_brm_expand(x::Expr, mod::Module) =
+_brm_expand(x, mod) = x
+_brm_expand(x::Expr, mod) =
     Meta.isexpr(x, :quote) ? x :
     Meta.isexpr(x, :macrocall) ? _brm_expand_macro(x.args[1], x, mod) :
     Expr(x.head, (_brm_expand(a, mod) for a in x.args)...)
 
 _brm_macro_arguments(x::Expr) = [a for a in x.args[2:end] if !(a isa LineNumberNode)]
-function _brm_expand_macro(name, x::Expr, mod::Module)
+function _brm_expand_macro(name, x::Expr, mod)
     expander = _brm_plumbing_macro(name)
     if !isnothing(expander)
         _brm_expand(expander(only(_brm_macro_arguments(x))), mod)
     elseif name === Symbol("@__MODULE__")
-        mod
+        isnothing(mod) ? _BRMCallerModule() : mod
     elseif name === Symbol("@isdefined")
         Expr(:isdefined, only(_brm_macro_arguments(x)))
     else
+        isnothing(mod) && throw(_BRMCallerMacro())
         _brm_expand(macroexpand(mod, x; recursive=true), mod)
     end
 end
@@ -158,6 +192,7 @@ end
 # ---- the walk ------------------------------------------------------------------
 
 _brm_interpret(x, scope::_BRMScope) = x               # a value spliced into the code
+_brm_interpret(::_BRMCallerModule, scope::_BRMScope) = scope.mod
 _brm_interpret(x::Symbol, scope::_BRMScope) = _brm_lookup(scope, x)
 _brm_interpret(x::QuoteNode, scope::_BRMScope) = x.value
 _brm_interpret(x::GlobalRef, scope::_BRMScope) = getglobal(x.mod, x.name)

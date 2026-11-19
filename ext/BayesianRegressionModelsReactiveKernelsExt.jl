@@ -243,23 +243,6 @@ end
 # the data, with no ordinal or missing-response plan mutations.
 const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan,BRM._RKHeldOutPlan,BRM._RKUnconditionedPlan}
 
-# The package whose image this process generates, or `nothing` at run time.
-# ReactiveKernels finds its generated-function cache by the same rule
-# (`_generated_function_cache_module`, ReactiveKernels src/codegen.jl).
-function _rk_image_target()
-    (ccall(:jl_generating_output, Cint, ()) == 0 ||
-     Base.JLOptions().incremental == 0) && return nothing
-    @static if isdefined(Base, :precompilation_target)
-        # Julia 1.10 / 1.11.
-        Base.precompilation_target
-    elseif isdefined(Base, :precompilation_stack)
-        # Julia 1.12+ records nested package precompilation in order.
-        isempty(Base.precompilation_stack) ? nothing : last(Base.precompilation_stack)
-    else
-        error("RK backend: cannot identify the package whose image is being generated")
-    end
-end
-
 # A fresh module for one program's definitions. While a package image is
 # generated, a module made by `Module()` is closed to `eval`, so the module is
 # a child of the package being precompiled instead: Julia's actual target, not
@@ -267,7 +250,7 @@ end
 # package defines, through helpers or submodules. The child is saved in that
 # image with the code compiled for it.
 function _rk_new_module()
-    target = _rk_image_target()
+    target = BRM._brm_image_target()
     target === nothing && return Module(gensym(:RKEmittedModels))
     Core.eval(Base.root_module(target),
         Expr(:module, true, gensym(:RKEmittedModels), Expr(:block)))
@@ -312,20 +295,67 @@ struct _RKProgram
     emitted::BRM._RKEmittedProgram
     mod::Module
     captured::BRM._RKOnce
+    inputs::BRM._RKSourceInputs
 end
 _RKProgram(emitted::BRM._RKEmittedProgram) =
-    _RKProgram(emitted, _rk_emit_module(emitted), BRM._RKOnce())
+    _RKProgram(emitted, _rk_emit_module(emitted), BRM._RKOnce(), BRM._RKSourceInputs(emitted))
 # A program is code, as a compiled function is: a copy of a backend (a
 # per-chain copy) shares it with the original, and its replays share it too.
 # Julia refuses to deepcopy the module it holds.
 Base.deepcopy_internal(program::_RKProgram, ::IdDict) = program
+
+# Named package globals have stable identities in the loaded image. A type
+# parameter or callable object can itself carry data.
+function _rk_image_callable(@nospecialize(f))
+    name = BRM._rk_callable_own_name(f)
+    isnothing(name) && return false
+    mod = parentmodule(f)
+    Base.moduleroot(mod) === Main && return false
+    isconst(mod, name) && isdefined(mod, name) && getglobal(mod, name) === f
+end
+
+# Reuse declarative submodels and kernels. An ordinary Julia definition can
+# evaluate a signature or keep mutable globals in its definition module. It
+# must keep the fresh namespace it would get outside a workload.
+_rk_image_definition(x) = BRM._brm_image_syntax(x)
+function _rk_image_definition(x::Expr)
+    x.head in (:function, :global, :module, :toplevel) && return false
+    if x.head === :macrocall
+        head = first(x.args)
+        (BRM._brm_is_doc(x) && x.args[3] isa String) || BRM._rk_source_macro(head, :ReactiveKernels, Symbol("@kernel")) ||
+            BRM._rk_source_macro(head, :ReactiveKernelsPPL, Symbol("@rkppl")) || return false
+    end
+    all(_rk_image_definition, x.args)
+end
+
+# The image stores the definition module and its input names. Hashing the
+# actual emitted syntax (including literal types) avoids retaining a second
+# copy of it. A provider can hand us arbitrary Julia objects: these and
+# callables with captures remain specific to the current build.
+function _rk_fitted_program(emitted)
+    if !all(_rk_image_definition, emitted.defs) || !BRM._brm_image_syntax(emitted.main) ||
+            !all(b -> _rk_image_callable(last(b)), emitted.bindings)
+        return _RKProgram(emitted)
+    end
+    digest = BRM._brm_value_digest((emitted.defs, emitted.main))
+    entry = BRM._brm_image_find(:definitions, (digest, emitted.bindings))
+    if entry !== nothing
+        return _RKProgram(emitted, entry.mod, BRM._RKOnce(), deepcopy(entry.inputs))
+    end
+    program = _RKProgram(emitted)
+    if !isnothing(BRM._brm_image_target())
+        BRM._brm_image_record(:definitions, BRM._RKImageDefinition(digest,
+            copy(emitted.bindings), program.mod, deepcopy(program.inputs)))
+    end
+    program
+end
 
 # Lowering reads the data values' shapes (rkppl-use §1), so each binding
 # lowers; the definitions are evaluated once per program. A data-free plan
 # (`RKBRMI(brmi, state)`) lowers with its fitted values `frozen` and without the
 # fit-role inputs they were fitted from, which RKPPL binds absent.
 function _rk_lower_program(program::_RKProgram, plan::_RK_PLAN_TYPES; frozen=nothing)
-    columns = BRM._rk_source_data_columns(plan, program.emitted)
+    columns = BRM._rk_source_data_columns(plan, program.inputs)
     conditioned = BRM._rk_observed_names(plan)
     frozen === nothing && return lower_rkppl(program.emitted.main, columns;
         mod=program.mod, conditioned), columns
@@ -382,7 +412,7 @@ function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram, plan, frozen, prev
         bound = _rk_bind_program(program, plan; frozen)
         return previous.program, BRM._RKOnce(bound), previous.model
     end
-    program = _RKProgram(emitted)
+    program = _rk_fitted_program(emitted)
     bound = _rk_bind_program(program, plan; frozen)
     BRM._RKOnce(program), BRM._RKOnce(bound), build_kernel(bound)
 end
