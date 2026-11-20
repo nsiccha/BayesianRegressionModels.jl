@@ -301,7 +301,9 @@ guards, keyed replay, independent time grids and fitted smooths.
 blocks with explicit models. `component_member_population.jl` addresses each
 member's population coefficients by its key against the model that writes
 each member out, and checks the coordinate transport of member coefficients,
-including the scalar coefficient of an intercept-only member. `component_collection_observations.jl` checks
+including the scalar coefficient of an intercept-only member and a member
+whose intercept sits beside its margin in the parent's block, addressed by
+unconstrained and constrained names. `component_collection_observations.jl` checks
 Gaussian, Student-t and censored readings of a shared subject trajectory,
 including readings indexed into each instrument's fitted curve.
 

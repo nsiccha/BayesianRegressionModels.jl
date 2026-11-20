@@ -3021,16 +3021,22 @@ function _brm_member_fits(d::BRMDescriptor, axis)
 end
 
 # One member of a repeated formula component, addressed `(collection, key)`:
-# its `d.submodels` entry and the descriptor of its own SB fit, whose formula
-# addresses the member-scoped resolvers read before selecting the member's
-# elements of the parent's stacked carrier.
-function _brm_member_descriptor(d::BRMDescriptor, submodel, caller::AbstractString)
+# its `d.submodels` entry and its own SB fit, whose formula addresses the
+# member-scoped resolvers read before selecting the member's elements of the
+# parent's stacked carrier.
+function _brm_member_fit(d::BRMDescriptor, submodel, caller::AbstractString)
     call = _brm_submodel_entry(d, submodel)
     axis = get(_brm_collection_paths(d.plan.parent), call.native_path, nothing)
     isnothing(axis) && throw(ArgumentError("$caller: `$submodel` is not a repeated formula component"))
     fits = _brm_member_fits(d, axis)
     isnothing(fits) && throw(ArgumentError("$caller: member `$submodel` has no fitted formula terms"))
-    call, brm_descriptor(fits[findfirst(==(call.target), axis.keys)])
+    call, fits[findfirst(==(call.target), axis.keys)]
+end
+
+# The same member with the descriptor of its own SB fit.
+function _brm_member_descriptor(d::BRMDescriptor, submodel, caller::AbstractString)
+    call, fit = _brm_member_fit(d, submodel, caller)
+    call, brm_descriptor(fit)
 end
 
 # The member's elements of a parent carrier, in element order: the carrier's
@@ -3702,6 +3708,52 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     # returned from the conventional attempt above.
 end
 
+# One member's population block, read from the plan of the member's own SB fit:
+# its formula entry, binding, prior scheme, coefficient labels and the name of
+# its coefficient carrier, as `_brm_label_population!` labels it. The member's
+# fit is never transpiled: a member that puts a margin in the parent's block
+# reads it through inputs only the parent's call binds, so that fit alone is
+# no Stan program.
+function _brm_member_population_block(fit, logical::Symbol, address, caller::AbstractString)
+    plan = _brm_plan_of(fit)
+    entries = [e for e in _brm_population_effect_entries(plan.parent) if e.logical === logical]
+    length(entries) == 1 || error(
+        "$caller: logical predictor `$logical` of member `$address` resolves " *
+        "to $(length(entries)) formula declarations; expected exactly one public " *
+        "population-effect address.")
+    entry = only(entries)
+    absorbing = [b for b in Iterators.flatten((total_effect_blocks(plan), s2z_effect_blocks(plan)))
+                 if b.predictor === logical]
+    isempty(absorbing) || error(
+        "$caller: logical predictor `$logical` of member `$address` has its " *
+        "coefficients in a $(_brm_absorbing_block_kind(first(absorbing))) block, " *
+        "which a member does not address yet.")
+    binding = get(plan.bindings, entry.block, nothing)
+    kind = !isnothing(binding) && hasproperty(binding, :prior_scheme) ?
+        binding.prior_scheme.kind : :ordinary
+    classes = _brm_population_classes(plan.bindings, entry.block)
+    labels = _brm_population_labels(plan.bindings, plan.parent, entry.block, logical)
+    isnothing(labels) && error(
+        "$caller: population block of logical predictor `$logical` of member " *
+        "`$address` has no coefficient labels; this formula shape does not expose a " *
+        "stable population-coordinate address.")
+    isnothing(classes) || (labels = _brm_class_labels(labels, classes))
+    carrier = Symbol(entry.block, isnothing(classes) ? :_beta_pop : :_beta_flat)
+    (; entry, kind, labels, carrier)
+end
+
+# The parent's stacked carrier of one member's coefficients: the member's own
+# carrier name under the call's native path, which must name exactly one
+# output of the call.
+function _brm_member_population_carrier(call, block, address, caller::AbstractString)
+    emitted = Symbol(join((call.native_path..., block.carrier), "_"))
+    outputs = [o for o in call.outputs if o.name === emitted]
+    length(outputs) == 1 || error(
+        "$caller: member `$address` population carrier `$(block.carrier)` " *
+        "resolves to $(length(outputs)) carriers of the parent model; expected exactly one.")
+    only(outputs)
+end
+
 # One member's population coefficient: the label resolves on the member's own
 # fit, whose coefficient carrier the parent stacks over members, and the
 # member's elements of that stacked carrier hold its coefficients in label
@@ -3709,38 +3761,17 @@ end
 function _brm_member_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                                    constrained_names, coefficient::Symbol,
                                                    submodel)
-    call, inner = _brm_member_descriptor(d, submodel, "brm_population_effect_coordinates")
+    caller = "brm_population_effect_coordinates"
+    call, fit = _brm_member_fit(d, submodel, caller)
     address = _brm_submodel_address(call)
-    entries = [e for e in _brm_population_effect_entries(inner.plan.parent)
-               if e.logical === logical]
-    length(entries) == 1 || error(
-        "brm_descriptor: logical predictor `$logical` of member `$address` resolves " *
-        "to $(length(entries)) formula declarations; expected exactly one public " *
-        "population-effect address.")
-    entry = only(entries)
-    idxs = _brm_carrier_indices(inner.outputs,
-               o -> o.role === :population_effect && !isnothing(o.declaration) &&
-                    o.declaration.target === entry.block && o.name !== entry.block)
-    length(idxs) == 1 || error(
-        "brm_descriptor: logical predictor `$logical` of member `$address` owns " *
-        "$(length(idxs)) population coefficient carriers; expected exactly one.")
-    inner_output = inner.outputs[only(idxs)]
-    labels = inner_output.labels
-    isnothing(labels) && error(
-        "brm_descriptor: population carrier of logical predictor `$logical` of member " *
-        "`$address` has no coefficient labels; this formula shape does not expose a " *
-        "stable population-coordinate address.")
+    block = _brm_member_population_block(fit, logical, address, caller)
+    (; entry, labels) = block
     label_indices = findall(==(coefficient), labels)
     length(label_indices) == 1 || error(
         "brm_descriptor: coefficient `$coefficient` occurs $(length(label_indices)) " *
         "times on logical predictor `$logical` of member `$address`; available " *
         "labels are $(Tuple(labels)).")
-    emitted = Symbol(join((call.native_path..., inner_output.name), "_"))
-    outputs = [o for o in call.outputs if o.name === emitted]
-    length(outputs) == 1 || error(
-        "brm_descriptor: member `$address` population carrier `$(inner_output.name)` " *
-        "resolves to $(length(outputs)) carriers of the parent model; expected exactly one.")
-    output = only(outputs)
+    output = _brm_member_population_carrier(call, block, address, caller)
     coordinates = _brm_member_element_coordinates(output, constrained_names)
     length(coordinates) == length(labels) || error(
         "brm_descriptor: member `$address` population carrier has $(length(labels)) " *

@@ -50,8 +50,79 @@ const offset_panels = @brm begin
     y ~ Normal(readings, 1)
 end
 
+# The shape of a joint endpoint block: an intercept beside the margin the member
+# puts in the parent's block, and a second predictor with its own covariate.
+# Each member centres its intercept prior on its own value.
+@brm function marginal(settings)
+    base ~ 1 + (1 | parentblock(:p) | settings.site)
+    effect(base, Intercept) ~ Normal(settings.center, 0.7)
+    slope ~ 1 + settings.dose
+    effect(slope, Intercept) ~ Normal(0.0, 1.0)
+    return sum(base) + sum(slope)
+end
+
+const marginal_panels = @brm begin
+    root ~ 0 + (1 | p | site)
+    for entry in records
+        readings[entry.id] ~ marginal(entry)
+    end
+    primary ~ Normal(root, 1)
+    y ~ Normal(readings, 1)
+end
+
+const marginal_explicit = @brm begin
+    root ~ 0 + (1 | p | site)
+    a ~ 1 + (1 | p | a_site)
+    effect(a, Intercept) ~ Normal(0.3, 0.7)
+    a_slope ~ 1 + a_dose
+    effect(a_slope, Intercept) ~ Normal(0.0, 1.0)
+    b ~ 1 + (1 | p | b_site)
+    effect(b, Intercept) ~ Normal(-0.4, 0.7)
+    b_slope ~ 1 + b_dose
+    effect(b_slope, Intercept) ~ Normal(0.0, 1.0)
+    primary ~ Normal(root, 1)
+    ya ~ Normal(sum(a) + sum(a_slope), 1)
+    yb ~ Normal(sum(b) + sum(b_slope), 1)
+end
+
 const site = ["x", "y"]
 const primary = [0.1, -0.1]
+
+# The twin coordinate of each collection coordinate: a member coefficient by
+# its keyed address, given as `(logical, coefficient) => key -> (twin logical,
+# twin coefficient)`, and the shared parent block by its name. The two models
+# then agree on the log density and its gradient at the permuted point.
+function check_member_twin(m, twin, name, coefficients)
+    stan = consumer_stan(m, "member-population-" * name; mod=@__MODULE__).model
+    ref = consumer_stan(twin, "member-population-twin-" * name; mod=@__MODULE__).model
+    names = BridgeStan.param_unc_names(stan)
+    twin_names = BridgeStan.param_unc_names(ref)
+    @test length(names) == length(twin_names)
+    d = brm_descriptor(SBBRMI(m; mod=@__MODULE__, total_groups=()))
+    dt = brm_descriptor(SBBRMI(twin; mod=@__MODULE__, total_groups=()))
+    perm = zeros(Int, length(names))
+    for key in (:a, :b), ((logical, coefficient), twin_address) in coefficients
+        r = brm_population_effect_coordinates(d, logical, names; coefficient,
+            submodel=(:readings, key))
+        @test r.submodel == (:readings, key)
+        @test r.recovered === false && r.link === identity
+        twin_logical, twin_coefficient = twin_address(key)
+        t = brm_population_effect_coordinates(dt, twin_logical, twin_names;
+            coefficient=twin_coefficient)
+        perm[only(r.coordinates)] = only(t.coordinates)
+    end
+    for (i, name) in enumerate(names)
+        startswith(name, "b_p_site") && (perm[i] = findfirst(==(name), twin_names))
+    end
+    @test sort(perm) == eachindex(names)
+    for v in (collect(range(-0.32, 0.41; length=length(names))), [0.3sin(i) for i in eachindex(names)])
+        value, grad = BridgeStan.log_density_gradient(stan, v[perm]; propto=false)
+        ref_value, ref_grad = BridgeStan.log_density_gradient(ref, v; propto=false)
+        @test value ≈ ref_value
+        @test grad ≈ ref_grad[perm]
+    end
+    (; stan, names, d)
+end
 
 # RK and Stan agree on the log density and its gradient through the transport.
 function check_transport(m, stan, names)
@@ -75,37 +146,11 @@ end
     m = dosed_panels(input)
     twin = dosed_explicit((; site, primary, a_dose=records[2].dose,
         b_dose=records[1].dose, ya=[input.y[2]], yb=[input.y[1]]))
-    stan = consumer_stan(m, "member-population"; mod=@__MODULE__).model
-    ref = consumer_stan(twin, "member-population-twin"; mod=@__MODULE__).model
-    names = BridgeStan.param_unc_names(stan)
-    twin_names = BridgeStan.param_unc_names(ref)
-    @test length(names) == length(twin_names)
-    d = brm_descriptor(SBBRMI(m; mod=@__MODULE__, total_groups=()))
-    dt = brm_descriptor(SBBRMI(twin; mod=@__MODULE__, total_groups=()))
     # Each member coefficient's coordinate holds the twin's coefficient of the
     # same meaning; the parent block keeps its names.
-    perm = zeros(Int, length(names))
-    for (key, twin_lp) in ((:a, :a), (:b, :b)),
-            (coefficient, twin_coefficient) in ((:Intercept, :Intercept),
-                                                (:settings_dose, Symbol(twin_lp, :_dose)))
-        r = brm_population_effect_coordinates(d, :shift, names; coefficient,
-            submodel=(:readings, key))
-        @test r.submodel == (:readings, key)
-        @test r.recovered === false && r.link === identity
-        t = brm_population_effect_coordinates(dt, twin_lp, twin_names;
-            coefficient=twin_coefficient)
-        perm[only(r.coordinates)] = only(t.coordinates)
-    end
-    for (i, name) in enumerate(names)
-        startswith(name, "b_p_site") && (perm[i] = findfirst(==(name), twin_names))
-    end
-    @test sort(perm) == eachindex(names)
-    for v in (collect(range(-0.32, 0.41; length=length(names))), [0.3sin(i) for i in eachindex(names)])
-        value, grad = BridgeStan.log_density_gradient(stan, v[perm]; propto=false)
-        ref_value, ref_grad = BridgeStan.log_density_gradient(ref, v; propto=false)
-        @test value ≈ ref_value
-        @test grad ≈ ref_grad[perm]
-    end
+    (; stan, names, d) = check_member_twin(m, twin, "dosed", (
+        (:shift, :Intercept) => key -> (key, :Intercept),
+        (:shift, :settings_dose) => key -> (key, Symbol(key, :_dose))))
     # Member `a` is the first key in key order: its intercept is the first
     # member's element of the stacked carrier.
     a = brm_population_effect_coordinates(d, :shift, names; submodel=(:readings, :a))
@@ -134,5 +179,37 @@ end
     transport = check_transport(m, stan, names)
     @test sort([p.address.scope for p in transport.pairs if p.address.kind === :population]) ==
         [(:readings, :a), (:readings, :b)]
+end
+
+@stestset "A member's intercept beside its parent-block margin is addressed by its key" begin
+    records = [(id=:b, center=-0.4, site=["y", "y", "x"], dose=[0.2, 0.9, 0.4]),
+               (id=:a, center=0.3, site=["x", "y"], dose=[0.7, 0.1])]
+    input = (; records, site, primary, y=[0.4, 0.2])
+    m = marginal_panels(input)
+    twin = marginal_explicit((; site, primary, a_site=records[2].site,
+        a_dose=records[2].dose, b_site=records[1].site, b_dose=records[1].dose,
+        ya=[input.y[2]], yb=[input.y[1]]))
+    (; stan, names, d) = check_member_twin(m, twin, "marginal", (
+        (:base, :Intercept) => key -> (key, :Intercept),
+        (:slope, :Intercept) => key -> (Symbol(key, :_slope), :Intercept),
+        (:slope, :settings_dose) => key -> (Symbol(key, :_slope), Symbol(key, :_dose))))
+    # A consumer reading draws passes constrained names. The parent block's
+    # Cholesky factor has more constrained than unconstrained entries, so the
+    # coefficient sits at another position there.
+    cnames = BridgeStan.param_names(stan)
+    @test length(cnames) > length(names)
+    for key in (:a, :b)
+        u = brm_population_effect_coordinates(d, :base, names; submodel=(:readings, key))
+        c = brm_population_effect_coordinates(d, :base, cnames; submodel=(:readings, key))
+        @test cnames[only(c.coordinates)] == names[only(u.coordinates)]
+    end
+    # Each member's intercept prior is centred on its own value, so a swap
+    # of the members' intercepts would change the density above.
+    transport = check_transport(m, stan, names)
+    @test sort([(p.address.scope, p.address.predictor, p.address.coefficient)
+                for p in transport.pairs if p.address.kind === :population]) ==
+        sort([((:readings, key), predictor, coefficient) for key in (:a, :b)
+              for (predictor, coefficient) in ((:base, :Intercept), (:slope, :Intercept),
+                                               (:slope, :settings_dose))])
 end
 end

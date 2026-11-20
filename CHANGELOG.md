@@ -20,7 +20,10 @@ instead of failing at run time.
   `brm_ranef_sd_coordinates` do. For a member formula
   `shift ~ 1 + settings.dose`,
   `brm_population_effect_coordinates(d, :shift, names; submodel=(:blocks, :left))`
-  returns the left member's intercept. The result also carries `submodel`.
+  returns the left member's intercept. This includes a member whose formula
+  also puts a margin in the parent's block, such as
+  `base ~ 1 + (1 | parentblock(:p) | entry.site)`. The result also carries
+  `submodel`.
 - `brm_coordinate_transport` pairs a member's population coefficients by the
   member and the coefficient label. Earlier an intercept-only member's
   coefficients did not pair. A member whose formula has a covariate paired

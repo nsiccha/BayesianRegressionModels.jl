@@ -1944,29 +1944,22 @@ function _brm_transport_member_population(record, d, stan)
     fits === nothing && _brm_transport_error(:unsupported_coverage,
         "brm_coordinate_transport: collection `$(axis.collection)` declares population " *
         "coefficients in its members but has no per-member SB fit")
+    caller = "brm_coordinate_transport"
     for (i, key) in enumerate(axis.keys)
         scope = (axis.collection, key)
         call = _brm_submodel_entry(d, scope)
-        local_descriptor = brm_descriptor(fits[i])
         blocks = Dict{Symbol,Any}()
         for r in population
             block = get!(blocks, r.predictor) do
-                binding = _brm_transport_population_binding(local_descriptor, r.predictor)
-                binding === nothing && _brm_transport_error(:unsupported_coverage,
-                    "brm_coordinate_transport: member $scope population predictor " *
-                    "`$(r.predictor)` has no SB binding")
+                binding = _brm_member_population_block(fits[i], r.predictor, scope, caller)
                 binding.kind === :ordinary || _brm_transport_error(:unsupported_coverage,
                     "brm_coordinate_transport: member $scope population predictor " *
                     "`$(r.predictor)` uses a $(binding.kind) prior scheme")
-                carrier = Symbol(join((path..., binding.output.name), "_"))
-                outputs = [o for o in call.outputs if o.name === carrier]
-                length(outputs) == 1 || error(
-                    "brm_coordinate_transport: member $scope population carrier " *
-                    "`$carrier` matches $(length(outputs)) outputs; expected one")
-                elements = _brm_member_element_coordinates(only(outputs), stan)
+                output = _brm_member_population_carrier(call, binding, scope, caller)
+                elements = _brm_member_element_coordinates(output, stan)
                 length(elements) == length(binding.labels) || error(
                     "brm_coordinate_transport: member $scope population carrier " *
-                    "`$carrier` has $(length(binding.labels)) labels but " *
+                    "`$(output.name)` has $(length(binding.labels)) labels but " *
                     "$(length(elements)) Stan coordinates")
                 (; labels=binding.labels, names=stan[elements])
             end
