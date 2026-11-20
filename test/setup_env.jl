@@ -463,7 +463,9 @@ const PINS = [
     # branch_arms = "all" keeps side-by-side flag branches in one plate
     # (test/rk_rebuild_types.jl, snag rk-logdensity-pr-b8b1cc36).
     # RKPPL 0.1.240 supports differently sized vector and matrix priors per cell.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9627ab86800403a8adb50a184ace94cb58d58ebc"),
+    # RKPPL 0.1.244 reads one plate row over selected packed coordinates
+    # (`indexed_value`), which SVI uses for a field state's conditional.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "193c99828a479548fda9ff8499c847b2bc860aaf"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

@@ -455,4 +455,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # branches in one plate (test/rk_rebuild_types.jl, snag rk-logdensity-pr-b8b1cc36).
 
 # RK 0.1.338 / RKPPL 0.1.240 support sized priors in repeated component cells.
-rev = "9627ab86800403a8adb50a184ace94cb58d58ebc"
+
+# RK 0.1.347 / RKPPL 0.1.244: `indexed_value` reads one row of a plate over
+# selected packed coordinates, which SVI uses for a field state's conditional.
+rev = "193c99828a479548fda9ff8499c847b2bc860aaf"
