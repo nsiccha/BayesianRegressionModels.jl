@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.341
+
+- `brm_description` uses the prepared model's population coefficient labels
+  when applying effect priors. It can now describe a predictor containing
+  `mo(x)` when `x` is a data-only assignment, including when a single fitted
+  level removes the monotonic coefficient.
+
 ## 0.2.340
 
 - `prune_responses` skips an `optional(...)` prior when its address is

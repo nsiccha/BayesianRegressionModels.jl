@@ -141,6 +141,29 @@ end
     @test brm_description(d).equations==r.equations
 end
 
+@testset "population priors follow the prepared monotonic design" begin
+    builder = @brm begin
+        band = g + 1
+        mu ~ 1 + mo(band) + x
+        effect(mu, :) ~ Normal(0, 2)
+        effect(mu, x) ~ Normal(1, 0.25)
+        y ~ Normal(mu, 1)
+    end
+    for g in (DESCRIPTION_DATA.g, ones(Int, length(DESCRIPTION_DATA.g)))
+        model = builder(merge(DESCRIPTION_DATA, (; g)))
+        descriptor = brm_descriptor(SBBRMI(model; mod=@__MODULE__))
+        report = brm_description(descriptor)
+        priors = filter(p -> first(p.id) === :population, report.priors)
+        expected = all(==(first(g)), g) ? (:Intercept, :x) : (:Intercept, :mo_band, :x)
+        @test Tuple(last(p.id) for p in priors) == expected
+        for p in priors
+            slope = last(p.id) === :x
+            @test p.source.selector == (slope ? "effect(mu, x)" : "effect(mu, :)")
+            @test p.distribution.arguments == (slope ? (1, 0.25) : (0, 2))
+        end
+    end
+end
+
 @testset "included scientific submodel parameters and calls" begin
     m=@brm DESCRIPTION_DATA begin
         mu ~ toy_term(x;anchor=1.7)
