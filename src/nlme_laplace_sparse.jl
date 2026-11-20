@@ -221,20 +221,48 @@ end
 # The grouping column a latent block is integrated by: a random-effect block's
 # and a `cdar` walk's group, a `car` field's area column.
 _brm_spl_record_group(r) = r.kind === :car ? r.area :
+    r.kind === :population ? :coefficients :
     r.kind in (:vector, :gmrf, :cell_gmrf) ? r.declaration : r.group
 _brm_spl_record_declaration(r) =
-    r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) : r.declaration
+    r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) :
+    r.kind === :population ? _brm_spl_coefficient_name(r) : r.declaration
 const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector, :gmrf, :cell_gmrf)
 
-# The model's latent blocks over the named grouping columns.
+# A formula coefficient's packed coordinate: its declaration, then its index
+# (a scalar coefficient, such as a lone intercept, has no index).
+_brm_spl_coefficient_name(r) =
+    Symbol(join((string(r.declaration), string.(get(r, :index, ()))...), "."))
+
+# A formula coefficient's Normal prior as constant (mean, scale), or `nothing`
+# for any other law or a prior argument that is not a number.
+function _brm_spl_coefficient_prior(r)
+    prior = r.prior
+    (prior isa Expr && prior.head === :call && prior.args[1] === :Normal &&
+        length(prior.args) == 3 && all(a -> a isa Real, prior.args[2:3])) || return nothing
+    m, s = Float64(prior.args[2]), Float64(prior.args[3])
+    isfinite(m) && isfinite(s) && s > 0 ? (m, s) : nothing
+end
+
+# The model's latent blocks over the named grouping columns. `:coefficients`
+# names the formula's population coefficients (decision `0r49iwd`): each one
+# with a Normal prior of constant mean and scale is its own integrated block,
+# as INLA keeps fixed effects in the latent Gaussian field.
 function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
-    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT]
+    coefficients = :coefficients in integrate
+    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT ||
+        (coefficients && r.kind === :population)]
     available = unique(Symbol[_brm_spl_record_group(r) for r in records])
+    coefficients && any(r -> r.kind !== :population &&
+            _brm_spl_record_group(r) === :coefficients, records) &&
+        _brm_nlme_error("brm_laplace_problem: integrate names `:coefficients`, which " *
+            "here is also a grouping or declaration of the model's latent terms; rename it")
     for g in integrate
         g in available || _brm_nlme_error("brm_laplace_problem: integrate names " *
             "`$g`, which groups no random-effect block, `cdar` walk or `car` field " *
             "and names no declared vector of the model; its groupings and declarations are " *
-            "$(isempty(available) ? "none" : join(repr.(available), ", "))")
+            "$(isempty(available) ? "none" : join(repr.(available), ", "))" *
+            (g === :coefficients ? "; the model has no population coefficient with its " *
+                "own prior to integrate" : ""))
     end
     chosen = [r for r in records if _brm_spl_record_group(r) in integrate &&
         (declarations === nothing || _brm_spl_record_declaration(r) in declarations)]
@@ -253,6 +281,11 @@ function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
             "brm_laplace_problem: the `car($(r.area))` field is lowered with " *
             "`car_units`, whose draws the sparse Laplace does not integrate; build the " *
             "RKBRMI without `car_units` to integrate the field whole")
+        r.kind === :population && _brm_spl_coefficient_prior(r) === nothing &&
+            _brm_nlme_error("brm_laplace_problem: integrate names `:coefficients`, but " *
+                "the coefficient `$(r.coefficient)` of `$(r.predictor)` has the prior " *
+                "`$(r.prior)`; only coefficients with a Normal prior of constant mean and " *
+                "scale are integrated")
     end
     chosen
 end
@@ -318,6 +351,11 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         elseif r.kind === :vector
             labels = names[owned(r.declaration)]
             block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1)), ())
+        elseif r.kind === :population
+            # One block per coefficient: a likelihood entry reads one level of
+            # a block, and a row reads every coefficient of its predictor.
+            name = _brm_spl_coefficient_name(r)
+            block!(name, :coefficients, draws!(reshape([name], 1, 1)), ())
         elseif r.kind === :gmrf
             # The field's state draws in state order; its SD scales the reads.
             field = Symbol(r.declaration, ".", r.locals.field)
