@@ -504,9 +504,9 @@ end
 # stated per margin and collected into the same `tau` vector. A known scale
 # (`sd(...) = value`) arrives as the name of its input and enters `tau` as that
 # value; only a law is sampled.
-function _rk_ast_group_scales(priors, index)
+function _rk_ast_group_scales(priors, index; per_margin=false)
     held(prior) = prior isa Union{Real,Symbol}
-    if all(isequal(first(priors)), priors) && !held(first(priors))
+    if !per_margin && all(isequal(first(priors)), priors) && !held(first(priors))
         prior = first(priors)
         return Expr[Expr(:call, :.~, Expr(:ref, :tau, index),
             _rk_ast_dotted(prior.args[1], prior.args[2:end]...))]
@@ -529,13 +529,16 @@ end
 # positions computed from the data (`b[g_level, k]`), which a `levels(g)` axis
 # would instead read as labels.
 function _rk_ast_group_component!(definitions, statements, taken, name, group, K, eta,
-        priors; scale_value=nothing, nu=nothing, L_value=nothing)
+        priors; scale_value=nothing, nu=nothing, L_value=nothing, dimension=K,
+        fitted_levels=false, per_margin=false)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(priors,
         (:g, :K, :eta, :tau, :L, :z, :w, :nu, (Symbol(:tau_, j) for j in 1:K)...))
     index = K > 1 ? Expr(:call, :(:), 1, :K) : Expr(:call, :(:), 1, 1)
-    rows = Expr(:call, :(:), 1, Expr(:call, :length, Expr(:call, :levels, :g)))
+    # A collection cell receives its precomputed level table. Its coefficient
+    # rows use the length of that table directly, including on frozen replay.
+    rows = fitted_levels ? :(1:length(g)) : :(1:length(levels(g)))
     body = Expr(:block)
-    scale_value === nothing && append!(body.args, _rk_ast_group_scales(priors, index))
+    scale_value === nothing && append!(body.args, _rk_ast_group_scales(priors, index; per_margin))
     # `L_value`: a known correlation's constant Cholesky factor (`cor(:, ID) = R`).
     K > 1 && L_value === nothing &&
         push!(body.args, Expr(:call, :~, :L, Expr(:call, :LKJCholesky, :K, :eta)))
@@ -575,11 +578,11 @@ function _rk_ast_group_component!(definitions, statements, taken, name, group, K
         Group-level (varying) effects of grouping `g`$(K > 1 ? ", `K` correlated margins per level" : "").
 
         Non-centered, from $scales$correlation and standardized effects
-        `z[1:length(levels(g)), 1:$(K > 1 ? "K" : "1")] ~ Normal(0, 1)`. Returns the
+        `z[$(fitted_levels ? "1:length(g)" : "1:length(levels(g))"), 1:$(K > 1 ? "K" : "1")] ~ Normal(0, 1)`. Returns the
         level-by-margin matrix $levels, one row per level of `g` in order.$mixing$(_rk_prior_inputs_doc(prior_inputs))"""
     callee = _rk_ast_shared_definition!(definitions, taken, base, arguments, body; doc)
     values = Any[group]
-    K > 1 && push!(values, K, eta)
+    K > 1 && push!(values, dimension, eta)
     scale_value === nothing || push!(values, scale_value)
     L_value === nothing || push!(values, L_value)
     nu === nothing || push!(values, nu)

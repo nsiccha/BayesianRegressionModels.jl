@@ -154,6 +154,141 @@ at model scope, `recovery = kin.recovery`, then read `recovery[i]`.
 `brm_components` discovers the definitions and call paths; descriptor queries
 use `submodel=:left` rather than generated names.
 
+### Repeating a component over records
+
+Bind one member per record when the channels in a measurement vary between
+datasets. An `if` on the record's settings selects which declarations enter
+the model. Here the calibrated channels each get their own shift.
+
+```@example record_components
+using BayesianRegressionModels
+
+@brm function sensor(settings)
+    if settings.calibrated
+        shift ~ Normal(0, settings.scale)
+        reading = settings.offset + shift
+    else
+        reading = settings.offset
+    end
+    return reading
+end
+
+signals = @brm begin
+    for item in sensors
+        channels[item.id] ~ sensor(item)
+    end
+    y ~ Normal(channels, 1)
+end
+
+sensors = [(id=:left, calibrated=true, offset=0.4, scale=0.7),
+           (id=:right, calibrated=false, offset=1.2, scale=0.5)]
+data = (; sensors, y=[0.2, 1.0])
+model = signals(data)
+[call.path for call in brm_components(model)]
+```
+
+`channels` follows the order of the supplied records. Fitted parameters keep
+their labels when `reprocess` receives the same members in a different order.
+For example, `brm_outputs(brm_descriptor(SBBRMI(model)); submodel=(:channels,
+:left), logical=:shift)` finds the calibrated channel's shift. Binding with
+`channels[item]` uses positions as keys. For a fit with a different selection
+of members or declaration flags, call the builder on the new records.
+
+To give selected instruments their own smooth time effects, put the formula
+inside the guard. Each enabled instrument supplies its time grid and basis
+size. The fixed instrument below contributes its known mean.
+
+```@example smooth_components
+using BayesianRegressionModels
+
+@brm function drift(instrument)
+    if instrument.smooth
+        trend ~ 0 + hsgp(instrument.time; k=instrument.k, c=1.5)
+        prediction = sum(trend)
+    else
+        prediction = instrument.offset
+    end
+    return prediction
+end
+
+survey = @brm begin
+    for item in instruments
+        estimates[item.id] ~ drift(item)
+    end
+    reading ~ Normal(estimates, 1)
+end
+
+instruments = [(id=:early, smooth=true, time=[0.1, 0.4, 0.7], k=3),
+               (id=:fixed, smooth=false, offset=0.2),
+               (id=:late, smooth=true, time=[1.0, 1.3, 1.8, 2.1], k=4)]
+model = survey((; instruments, reading=[0.5, 0.3, 0.7]))
+[call.path for call in brm_components(model)]
+```
+
+Here `early` and `late` each fit a marginal scale and a length scale,
+with three and four basis weights respectively. A second guard can add a
+seasonal term with `cov=:periodic, period=instrument.period`, or deviations
+by subject with `by=instrument.subject, anchor=0.0`. Each term reads the
+same instrument's time grid.
+
+For prediction on new time grids, keep the data-bound backend and call
+`reprocess` with the same member keys. The RK fitted-state export currently
+requires fitted summaries at model scope, so these per-member smooths need
+the original fitted backend for replay.
+
+An observation clause lets each member use a trajectory computed in a
+parent plate. Here each sensor supplies its readings as one vector per
+subject, in the order of `input`. An empty vector represents a subject
+with no readings from that sensor.
+
+```@example observed_components
+using BayesianRegressionModels
+
+@brm function instrument(setting)
+    bias ~ Normal(0, setting.scale)
+    @observe s trajectory member begin
+        setting.y[s] ~ Normal(trajectory .+ member, 1)
+    end
+    return bias
+end
+
+experiment = @brm begin
+    for setting in instruments
+        meters[setting.id] ~ instrument(setting)
+    end
+    @plate for s in eachindex(input)
+        trajectory[s] = 0.5 * input[s]
+        observe(meters, s, trajectory[s])
+    end
+end
+
+instruments = [(id=:left, scale=0.5, y=[[1.2, 1.0], Float64[]]),
+               (id=:right, scale=0.8, y=[[0.9], [1.7]])]
+model = experiment((; instruments, input=[2.0, 3.0]))
+[call.path for call in brm_components(model)]
+```
+
+`member` receives the component's return value for each observed row.
+If the component returns a vector on its own time grid,
+`member[setting.read_index[s]]` selects one grid position per reading.
+For a named return such as `(; curve, scale)`, use
+`member.curve[setting.read_index[s]]` and `member.scale`.
+The clause can sit inside a declaration guard, so different members can
+use different likelihoods in the same subject plate. A grouped intercept
+`(1 | p | setting.site)` belongs to that member. Use
+`(1 | parentblock(:p) | setting.site)` to put its margin in the parent's
+`p` correlation block. The site labels match rows across members and the
+parent, including when their rows have different orders or lengths.
+
+Query a member's observation draws with
+`brm_output_coordinates(descriptor, :y, names; role=:posterior_predictive,
+submodel=(:meters, :left))`. For a member with a formula predictor, use
+`brm_term_coordinates` with the same `submodel` address to select its
+term parameters, such as `parameter=:basis_weights` on a time smooth.
+For a shared intercept margin, `brm_ranef_sd_coordinates(descriptor,
+:shift, names; id=:p, submodel=(:meters, :left))` selects the fitted
+between-site standard deviation for the member's `shift` predictor.
+
 Use `merge(structure_a, structure_b, priors_a, priors_b)` for fragments that
 share one namespace. Put structure first and priors last within each scope;
 moving a cell-local prior outside the plate changes the model. A retained

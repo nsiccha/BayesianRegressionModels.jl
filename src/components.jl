@@ -177,7 +177,13 @@ function _brm_component(source::Expr, scope::Module)
         assignments = Any[Expr(:(=), local_name, expression)
             for (local_name, expression) in zip(locals, last.(fields))]
     end
-    builder = brm(Expr(:block, body..., assignments...); mod=scope)
+    statements = _brm_strip_observers(Expr(:block, body..., assignments...))
+    builder = if any(_brm_declaration_guard, body)
+        BRMBuilder(_BRMGuardedComponentBody(statements, inputs, scope),
+            statements, inputs, scope)
+    else
+        brm(statements; mod=scope)
+    end
     BRMComponent(name, inputs, keywords, defaults, source, builder, result, scope)
 end
 
@@ -222,7 +228,7 @@ For a component definition itself, the first record has path `()` and no call.
 No backend compilation or manually maintained source registry is required.
 """
 Base.@nospecializeinfer brm_components(@nospecialize(model::BRMI)) =
-    map(_brm_public_component_record, _brm_component_records(model))
+    _brm_collection_public_records(model, _brm_component_records(model))
 brm_components(builder::BRMBuilder, data) = brm_components(builder(data))
 brm_components(component::BRMComponent) =
     map(_brm_public_component_record, _brm_component_records(component))
@@ -237,6 +243,12 @@ Base.@nospecializeinfer function _brm_component_records(@nospecialize(model::BRM
     Tuple(records)
 end
 function _brm_component_records(component::BRMComponent)
+    # A data-free definition has no selected set of declarations. Its original
+    # source is still inspectable. The bound call below visits the selected body.
+    if component.builder.f isa _BRMGuardedComponentBody
+        return ((; path=(), definition=component, source=brm_source(component),
+            scope=component.scope, call=nothing, instance=nothing, plate=false),)
+    end
     placeholders = Dict(input => NamedColumn(input, _BRMComponentInput(input))
         for input in component.inputs)
     model = component.builder(_BRMCellFormulaInputs((;), placeholders))

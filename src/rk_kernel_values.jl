@@ -630,7 +630,11 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             if index === nothing
                 if _brm_component_cell_head(distribution, scope) !== nothing
                     lhs isa Symbol || error("RK backend: a component cell binding needs a local name")
-                    push!(body, Expr(:(=), lhs, Expr(:call, _rk_cell_component, distribution)))
+                    reserved = union!(Set{Symbol}(keys(columns)), keys(program.context.data),
+                        (op.name for op in program.operations))
+                    prepared = _rk_prepare_cell_component!(lhs, distribution, scope, name,
+                        params, inputs, columns, reserved)
+                    push!(body, Expr(:(=), lhs, Expr(:call, _rk_cell_component, distribution, prepared)))
                     continue
                 end
                 push!(body, _rk_kernel_cell_latent(scope, lhs, distribution, name,
@@ -1633,7 +1637,12 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         if _rk_is_cell_component(statement)
             lhs, marker = statement.args
             entry = Expr(:ref, locals_of[lhs], index)
-            return Any[Expr(:call, :~, entry, marker.args[2]), Expr(:(=), lhs, entry)]
+            call = marker.args[2]
+            if any(arg -> Meta.isexpr(arg, :brm_collection_slice), call.args)
+                call = Expr(:call, (Meta.isexpr(arg, :brm_collection_slice) ?
+                    Expr(:ref, only(arg.args), index) : arg for arg in call.args)...)
+            end
+            return Any[Expr(:call, :~, entry, call), Expr(:(=), lhs, entry)]
         end
         _rk_is_cell_gmrf(statement) && return _rk_expand_cell_gmrf(statement, index, selected,
             defs, bindings, taken, avoid, coordinates, kernel.name)

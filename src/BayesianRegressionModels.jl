@@ -7,6 +7,10 @@ include("authored_documentation.jl")
 include("macro.jl")
 include("builder_interpreter.jl")
 include("components.jl")
+include("component_settings.jl")
+include("component_collections.jl")
+include("component_observers.jl")
+include("component_group_effects.jl")
 include("groups.jl")
 include("ar1_normal.jl")
 
@@ -115,6 +119,7 @@ include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
 include("component_backends.jl")
 include("component_cells.jl")
+include("component_collection_cells.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
 # bound-plan translation lives in the ReactiveKernels extension.
@@ -450,7 +455,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        ranef_correlated_draws_centered_known_cor,
        ranef_correlated_draws_marginal, ranef_correlated_draws_centered_marginal,
        ranef_correlated_draws_completion,
-       brm_col_variances, brm_r2d2_scale, brm_cat_variances,
+       brm_col_variances, brm_r2d2_scale, brm_cat_variances, brm_member_effects,
        multi_membership_intercept, multi_membership_correlated,
        _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
        _sb_interval_censored_predictor,

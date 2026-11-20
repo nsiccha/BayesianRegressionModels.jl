@@ -33,6 +33,7 @@
 # or because two packages it `using`s export the name, is BRM's binding, as in
 # a formula (`_brm_scoped_name`).
 _sb_cell_binding(scope, head) = nothing
+_sb_cell_binding(scope, component::BRMComponent) = component
 _sb_cell_binding(scope::Module, head::Symbol) =
     isdefined(scope, head) ? getfield(scope, head) : _brm_export_binding(head)
 _sb_cell_binding(scope, head::GlobalRef) =

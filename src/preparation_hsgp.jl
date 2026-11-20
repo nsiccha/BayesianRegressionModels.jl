@@ -164,7 +164,7 @@ end
 
 # `period` is the periodic kernel's formula constant: required with
 # `cov=:periodic`, meaningless (and refused) otherwise.
-function _brm_gp_period(kw, label::Symbol, cov::Symbol)
+function _brm_gp_period(kw, label::Symbol, cov::Symbol; bound=true)
     if cov !== :periodic
         haskey(kw, :period) && error(
             "sbimpl: `$label(...; period=...)` is meaningful only with " *
@@ -175,6 +175,9 @@ function _brm_gp_period(kw, label::Symbol, cov::Symbol)
         "sbimpl: `$label(...; cov=:periodic)` requires a numeric `period=` " *
         "formula constant (the kernel's period on the axis's own scale)")
     period = _brm_axis_option_value(kw[:period])
+    # A component's data-free inventory can inspect its declaration before
+    # the individual record supplies the period. Preparation checks the value.
+    !bound && period isa NamedColumn && parent(period) isa _BRMComponentInput && return period
     (period isa Real && !(period isa Bool) && isfinite(period) && period > 0) || error(
         "sbimpl: `$label(...; period=...)` expects a finite positive numeric " *
         "formula constant, got $(repr(period))")

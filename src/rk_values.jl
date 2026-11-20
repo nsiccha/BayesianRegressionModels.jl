@@ -240,11 +240,27 @@ _rk_bucket_eta(bucket) = something(bucket.eta_input, bucket.lkj_eta)
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
         level_indices, level_sources=Dict{Symbol,Symbol}(), predictors=(),
-        population_priors=Dict(), coordinates=nothing)
+        population_priors=Dict(), coordinates=nothing, columns=(;), collection_cell=false)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
     stmts = Expr[]
+    add_extent(a, b) = a == 0 ? b : b == 0 ? a :
+        a isa Int && b isa Int ? a + b : Expr(:call, :+, a, b)
+    offsets = Dict{Symbol,Any}()
+    member_inputs = Dict{Symbol,Symbol}()
+    dimension = 0
+    for (target, margins) in bucket.slices
+        recipe = bucket.margins[first(margins)].z
+        codes = get(columns, recipe.column, nothing)
+        offsets[target] = dimension
+        width = length(margins)
+        if codes isa _BRMMemberCodes
+            member_inputs[target] = recipe.column
+            width = Expr(:call, :length, codes.extent)
+        end
+        dimension = add_extent(dimension, width)
+    end
     if grouping.form === :mm
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
         push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
@@ -254,6 +270,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     # block's levels are its members' joint levels.
     levels_of = grouping.form === :plain ?
         get(level_sources, _rk_level_source_key(grouping), group) : group
+    fitted_levels = collection_cell && grouping.form === :plain &&
+        haskey(level_sources, _rk_level_source_key(grouping))
     if grouping.form === :gr
         priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
@@ -279,7 +297,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         r2d2 = _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
             predictors, population_priors; stem_base=draws)
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
-            _rk_bucket_eta(bucket), (); scale_value=tau)
+            _rk_bucket_eta(bucket), (); scale_value=tau, fitted_levels)
         # Read by adaptive centring alone (`_RK_ADAPTIVE_RECORD_KINDS`): each
         # margin's derived scale (`_rk_ast_ranef_r2d2!`).
         _rk_coordinate_record!(coordinates, merge((; kind=:r2d2_ranef,
@@ -295,11 +313,16 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         # factor input in place of the LKJ draw.
         known = any(_brm_is_known_scale, bucket.sd_priors)
         L_value = bucket.known_input
+        # A cell keeps the base distribution inside its bounded scalar
+        # declaration. The shared tau vector collects its authored margins.
+        per_margin = collection_cell && any(prior ->
+            Meta.isexpr(prior, :call) && prior.args[1] in (:restricted, :truncated), priors)
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             _rk_bucket_eta(bucket),
             known ? Any[_rk_known_scale_read(p, law)
                 for (p, law) in zip(bucket.sd_priors, priors)] : priors;
-            nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
+            nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value, dimension,
+            fitted_levels, per_margin)
         # Plain groups retain semantic transport metadata at their actual
         # component-owned declarations; other grouping forms remain unpaired.
         # A Student-t block also records its per-level mixing weights; Gaussian
@@ -320,7 +343,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 scales=known ?
                     Tuple(p isa Real ? nothing : Symbol(draws, ".tau_", k)
                           for (k, p) in enumerate(priors)) :
-                    all(isequal(first(priors)), priors) ? nothing :
+                    !per_margin && all(isequal(first(priors)), priors) ? nothing :
                     Tuple(Symbol(draws, ".tau_", k) for k in 1:K),
                 z=Symbol(draws, ".z"),
                 L=K == 1 || L_value !== nothing ? nothing : Symbol(draws, ".L"),
@@ -364,6 +387,19 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     # An ordinary RKPPL gather, so a per-cell query reads only its own row.
     gather_margin(col, margin) = Expr(:ref, gathered, indices[col], margin)
     for (target, margins) in bucket.slices
+        if haskey(member_inputs, target)
+            source = member_inputs[target]
+            group_index = indices[_rk_target_group(grouping, target)]
+            effect = effects[(target, bucket.group, bucket.id)]
+            # Matrix rows are levels and columns are margins. Pair their
+            # indices per observation, including repeated levels and margins.
+            column = offsets[target] == 0 ? source : Expr(:call, :.+, source, offsets[target])
+            nlevels = Expr(:call, :length, Expr(:call, :brm_fit_levels, levels_of))
+            selection = Expr(:call, :.+, group_index,
+                Expr(:call, :.*, nlevels, Expr(:call, :.-, column, 1)))
+            push!(stmts, Expr(:(=), effect, Expr(:ref, gathered, selection)))
+            continue
+        end
         summands = Any[]
         for margin in margins
             coef = if grouping.form === :gr
@@ -384,7 +420,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 end
                 result
             else
-                gather_margin(_rk_target_group(grouping, target), margin)
+                gather_margin(_rk_target_group(grouping, target),
+                    add_extent(offsets[target], margin-first(margins)+1))
             end
             recipe = bucket.margins[margin].z
             if recipe.kind !== :ones
@@ -526,7 +563,7 @@ end
 # hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one),
 # and the name of its fitted interval (`_rk_ast_hsgp_fit!`; `nothing` when it
 # has none).
-function _rk_ast_value_hsgp(definitions, term, taken, bindings)
+function _rk_ast_value_hsgp(definitions, term, taken, bindings; collection_cell=false)
     stmts = Expr[]
     term = _rk_ast_hsgp_settings!(stmts, term, taken)
     options = term.options
@@ -543,13 +580,21 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
         omega2 = _rk_ast_fresh_name(string(options.id, "_omega2"), taken)
         basis = _rk_ast_hsgp_periodic_basis_graph!(definitions, term, taken)
-        push!(stmts, Expr(:(=), Expr(:tuple, PHI, omega2), Expr(:call,
+        basis_call = Expr(:call,
             basis, only(term.columns), _rk_hsgp_mask_actuals(term)...,
-            options.modes, options.settings)))
+            options.modes, options.settings)
+        if collection_cell
+            # Per-cell submodels bind one local per statement. Both arrays
+            # come from the same data-only Fourier basis computation.
+            pair = _rk_ast_fresh_name(string(options.id, "_basis"), taken)
+            push!(stmts, :($pair = $basis_call), :($PHI = $pair[1]), :($omega2 = $pair[2]))
+        else
+            push!(stmts, Expr(:(=), Expr(:tuple, PHI, omega2), basis_call))
+        end
         floor_read && (floors = _rk_ast_hsgp_periodic_floor!(
             definitions, stmts, term, taken, bindings))
         inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
-        extent = :(axes(PHI, 2))
+        extent = collection_cell ? :(1:length(omega2)) : :(axes(PHI, 2))
     else
         # A squared-exponential effect reads its axes; its spectral graph
         # composes the basis graph, so the main block names no basis values.
@@ -1410,7 +1455,7 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
 end
 
 function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=nothing,
-        documentation=())
+        documentation=(), collection_cell=false)
     documentation_owners = _brm_documentation_owners(documentation)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
@@ -1422,7 +1467,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
     union!(reserved, Iterators.flatten(values(kernel_outputs)))
     lone_intercepts = Dict{Symbol,Any}()
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
-        coordinates, lone_intercepts)
+        coordinates, lone_intercepts, collection_cell)
     stmts = copy(regression.main.args)
     defs = copy(regression.defs)
     bindings = copy(regression.bindings)

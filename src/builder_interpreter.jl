@@ -56,6 +56,8 @@ function brm(source::Expr; mod::Module)
         "brm: `$(sprint(Base.show_unquoted, source.args[1])) = …` defines a " *
         "function; pass the model block itself (`quote … end`), or write the " *
         "definition with `@brm`")
+    collection = _brm_collection_source(source)
+    collection === nothing || return _brm_collection_builder(collection, mod)
     Meta.isexpr(source, :(=)) && (source = Expr(:block, source))
     _brm_interpreted_builder(source, mod)
 end

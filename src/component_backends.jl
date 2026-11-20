@@ -166,6 +166,22 @@ end
 Base.deepcopy_internal(record::_BRMComponentReplay, ::IdDict) = record
 _brm_component_replay_key(target) = Symbol(:__brm_component__, target)
 
+# Inputs consulted only to select declarations belong to the builder. Avoid
+# sending an unused settings record to Stan while retaining a column that a
+# different statement of the parent model actually reads.
+function _sb_prune_guard_inputs!(data, preproc, statements)
+    read = nothing
+    for entry in values(preproc)
+        entry.kind === :brm_component || continue
+        record = entry.const_
+        record.component.builder.f isa _BRMGuardedComponentBody || continue
+        read === nothing && (read = _rk_source_symbols!(Set{Symbol}(), Expr(:block, statements...)))
+        for arg in _brm_component_arguments(record.component, record.rhs)
+            arg isa NamedColumn && !(name(arg) in read) && delete!(data, name(arg))
+        end
+    end
+end
+
 function _sb_submodel_rhs!(statements, data, target::Symbol,
         component::BRMComponent, call)
     instance = _brm_component_instance(component, call)
@@ -218,6 +234,17 @@ function _sb_replay_component!(new_data, new_preproc, handled, key, entry, sb, d
     end
     rhs = _brm_rebind_value(record.rhs, _BRMReplayData(df, scalars))
     args = _brm_component_arguments(record.component, rhs)
+    body = record.component.builder.f
+    if body isa _BRMGuardedComponentBody
+        original = _brm_component_arguments(record.component, record.rhs)
+        before = _brm_guarded_statements(body, Dict(zip(body.inputs, original)))
+        supplied = Dict(input => (value isa NamedColumn && _brm_df_has_column(df, name(value)) ?
+            _brm_df_column(df, name(value)) : value)
+            for (input, value) in zip(body.inputs, args))
+        after = _brm_guarded_statements(body, supplied)
+        before == after || throw(ArgumentError(
+            "component `$(record.target)` has different declarations for these settings; build a new model"))
+    end
     inputs = Dict{Symbol,Any}()
     for (input, value) in zip(record.component.inputs, args)
         backing = value isa NamedColumn ? parent(value) : value
@@ -237,13 +264,24 @@ function _sb_replay_component!(new_data, new_preproc, handled, key, entry, sb, d
     nothing
 end
 
-function _brm_component_replay_scope(build, target, component, call)
+function _brm_component_replay_scope(build, target, component, call; cell=nothing)
     frozen = _brm_frozen_replay()
     frozen === nothing && return build()
     raw = Dict{Symbol,Any}()
     args = _brm_component_arguments(component, call)
     foreach(value -> _rk_raw_data_columns!(raw, value), args)
-    frame = _BRMReplayData((; raw...), frozen.training)
+    outer_training = frozen.training
+    outer_resample = frozen.resample
+    if cell !== nothing
+        outer_training = copy(outer_training)
+        outer_resample = copy(outer_resample)
+        for (local_name, source) in cell.sources
+            haskey(frozen.training, source) &&
+                (outer_training[local_name] = frozen.training[source][cell.position])
+            source in frozen.resample && push!(outer_resample, local_name)
+        end
+    end
+    frame = _BRMReplayData((; raw...), outer_training)
     training = Dict{Symbol,Any}()
     resample = Set{Symbol}()
     for (input, value) in zip(component.inputs, args)
@@ -252,11 +290,11 @@ function _brm_component_replay_scope(build, target, component, call)
             _BRMDataAssignments("BRM component replay"), Set{Symbol}())
         data === nothing || (training[input] = data)
         refs = _brm_operation_references!(Set{Symbol}(), value)
-        isempty(intersect(refs, frozen.resample)) || push!(resample, input)
+        isempty(intersect(refs, outer_resample)) || push!(resample, input)
     end
     # Fits use the same local names as the component body, but a fitted-state
     # export owns each call's fits under its full enclosing component path.
-    prefix = string(target, ".")
+    prefix = cell === nothing ? string(target, ".") : string(target, ".", cell.position, ".")
     fits = frozen.fits === nothing ? nothing : Dict{Tuple{Symbol,Symbol},Any}(
         (tag, Symbol(chop(string(name); head=length(prefix), tail=0))) => value
         for ((tag, name), value) in frozen.fits if startswith(string(name), prefix))
@@ -302,13 +340,14 @@ function _brm_component_rk_plan(component, call)
 end
 
 function _rk_submodel_rhs!(definitions, statements, data, bindings,
-        target::Symbol, component::BRMComponent, call; reserved=())
-    plan, instance = _brm_component_replay_scope(target, component, call) do
+        target::Symbol, component::BRMComponent, call; reserved=(), cell=nothing)
+    plan, instance = _brm_component_replay_scope(target, component, call; cell) do
         _brm_component_rk_plan(component, call)
     end
+    cell === nothing || _rk_collection_smooth_inputs!(plan)
     cells = Dict{Symbol,Symbol}()
     coordinates = Any[]
-    emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates,
+    emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates, collection_cell=cell !== nothing,
         documentation=brm_documentation(instance))
     _rk_strip_adaptive_records!(coordinates)
     cell_output = _brm_component_cell_output(component, instance)
@@ -346,7 +385,8 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     # computations still execute at binding time; no Julia-side fitting or
     # sampled value is substituted for them.
     fit_inputs = _rk_plan_fit_inputs(plan)
-    fitted = _rk_fitted_definitions(emitted, plan, Set{Symbol}(keys(fit_inputs)))
+    fitted = cell !== nothing ? Dict{Symbol,Set{Symbol}}() :
+        _rk_fitted_definitions(emitted, plan, Set{Symbol}(keys(fit_inputs)))
     for key in sort!(collect(keys(fitted)))
         renames[key] = _rk_ast_fresh_name(string(target, "_component_", key), taken)
     end
@@ -354,10 +394,15 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
         if _rk_fitted_definition(statement, fitted) === nothing]
     body = _rk_rename_symbols(Expr(:block, local_statements...), renames)
     push!(body.args, _rk_component_return(component))
-    params = Symbol[component.inputs...]
     arguments = _brm_component_arguments(component, call)
-    args = Any[_rk_value_expr!(bindings, _brm_prepare_expr(value), taken)
-        for value in arguments]
+    # A configuration record can select declarations without being a numeric
+    # input of the resulting PPL program. Keep its value on the original call
+    # for rebuilding the model, and pass only the selected body's inputs.
+    used = component.builder.f isa _BRMGuardedComponentBody ?
+        findall(input -> _brm_has_operation(instance, input), component.inputs) :
+        eachindex(component.inputs)
+    params = Symbol[component.inputs[i] for i in used]
+    args = Any[_rk_value_expr!(bindings, _brm_prepare_expr(arguments[i]), taken) for i in used]
     columns = merge(_rk_source_data_columns(plan, emitted), Dict(_rk_extent_bindings(plan)))
     column_names = Dict{Symbol,Any}(input => arg for (input, arg) in zip(params, args))
     local_reads = _rk_source_symbols!(Set{Symbol}(), body)
@@ -385,6 +430,14 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     definition = Expr(:(=), Expr(:call, entry, params...), body)
     push!(definitions, _brm_documented_statement(definition, header))
     push!(statements, Expr(:call, :~, target, Expr(:call, entry, args...)))
+    # A plate invocation keeps its fit computations inside the indexed
+    # submodel. Its caller supplies their per-member inputs.
+    if cell !== nothing
+        # Some fitted inputs, such as HSGP mode counts, are model settings
+        # without a separate raw data column in the enclosing program.
+        return Dict{Symbol,Symbol}(column_names[input] =>
+            get(column_names, source, column_names[input]) for (input, source) in fit_inputs)
+    end
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs
         outer_fits[column_names[input]] = column_names[source]

@@ -804,6 +804,16 @@ _brm(x::Expr; df=nothing) = begin
         isnothing(df) || throw(ArgumentError("@brm: a component definition takes its inputs as arguments, not a data frame"))
         return _brm_component_definition(component)
     end
+    collection_body = _brm_collection_source(x)
+    if collection_body !== nothing
+        scope = Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0))
+        builder = Expr(:call, _brm_collection_builder, QuoteNode(collection_body), scope)
+        if x.head === :(=)
+            lhs = first(x.args)
+            return Expr(:(=), lhs, Expr(:call, builder, only(lhs.args[2:end])))
+        end
+        return isnothing(df) ? builder : Expr(:call, builder, df)
+    end
     (; named, lhs, body, source, columns) = _brm_builder_code(x; df)
     if isnothing(df) && named
         # named no-df: the caller's `f(df) = body` function definition.

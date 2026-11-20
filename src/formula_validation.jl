@@ -51,7 +51,7 @@ function _check_term_kwargs(::typeof(gp), kw)
         "gp: exact GP accepts only `cov`, `iso`, `jitter`, and `period`; unsupported keyword(s): $(join(unknown, ", ")). " *
         "Use `hsgp(...; k=..., c=..., by=...)` for the Hilbert-space approximation.")
     cov = _brm_gp_cov(kw, :gp)
-    _brm_gp_period(kw, :gp, cov)
+    _brm_gp_period(kw, :gp, cov; bound=false)
     _brm_gp_iso(kw, :gp)
     jitter = get(kw, :jitter, 1e-9)
     jitter isa Real && isfinite(jitter) && jitter > 0 || error(
@@ -73,7 +73,7 @@ function _check_term_kwargs(::typeof(hsgp), kw)
         "hsgp: `cor=` correlates the levels of the `by=` grouping; give " *
         "`hsgp(x...; by=g, cor=Omega)` a `by=`")
     cov = _brm_gp_cov(kw, :hsgp)
-    _brm_gp_period(kw, :hsgp, cov)
+    _brm_gp_period(kw, :hsgp, cov; bound=false)
     _brm_gp_iso(kw, :hsgp)
     nothing
 end

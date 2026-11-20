@@ -363,8 +363,14 @@ _rk_plan_fit_inputs(plan::_RKStructuralPlan) = _rk_fit_inputs(plan.derived)
 function _rk_plan_fit_inputs(plan::_RKValuePlan)
     inputs = _rk_fit_inputs(plan.regression.derived)
     for assignment in plan.assignments
-        assignment isa _RKPreparedSubmodelAssignment || continue
-        merge!(inputs, assignment.fit_inputs)
+        if assignment isa _RKPreparedSubmodelAssignment
+            merge!(inputs, assignment.fit_inputs)
+        elseif assignment isa _RKPreparedKernelAssignment
+            for statement in assignment.body
+                _rk_is_cell_component(statement) || continue
+                merge!(inputs, statement.args[2].args[3].fits)
+            end
+        end
     end
     inputs
 end
