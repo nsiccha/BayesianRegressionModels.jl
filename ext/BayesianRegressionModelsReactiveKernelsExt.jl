@@ -977,26 +977,29 @@ function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions,
     k = argmax(length.(layout.inputs))
     pullback = prepare_query_ad(prepare_ad_pullback, built, plan, target, ad_backend,
         zero(row(sample, k)), sample, k; selection...)
-    # A collapsed curvature probe may evaluate a row from another worker.
-    # RK's prepared differentiation storage belongs to one caller at a time.
+    # A collapsed curvature probe or a non-finite diagnostic may read a row from
+    # another worker. The prepared query and its differentiation storage belong
+    # to one caller at a time, so a whole read holds the lock.
     guard = ReentrantLock()
     function coefficients(hyper, k, derivatives)
-        values = row(hyper, k)
-        J = zeros(length(values), derivatives ? 1 + length(hyper) : 1)
-        J[:, 1] .= values
-        if derivatives
-            lock(guard) do
-                bar = zero(values)
-                for j in eachindex(values)
+        lock(guard) do
+            values = row(hyper, k)
+            n = length(values)
+            J = zeros(n, derivatives ? 1 + length(hyper) : 1)
+            J[:, 1] .= values
+            scale = J[n, 1]
+            if derivatives
+                bar = zeros(n)
+                for j in 1:n
                     bar[j] = 1.0
                     J[j, 2:end] .= ad_pullback(pullback, bar, hyper, k)
                     bar[j] = 0.0
                 end
+                J[n, 2:end] ./= scale
             end
-            J[end, 2:end] ./= values[end]
+            J[n, 1] = log(scale)
+            J
         end
-        J[end, 1] = log(values[end])
-        J
     end
     (; layout, coefficients)
 end
