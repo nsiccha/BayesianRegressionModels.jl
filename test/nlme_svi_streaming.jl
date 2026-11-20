@@ -113,12 +113,11 @@ end
     times, work, sizes = Float64[], Int[], Int[]
     # Warm the streaming specialization before timing. This branch is
     # discarded; the actual stream still absorbs each observation once.
-    brm_svi_fit(state, svi_stream_model(windows[2]); rng=Xoshiro(180),
-        max_iterations=1, ndraws=0)
+    brm_svi_fit(state, svi_stream_model(windows[2]); controls..., rng=Xoshiro(180),
+        max_iterations=1)
     for i in 2:length(windows)
         cost = @elapsed probe = brm_svi_fit(state, svi_stream_model(windows[i]);
-            rng=Xoshiro(180 + i), max_iterations=200, min_windows=1000,
-            window=50, batch_size=8, ndraws=0)
+            controls..., rng=Xoshiro(180 + i), max_iterations=200, min_windows=1000)
         push!(times, cost)
         push!(work, probe.diagnostics.unit_gradient_calls)
         elapsed = @elapsed fit = brm_svi_fit(state, svi_stream_model(windows[i]);
