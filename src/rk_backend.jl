@@ -3314,6 +3314,9 @@ function _rk_model_offset_expr(node, target::Symbol, data::AbstractDict,
         "`$(repr(node))` is not elementwise arithmetic over data and model values")
     f = getf(node)
     args = map(arg -> _rk_model_offset_expr(arg, target, data, columns), getargs(node))
+    # A gather `x[rows]` has one value per row of its index
+    # (`_rk_model_value_axis`).
+    f === getindex && length(args) == 2 && return Expr(:ref, args...)
     haskey(_RK_DERIVED_BINOPS, f) && return Expr(:call, _RK_DERIVED_BINOPS[f], args...)
     haskey(_RK_DERIVED_CMP, f) && return Expr(:call, _RK_DERIVED_CMP[f], args...)
     haskey(_RK_DERIVED_MATH, f) &&
