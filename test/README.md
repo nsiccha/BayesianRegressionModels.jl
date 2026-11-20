@@ -3390,8 +3390,16 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   terms add up to the whole model in value and gradient (`check_whole_model`).
   The public fit resumes to the same trajectory and is the same at one or two
   tasks. A held target is reused only under the same `field_states`, a resume
-  finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
-  streaming windows are refused by name.
+  finds it again, and a `:units` snapshot loads without BRM. Scalar and
+  correlated centering gradients agree with the full RK posterior. A fixed-support
+  streaming window carries the learned coordinates even when a station is absent.
+  Changed support, changed ownership and mesh fields are refused.
+- `julia --project=test test/nlme_svi_field_covariance.jl` compares covariance
+  of within-station changes on two SVI seeds against four NUTS chains.
+- `julia --project=test test/nlme_svi_field_rows.jl` reads one coefficient row
+  of the field law through the reader SVI uses, checks its derivatives in the
+  two lengths against central differences on fields of 256 and 4,096 states,
+  and prints what the row and its Jacobian cost at each size.
 
 ### A unit's whole series under one law; units under a known population law
 

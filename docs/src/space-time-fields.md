@@ -137,6 +137,11 @@ each coordinate also conditions on earlier channels at that state. Multiply
 both quantities by the term's marginal field SD to express them in the
 predictor's units.
 
+For a single state, `<id>.conditional_layout.inputs[k]` lists the packed parent
+indices. The row `<id>.conditional_factor[k]` holds their coefficients in that
+order and ends with the conditional standard deviation. The dot product of the
+coefficients and the parents' standardized field values gives the conditional mean.
+
 The figure isolates the OU temporal factor at one location and channel,
 computed directly as `exp(-gap / ell_t)`. It shows how a fixed prior
 correlation time changes dependence; it is not a posterior reconstruction.
@@ -154,8 +159,10 @@ do not use that plate or embedded-Laplace surface. `field_states=:units`
 lets supported field states become SVI units; see the [SVI example](variational-inference.md).
 An SVI checkpoint with unit-owned states can take new observations at the
 fitted positions, times and channels. Retained coordinates keep their owners.
-The new window uses the saved joint approximation as its prior. Adding field
-states requires rebuilding the fit.
+The new window uses the saved joint approximation as its prior. With learned
+centering it retains each state's fitted control. A station absent from the window
+still contributes draws from its saved factor conditional on the globals when
+other stations read its field. Adding field states requires rebuilding the fit.
 Embedded Laplace is an explicit mesh integration choice. Large operator
 solves use a fixed-probe determinant estimate, so even a Gaussian integral
 can be approximate. Check the solver and probe settings against the

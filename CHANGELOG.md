@@ -18,11 +18,28 @@ instead of failing at run time.
   `<id>.conditional_mean` and `<id>.conditional_scale` in packed field order.
   Each pair gives the Gaussian prior for that standardized field coordinate
   given its earlier states and the earlier channels at the same state.
+  `<id>.conditional_factor` holds those parents' coefficients in
+  `<id>.conditional_layout.inputs` order, followed by the conditional SD.
   **Breaking:** These ports change the emitted program identity. Finish any
   existing SVI or SMC run on its original version or start a fresh checkpoint.
+- With `field_states=:units`, `LearnedCentering()` maps each unit-owned GMRF
+  state through its conditional scale and direct Vecchia parents. The fit
+  reports one `kind=:gmrf` control per such state. Each update reads the
+  selected owner's term and samples up to two other owners for its local gradient.
+  This is the default for `field_states=:units` fits, so their results change;
+  `centering=nothing` keeps the packed states. The fit reads each coefficient
+  row through ReactiveKernelsPPL's `indexed_value` query, which raises the
+  floors to ReactiveKernelsPPL 0.1.244 and ReactiveKernels 0.1.347. A row's
+  derivative still costs memory in proportion to the field's size until
+  ReactiveKernels stops copying fixed inputs of a derivative rule on each
+  reverse call (its snag `native-reverse-r-b8de62b9`).
 - `brm_svi_fit(checkpoint, model)` accepts disjoint observation windows for
   `field_states=:units` on the same fitted read-pair GMRF support with the
-  same coordinate ownership. The checkpoint carries the field-state policy.
+  same coordinate ownership. The checkpoint carries the field controls and
+  draws any absent owner from its saved Gaussian conditional on the globals.
+- For subject-partitioned fits, `brm_svi_combine(...; field_states=:units)`
+  assembles the GMRF states in their owners' factors. The start uses each
+  owner's packed field mean and covariance at the checkpoint's global mean.
 
 ## 0.2.344
 

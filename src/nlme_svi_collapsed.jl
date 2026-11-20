@@ -130,6 +130,17 @@ function _brm_svi_collapsed_cliques(t, base, m)
             keep!([field.positions[C * (Int(x) - 1) + c] for x in states for c in 1:C])
         end
     end
+    if hasproperty(t, :field_sweep) && t.field_sweep.authored
+        for f in t.field_sweep.fields, k in f.owned[1]
+            # The prior of a shared state reads mapped parent states. Each
+            # locally owned parent brings its direct parents into this clique.
+            reads = [k; f.parents[k]]
+            for j in f.parents[k]
+                f.owner[j] > 0 && append!(reads, f.parents[j])
+            end
+            keep!([f.field.positions[reads]; t.globals[f.places]])
+        end
+    end
     cliques
 end
 
@@ -242,7 +253,20 @@ _brm_svi_collapsed_calls(sites, t, batch) =
     sum(i -> _brm_svi_collapsed_unit_calls(sites, i), batch; init=0)
 
 # The unit's term and its gradients at (g, z), as the iteration evaluates it.
-function _brm_svi_collapsed_term!(gg, gz, t, q, i, g, z, plan, work, centering, frame)
+function _brm_svi_collapsed_term!(gg, gz, t, q, i, g, z, plan, work, centering, frame, p, shift)
+    if hasproperty(t, :field_sweep)
+        # A probed field hyperparameter changes the Vecchia coefficients even
+        # when the ordinary centering frame is constant on this sparse global.
+        s = t.field_sweep
+        draw = if any(f -> p in f.places, s.fields)
+            owners = [v.o for v in _brm_svi_sweep_visits(s, i)]
+            map(f -> _brm_svi_sweep_draw(f, q, g, owners), s.fields)
+        else
+            s.draw[]
+        end
+        return first(_brm_svi_sweep_term!(gg, gz, centering, frame, t, q, i, g, z, plan;
+            draw, probe=(; position=p, shift)))
+    end
     centering === nothing && return _brm_svi_unit_local!(gg, gz, t, i, g, z, plan, work)
     first(_brm_svi_centered_unit_term!(gg, gz, centering, frame, t, q, i, g, z, plan, work))
 end
@@ -267,8 +291,8 @@ function _brm_svi_collapsed_probe(sites, t, q, i, g, zmean, plan, work, D, S, Gg
         g₊, g₋ = copy(g), copy(g)
         g₊[p] += h; g₋[p] -= h
         fill!(gz₊, 0.0); fill!(gz₋, 0.0)
-        v₊ = _brm_svi_collapsed_term!(gg₊, gz₊, t, q, i, g₊, zmean, plan, work, centering, frame)
-        v₋ = _brm_svi_collapsed_term!(gg₋, gz₋, t, q, i, g₋, zmean, plan, work, centering, frame)
+        v₊ = _brm_svi_collapsed_term!(gg₊, gz₊, t, q, i, g₊, zmean, plan, work, centering, frame, p, h)
+        v₋ = _brm_svi_collapsed_term!(gg₋, gz₋, t, q, i, g₋, zmean, plan, work, centering, frame, p, -h)
         for (b, e) in enumerate(entries)
             Hgg[b, a] = -(gg₊[touched[e]] - gg₋[touched[e]]) / 2h
         end
@@ -338,6 +362,17 @@ function _brm_svi_add_site_gradient!(grad, sites::_BRMSVICollapsedSites, q)
     grad
 end
 
+function _brm_svi_collapsed_global_term(t, q, g)
+    hasproperty(t, :field_sweep) || return _brm_svi_global_term(t, g)
+    value, gg = _brm_svi_global_term(t.prior, t, g)
+    s = t.field_sweep
+    s.authored || return value, gg
+    draw = map(f -> _brm_svi_sweep_draw(f, q, g, (0,)), s.fields)
+    field = first(_brm_svi_sweep_term!(gg, Float64[], t.centering, nothing, t, q,
+        0, g, Float64[], t.plan; draw))
+    value + field, gg
+end
+
 # H_prior on P's pattern: for each color, the central difference of the global
 # term's gradient at the sparse means ± h s on the color's slots (s the current
 # sds), its product row read at each entry the color is unique for.
@@ -351,8 +386,8 @@ function _brm_svi_collapsed_prior!(sites::_BRMSVICollapsedSites, t, q)
             x₊[globals[a]] += h * s[a]
             x₋[globals[a]] -= h * s[a]
         end
-        _, g₊ = _brm_svi_global_term(t, x₊)
-        _, g₋ = _brm_svi_global_term(t, x₋)
+        _, g₊ = _brm_svi_collapsed_global_term(t, q, x₊)
+        _, g₋ = _brm_svi_collapsed_global_term(t, q, x₋)
         sites.global_term_calls += 2
         .-(view(g₊, globals) .- view(g₋, globals)) ./ 2h
     end
@@ -401,7 +436,7 @@ function _brm_svi_collapsed_solve!(sites::_BRMSVICollapsedSites, t, q)
     sites.solves += 1
     sites.cache.factor = nothing
     μ = copy(q.μ)
-    v0, g0 = _brm_svi_global_term(t, μ)
+    v0, g0 = _brm_svi_collapsed_global_term(t, q, μ)
     sites.global_term_calls += 1
     F, fallback = _brm_svi_collapsed_factor(sites)
     fallback && (sites.fallbacks += 1)
@@ -416,7 +451,7 @@ function _brm_svi_collapsed_solve!(sites::_BRMSVICollapsedSites, t, q)
         all(isfinite, Δ) || break
         x = copy(μ)
         x[globals] .+= Δ
-        v, gx = _brm_svi_global_term(t, x)
+        v, gx = _brm_svi_collapsed_global_term(t, q, x)
         sites.global_term_calls += 1
         if isfinite(v) && all(isfinite, gx)
             q.μ[globals] .= view(x, globals)

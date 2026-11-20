@@ -151,6 +151,9 @@ function brm_svi_checkpoint(fit)
     end
     layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals),
         _brm_svi_centering_layout(d.q)...)
+    if get(d, :field_projection, nothing) !== nothing
+        layout = merge(layout, (; field_projection=d.field_projection))
+    end
     factors = _rk_svi_factors(m.backend, m.unit)
     BRMSVIState(3, deepcopy(state), _brm_svi_source_id(m.backend),
         copy(m.view.coordinates[d.globals]),
@@ -188,19 +191,19 @@ function _brm_svi_previous_ownership!(estimated, seeds, promoted, m, previous::B
 end
 
 function _brm_svi_carried_state(previous::BRMSVIState, t, q,
-        centering_maps=_brm_svi_centering_maps(t, q))
+        centering_maps=_brm_svi_centering_maps(t, q), projection=_brm_svi_field_projection(t,q))
     m = t.m
     options = _brm_svi_separator_options(t)
     t.field_states === :units && (options = merge(options, (; field_states=:units)))
+    layout = (; options, global_keys=_brm_svi_global_keys(m,t.globals), _brm_svi_centering_layout(q)...)
+    projection === nothing || (layout = merge(layout, (; field_projection=projection)))
     BRMSVIState(3, deepcopy(previous.preprocessing), previous.source_id,
         copy(previous.globals), _brm_svi_global_record(m, q, t.globals, t.ownership.factors;
             previous=previous.q),
         _brm_svi_save_units!(deepcopy(previous.units), m, q, t.units;
             levels=_brm_svi_unit_levels(t), centering_maps), previous.group,
         previous.nested, previous.shared, copy(previous.fixed),
-        previous.unit_partition, (; options,
-            global_keys=_brm_svi_global_keys(m, t.globals), _brm_svi_centering_layout(q)...),
-        previous.updates + 1)
+        previous.unit_partition, layout, previous.updates + 1)
 end
 
 # Model-scope arrays can retain coordinates of absent units. The target
@@ -220,15 +223,13 @@ function _brm_svi_fill_absent_draws!(rng, draws, t, previous::BRMSVIState)
         end
         isempty(source) && continue
         centering = _brm_svi_centering(t)
-        carried = get(unit, :coupling, nothing)
+        sweep = get(t, :field_sweep, nothing)
         for draw in axes(draws, 2)
-            z = _brm_svi_saved_unit_draw(rng, unit)
-            # At this draw's globals, as the carried prior's mean is.
-            carried === nothing || (view(z, carried.rows) .+=
-                carried.W * (draws[t.globals[carried.columns], draw] .- carried.center))
+            g = draws[t.globals, draw]
+            z = _brm_svi_saved_unit_draw(rng, unit, g)
             centering === nothing || _brm_svi_absent_draw!(z, centering,
-                _brm_svi_centering_frame(centering, t, draws[t.globals, draw]), unit,
-                source, destination)
+                _brm_svi_centering_frame(centering, t, g), unit, source, destination;
+                field_positions=sweep === nothing ? nothing : sweep.absent.by_position)
             draws[destination, draw] .= z[source]
         end
     end
@@ -382,8 +383,8 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
     # Frozen preprocessing has matched the field geometry and channel labels,
     # and every carried block above has matched its coordinates. Their joint
     # Gaussian replaces the authored field prior, including its global states.
-    # No new-window term needs a draw from another field owner's factor.
-    merge(_brm_svi_carried_touched(t, couplings), (; prior, fields=nothing)), q
+    # Keep the geometry for mapping learned field coordinates into observations.
+    merge(_brm_svi_carried_touched(t, couplings), (; prior, field_geometry=t.fields, fields=nothing)), q
 end
 
 function _brm_svi_global_term(prior::_BRMSVIStreamingPrior, t, g)
@@ -422,8 +423,9 @@ is carried through a Gaussian family, never re-evaluated. This sequential
 approximation can depend on window order and is not a cumulative-data refit.
 Under linear coupling (the default) a carried unit's prior is its factor
 conditional on the globals it was coupled to, so the global/unit dependence it
-learned is carried; between-unit dependence is dropped, and an uncoupled
-checkpoint carries independent unit factors.
+learned is carried. Unit-owned GMRF states also keep their one-pass field map,
+which preserves dependence through direct parents on the fitted support. In the
+learned coordinates the unit Gaussians are independent conditional on globals.
 Do not supply overlapping windows: their likelihood would be counted again.
 
 Units are matched by label and semantic coordinate identity. New labels get

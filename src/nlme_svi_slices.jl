@@ -139,6 +139,9 @@ function _brm_svi_source(caller, state::BRMSVIState, which)
     var = exp.(2 .* q.ρ) .+ vec(sum(abs2, q.Β; dims=2))
     units = Dict{Any,NamedTuple}(label => _brm_svi_source_unit(caller, u, which)
         for (label, u) in state.units)
+    if hasproperty(state.layout, :field_projection)
+        units = _brm_svi_field_source_units(units, state, state.layout.field_projection)
+    end
     _BRMSVISource(collect(Any, q.keys), copy(q.μ), var, exp.(q.ρ), Matrix{Float64}(q.Β),
         collect(q.informed), units)
 end
@@ -923,7 +926,9 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
         "the semantic key $(repr(gkeys[findfirst(k -> count(isequal(k), gkeys) > 1, gkeys)]))")
     names = m.view.coordinates[t.globals]
     excluded = _brm_svi_excluded(caller, names, exclude)
-    prior = _brm_svi_prior_projection(t; rng, pairs=prior_pairs, iterations=prior_iterations)
+    prior = _brm_svi_with_bound_term(t) do term
+        _brm_svi_prior_projection(t; rng, pairs=prior_pairs, iterations=prior_iterations, term)
+    end
     D = length(t.globals)
     informed, clamped = zeros(Int, D), zeros(Int, D)
     spread, spread_slice = fill(NaN, D), zeros(Int, D)
@@ -1087,10 +1092,8 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     let known = findall(!isnan, μ)
         combined_globals[known] .= μ[known]
     end
-    _brm_svi_field_joint!(t, let u = copy(median)
-        u[t.globals] .= combined_globals
-        u
-    end)
+    combined_point[t.globals] .= combined_globals
+    _brm_svi_field_joint!(t, combined_point)
     for (i, label) in enumerate(m.view.levels)
         ukeys = coordinate_keys[t.units[i]]
         M, Λ, sourced, origin = assembled[i]
@@ -1238,8 +1241,10 @@ function _brm_svi_factor_initialize(t, start, family; inits, global_scale, unit_
         q.Β[R, c] .= b
     end
     units_started = 0
+    levels = _brm_svi_unit_levels(t)
+    field_slots = t.fields === nothing ? nothing : Vector{Vector{Int}}(undef, length(t.units))
     for (i, block) in enumerate(t.units)
-        M, Λ, sourced, _ = _brm_svi_assemble_unit(caller, index, m.view.levels[i],
+        M, Λ, sourced, _ = _brm_svi_assemble_unit(caller, index, levels[i],
             coordinate_keys[block], point[block], 1 / unit_scale^2)
         q.M[i] .= M
         if q.Λ[i] isa Matrix
@@ -1253,7 +1258,9 @@ function _brm_svi_factor_initialize(t, start, family; inits, global_scale, unit_
             q.Λ[i], q.U[i] = _BRMSVIUnitPrecision(f), _BRMSVIUnitRoot(f)
         end
         units_started += !isempty(sourced)
+        field_slots === nothing || (field_slots[i] = sourced)
     end
+    field_slots === nothing || (t = merge(t, (; field_start_slots=field_slots)))
     receipt = merge(combined.receipt, (; applied=(; globals=started, units=units_started)))
     merge(t, (; start_receipt=receipt)), q
 end
@@ -1265,7 +1272,7 @@ const _BRM_SVI_COMBINE_PHASES = (lower="Lower to ReactiveKernels", prepare="Prep
     brm_svi_combine(x, slices; exclude=(), rng=Random.Xoshiro(1), prior_pairs=16,
         prior_iterations=150, joint_limit=4096, ad_backend=nothing,
         shared_point=nothing, subject_group=nothing, nested_groups=NamedTuple(),
-        shared_groups=(), unit_partition=nothing, global_coordinates=nothing,
+        shared_groups=(), unit_partition=nothing, global_coordinates=nothing, field_states=:global,
         progress=nothing) -> BRMSVIStart
 
 Combine [`brm_svi_fit`](@ref) fits of one declaration on slices of the data
@@ -1276,7 +1283,8 @@ it: one sweep of expectation propagation on partitioned data (Vehtari et al.
 
 - `x` — the full model, as `brm_svi_fit` takes it, with the same preparation
   keywords. Pass a prepared [`BRMNLMEModel`](@ref) to prepare its minibatch
-  target once for this call and the fit.
+  target once for this call and the fit. Set `field_states=:units` on both
+  calls to initialize unit-owned read-pair GMRF states from the slices.
 - `slices` — the slices' fit results or their [`brm_svi_checkpoint`](@ref)
   states (a streaming carry's state included). Each slice is the same
   declaration with the same groupings, bound to a subset of the rows, and each
@@ -1445,7 +1453,7 @@ the projection's draws and its `flat` coordinates.
 function brm_svi_combine(x, slices; exclude=(), rng=Random.Xoshiro(1), prior_pairs=16,
         prior_iterations=150, joint_limit=4096, progress=nothing, ad_backend=nothing,
         shared_point=nothing, subject_group=nothing, nested_groups=NamedTuple(),
-        shared_groups=(), unit_partition=nothing, global_coordinates=nothing)
+        shared_groups=(), unit_partition=nothing, global_coordinates=nothing, field_states=:global)
     caller = "brm_svi_combine"
     slices isa Union{AbstractVector,Tuple} || throw(ArgumentError(
         "$caller: pass the slices' fits or states as a vector"))
@@ -1464,7 +1472,7 @@ function brm_svi_combine(x, slices; exclude=(), rng=Random.Xoshiro(1), prior_pai
                 subject_group, nested_groups, shared_groups, unit_partition)
             prepared, _ = _brm_run_phase(phases.target) do phase
                 _brm_with_cell_progress(() -> _brm_svi_checkout!(m; global_coordinates,
-                    previous=nothing), phase)
+                    previous=nothing, field_states), phase)
             end
             start = _brm_run_phase(phases.combine) do _
                 _brm_svi_combine(prepared.target, states; caller, rng, prior_pairs,

@@ -95,8 +95,9 @@
 # precisions, its error in the scales' nonlinearity matters: on the strong random
 # intercept of test/nlme_svi_default_centering.jl (sampled scales) the coupling
 # alone gave the population mean 0.76 of NUTS's sd and learned centering 0.96, whose
-# map follows the scale exactly. So V_i moves only the coordinates no learned-
-# centering cell holds (`_brm_svi_coupling_rows`).
+# map follows the scale exactly. The fitted model therefore uses centering alone
+# for that block. Unit-owned GMRFs retain coupling after their direct-parent
+# centering pass (`_brm_svi_coupling_rows`).
 #
 # The unit factor's (M_i, Λ_i, U_i) is the conditional of z_i at g = μ; its
 # marginal covariance is Λ_i⁻¹ + V_i V_iᵀ on the coupled rows. Factor starts and
@@ -162,7 +163,8 @@ _brm_svi_coupling_baseline_calls(q, i, c) =
 # global noise. It cannot be part of a baseline independent of that noise. The
 # observation and ordinary prior terms at the variational mean still can.
 _brm_svi_coupling_baseline_target(t) = t
-_brm_svi_coupling_baseline_target(t::NamedTuple) = merge(t, (; fields=nothing))
+_brm_svi_coupling_baseline_target(t::NamedTuple) =
+    merge(Base.structdiff(t, NamedTuple{(:field_sweep,)}), (; fields=nothing))
 
 function _brm_svi_coupling_baseline_frame(centering, t, q)
     centering === nothing && return nothing
@@ -220,8 +222,8 @@ function _brm_svi_coupling_columns(t, i)
     sort!(unique!(columns))
 end
 
-# The coordinates (positions in unit i's block) the coupling moves: those no
-# learned-centering cell holds. A centred cell's coordinate already follows its
+# The coordinates (positions in unit i's block) the coupling moves. An ordinary
+# centred cell's coordinate already follows its
 # population location and scale through its learned map, and coupling it as well
 # makes two parametrizations of one dependence: on the strong random-intercept
 # toy of test/nlme_svi_default_centering.jl the population sd fell from 0.96 of
@@ -230,7 +232,9 @@ function _brm_svi_coupling_rows(t, i)
     d = length(t.units[i])
     centering = _brm_svi_centering(t)
     centering === nothing && return collect(1:d)
-    setdiff(1:d, _brm_svi_cell_positions(centering, i))
+    # One Vecchia pass leaves a dependence on lengths and amplitude in the
+    # learned field coordinates; these rows retain their linear coupling.
+    setdiff(1:d, Iterators.flatten(inst.positions for inst in centering.instances[i]))
 end
 
 function _brm_svi_with_coupling(t, q, coupling::LinearCoupling)

@@ -944,6 +944,63 @@ function BRM._rk_likelihood_reader(rk::BRM.RKBRMI)
     u -> Base.invokelatest(query, Vector{Float64}(u))
 end
 
+# One row of the emitted Vecchia law, read through RKPPL's indexed plate query
+# (0.1.244). The row depends on the field's lengths and channel parameters
+# alone, so those packed positions are the query's only active coordinates and
+# no field-length vector passes through a row's pullback. The last coefficient
+# is the conditional SD; the variational map uses its logarithm.
+function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions, ad_backend)
+    bound = BRM.rk_bound_data(rk)
+    name(key) = Symbol(record.declaration, ".", getproperty(record.locals, key))
+    layout_query = ReactiveKernels.prepare(rk.model.spec; have=Tuple(keys(bound)),
+        want=name(:conditional_layout), bound)
+    layout = Base.invokelatest(layout_query)
+    built, plan = rk.model, _rk_translated(rk)
+    target = indexed_value(name(:conditional_factor))
+    selection = (; base, coordinates=positions, locality=:error)
+    row = prepare_query(built, plan, target; selection...)
+    if isempty(positions)
+        # With fixed hyperparameters each pattern and channel has one immutable row.
+        constant_rows = Dict{Tuple{Int,Int},Matrix{Float64}}()
+        rows = map(eachindex(layout.inputs)) do k
+            get!(constant_rows, (layout.pattern[k], layout.channel[k])) do
+                values = reshape(copy(row(Float64[], k)), :, 1)
+                values[end, 1] = log(values[end, 1])
+                values
+            end
+        end
+        return (; layout, coefficients=(hyper, k, derivatives) -> rows[k])
+    end
+
+    sample = base[positions]
+    # Prepare on a long row; one preparation serves rows of every length.
+    k = argmax(length.(layout.inputs))
+    pullback = prepare_query_ad(prepare_ad_pullback, built, plan, target, ad_backend,
+        zero(row(sample, k)), sample, k; selection...)
+    # A collapsed curvature probe may evaluate a row from another worker.
+    # RK's prepared differentiation storage belongs to one caller at a time.
+    guard = ReentrantLock()
+    function coefficients(hyper, k, derivatives)
+        values = row(hyper, k)
+        J = zeros(length(values), derivatives ? 1 + length(hyper) : 1)
+        J[:, 1] .= values
+        if derivatives
+            lock(guard) do
+                bar = zero(values)
+                for j in eachindex(values)
+                    bar[j] = 1.0
+                    J[j, 2:end] .= ad_pullback(pullback, bar, hyper, k)
+                    bar[j] = 0.0
+                end
+            end
+            J[end, 2:end] ./= values[end]
+        end
+        J[end, 1] = log(values[end])
+        J
+    end
+    (; layout, coefficients)
+end
+
 # Graph values of a backend at an unconstrained point, from one prepared query.
 function BRM._rk_value_reader(rk::BRM.RKBRMI, names::Tuple{Vararg{Symbol}})
     bound = BRM.rk_bound_data(rk)

@@ -15,6 +15,16 @@ _brm_svi_saved_unit_draw(rng, unit, ::Val{:diagonal_lowrank}) =
     unit.M + exp.(unit.ρ) .* randn(rng, length(unit.M)) +
         unit.Β * randn(rng, size(unit.Β, 2))
 
+# A previous unit's draw at this window's globals.
+function _brm_svi_saved_unit_draw(rng, unit, g::AbstractVector)
+    z = _brm_svi_saved_unit_draw(rng, unit)
+    carried = get(unit, :coupling, nothing)
+    if carried !== nothing
+        view(z, carried.rows) .+= carried.W * (g[carried.columns] .- carried.center)
+    end
+    z
+end
+
 _brm_svi_restore_unit!(q, i, old, perm) =
     _brm_svi_restore_unit!(q, i, old, perm, Val(get(old, :family, :dense)))
 function _brm_svi_restore_unit!(q, i, old, perm, ::Val{:dense})

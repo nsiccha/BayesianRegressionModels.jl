@@ -70,8 +70,10 @@ coordinates first, the plain factorization, until exploration's ELBO test first 
 flat (the trend test that ends exploration; its drift gate aside). Then each cell's
 control starts at `start`, each unit's factor is carried
 into its learned coordinates at the global factor's mean, and exploration goes on,
-its stopping test reading only the windows since. Grouped HSGP weights are not
-deferred: their controls learn from the first iteration. `delay=false` learns every
+its stopping test reading only the windows since. Grouped HSGP weights and
+unit-owned read-pair GMRF states learn from the first iteration. A GMRF state
+starts at `start` and uses its direct parents' scaled coordinates to compute
+the conditional location. Its control stays fixed across streaming windows. `delay=false` learns every
 control from the first iteration. Pass `centering=nothing` for the plain factorization.
 Streaming and optimizer continuation retain the saved policy.
 """
@@ -430,7 +432,7 @@ end
 # absorb (`_brm_svi_location_references`); and each authored Gaussian vector
 # element a unit owns whose law reads a global but no unit coordinate (any law
 # that reads no unit coordinate under a saved `constant_laws` policy).
-function _brm_svi_centering_plan(t, centering::LearnedCentering)
+function _brm_svi_centering_plan(t, centering::LearnedCentering; field_pass=true)
     m = t.m
     view = m.view
     owner = t.ownership.owner
@@ -675,7 +677,7 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
         owned = [p for (p, name) in enumerate(view.coordinates)
             if _brm_nlme_owned(name, record.declaration)]
         reason = if record.kind === :gmrf_footprint
-            "the GMRF uses its packed coordinates because its conditional means can read other units' states"
+            "learned GMRF centering covers unit-owned read-pair states under field_states=:units"
         elseif record.kind === :car
             "the structured CAR prior specifies edge differences and component sums, " *
                 "so SVI holds the field in its sampled coordinates"
@@ -686,6 +688,18 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
         isempty(shared) || push!(uncentered, (; kind=record.kind,
             record.declaration, level=nothing, coordinates=view.coordinates[shared], reason))
         local_states = [p for p in owned if owner[p] > 0]
+        geometry = get(t, :field_geometry, get(t, :fields, nothing))
+        if field_pass && record.kind === :gmrf_footprint && geometry !== nothing
+            base = Symbol(record.declaration, ".", record.locals.field)
+            for p in local_states
+                _brm_nlme_owned(view.coordinates[p], base) || continue
+                i = owner[p]
+                push!(cells[i], (; kind=:gmrf, record.declaration, coordinate=view.coordinates[p],
+                    position=local_index[i][p]))
+                ncells[i] += 1
+            end
+            filter!(p -> !_brm_nlme_owned(view.coordinates[p], base), local_states)
+        end
         isempty(local_states) || push!(uncentered, (; kind=record.kind,
             record.declaration, level=nothing, coordinates=view.coordinates[local_states], reason))
     end
@@ -777,7 +791,7 @@ end
 
 # Each unit's cell positions in its coordinate block, in cell order.
 function _brm_svi_cell_positions(plan::_BRMSVICenteringPlan, i)
-    positions = zeros(Int, plan.ncells[i])
+    positions = [row.kind === :gmrf ? row.position : 0 for row in plan.cells[i]]
     for inst in plan.instances[i], (n, p) in enumerate(inst.positions)
         positions[inst.cells[n]] = p
     end
@@ -807,9 +821,12 @@ function _brm_svi_centering_controls(plan::_BRMSVICenteringPlan; carried=nothing
     x = map(eachindex(positions)) do i
         defer && return _brm_svi_deferred_logits(plan, i)
         old = carried === nothing ? nothing : carried[i]
-        [old === nothing || isnan(old[p]) ?
-            _brm_svi_control_logit(_brm_svi_cell_start(plan, plan.cells[i][k])) : old[p]
-            for (k, p) in enumerate(positions[i])]
+        map(eachindex(positions[i])) do k
+            p, cell = positions[i][k], plan.cells[i][k]
+            old !== nothing && !isnan(old[p]) && return old[p]
+            old !== nothing && cell.kind === :gmrf && return Inf
+            _brm_svi_control_logit(_brm_svi_cell_start(plan, cell))
+        end
     end
     (; plan.start, plan.step, plan.constant_laws, x,
        opt=[_BRMSVIAdam(n, plan.step) for n in plan.ncells], positions,
@@ -823,7 +840,7 @@ end
 # to 2.1 nats above plain from the first iteration, 3.7 below when deferred). At
 # c = 0.1 a cell's coefficient on its location turns negative only above a
 # scale of about 13.
-_brm_svi_deferred_cell(cell) = cell.kind !== :hsgp
+_brm_svi_deferred_cell(cell) = !(cell.kind in (:hsgp, :gmrf))
 
 # Unit i's logits on a deferred fit: each deferred cell at its packed frame, -Inf
 # for a block's standardized draws (c = 0) and +Inf for an authored vector's values
@@ -857,10 +874,12 @@ end
 
 # A resumed target's plan, which its checkpoint's controls must fit cell for cell.
 function _brm_svi_centered_target(t, q)
-    plan = _brm_svi_centering_plan(t, _brm_svi_saved_centering(q.centering))
+    field_pass = get(q.centering, :field_pass, false)
+    plan = _brm_svi_centering_plan(t, _brm_svi_saved_centering(q.centering); field_pass)
     length.(q.centering.x) == plan.ncells || throw(ArgumentError(
         "brm_svi_resume: the checkpoint's centering controls do not fit this target's cells"))
-    merge(t, (; centering=plan))
+    target = merge(t, (; centering=plan))
+    field_pass ? _brm_svi_field_sweep(target, plan) : target
 end
 
 _brm_svi_unit_controls(q, i) = _brm_svi_control.(q.centering.x[i])
@@ -890,7 +909,10 @@ end
 # value, ∂/∂c and the scale and location adjoints. A carried streaming unit's
 # prior is its transported factor, in `_brm_svi_unit_local!`'s order.
 function _brm_svi_centered_unit_term!(gg, gu, centering::_BRMSVICenteringPlan, frame, t, q,
-        i, g, u, plan=t.plan, work=first(t.work))
+        i, g, u, plan=t.plan, work=first(t.work); neighbor_value=nothing)
+    if hasproperty(t, :field_sweep)
+        return _brm_svi_sweep_term!(gg, gu, centering, frame, t, q, i, g, u, plan; neighbor_value)
+    end
     c = _brm_svi_unit_controls(q, i)
     y = similar(u)
     logjac, μ, ℓ = _brm_svi_unit_centering!(y, u, centering.instances[i],
@@ -1045,11 +1067,11 @@ end
 # retain all covariance, including the triangular map of a correlated block.
 # A structured unit retains the transformed rank part and the marginal variance
 # of the transformed diagonal noise; off-diagonal noise is projected away.
-function _brm_svi_unit_affine!(q, i, maps)
+function _brm_svi_unit_affine!(q, i, maps; transport_mean=true)
     Λ = q.Λ[i]
     for map in maps
         P, C = map.positions, map.C
-        q.M[i][P] .= C * q.M[i][P] + map.b
+        transport_mean && (q.M[i][P] .= C * q.M[i][P] + map.b)
         if Λ isa _BRMSVIUnitPrecision
             f = Λ.factor
             variance = exp.(2 .* f.ρ[P])
@@ -1075,7 +1097,14 @@ function _brm_svi_with_centering(t, q, centering::LearnedCentering)
     # until it activates (`_brm_svi_activate_centering!`).
     defer = centering.delay && carried === nothing
     q = merge(q, (; centering=_brm_svi_centering_controls(plan; carried, defer)))
-    t = merge(t, (; centering=plan))
+    t = _brm_svi_field_sweep(merge(t, (; centering=plan)), plan)
+    if hasproperty(t, :field_sweep)
+        q = merge(q, (; centering=merge(q.centering, (; field_pass=true))))
+        if prior === nothing
+            _brm_svi_field_start!(t, q)
+            hasproperty(t, :field_start_slots) && _brm_svi_field_start_factors!(t, q, t.field_start_slots)
+        end
+    end
     maps = _brm_svi_centering_maps(t, q)
     for i in eachindex(t.units)
         plan.ncells[i] == 0 && continue
@@ -1184,10 +1213,12 @@ end
 # An absent carried unit's draw `z` in its learned frame, mapped to the packed
 # coordinates at `destination` (the draw's frame): its centered vector elements,
 # and its centred levels of a shared grouping's block, each in margin order.
-function _brm_svi_absent_draw!(z, plan::_BRMSVICenteringPlan, frame, unit, source, destination)
+function _brm_svi_absent_draw!(z, plan::_BRMSVICenteringPlan, frame, unit, source, destination;
+        field_positions=nothing)
     hasproperty(unit, :centering) || return z
     levels = Dict{Int,Vector{Int}}()
     for (k, j) in zip(source, destination)
+        field_positions !== nothing && haskey(field_positions,j) && continue
         x = unit.centering[k]
         isnan(x) && continue
         if haskey(plan.absent_blocks, j)

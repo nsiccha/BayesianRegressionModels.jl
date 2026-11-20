@@ -6,33 +6,7 @@ using ReactiveKernels, ReactiveKernelsPPL, Enzyme, DifferentiationInterface
 const BRM = BayesianRegressionModels
 const FIELD_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
-# Stations at fixed positions read the field at several of a shared set of times.
-function station_data(; stations=6, times=[0.0, 1.0, 2.0, 4.0], reads=3, rows=2, seed=1, channels=nothing)
-    rng = Xoshiro(seed)
-    px, py = rand(rng, stations), rand(rng, stations)
-    east, north, time, site = Float64[], Float64[], Float64[], String[]
-    for s in 1:stations, t in sort!(randperm(rng, length(times))[1:reads]), _ in 1:rows
-        push!(east, px[s]); push!(north, py[s]); push!(time, times[t]); push!(site, "s$s")
-    end
-    n = length(east)
-    x = randn(rng, n)
-    y = sin.(3 .* east) .+ cos.(time) .+ 0.2 .* x .+ 0.3 .* randn(rng, n)
-    (; east, north, time, site, x, y, state=collect(1:n), nb=3)
-end
-
-function field_model(data)
-    @brm data begin
-        sigma ~ Exponential(1)
-        field ~ 0 + gmrf((east, north), time; neighbors=nb)
-        sd(field, gmrf((east, north), time)) ~ Exponential(1)
-        length_scale(field, gmrf((east, north), time), space) ~ LogNormal(log(0.3), 0.7)
-        length_scale(field, gmrf((east, north), time), time) ~ LogNormal(log(3.0), 0.7)
-        mu ~ 1 + (0 + x | site)
-        @plate for s in eachindex(state)
-            y[s] ~ Normal(mu[s] .+ field[state[s]], sigma)
-        end
-    end
-end
+include("svi_field_fixture.jl")
 
 function check_whole_model(t, rk, m)
     sampler = prepare_sampler(rk.model, rk_bound_plan(rk), m.unit; backend=FIELD_AD)
@@ -56,6 +30,8 @@ function check_whole_model(t, rk, m)
     end
 end
 
+include("svi_field_centering_oracle.jl")
+
 data = station_data()
 rk = RKBRMI(field_model(data))
 names = String.(BRM._rk_layout_coordinate_names(rk))
@@ -70,6 +46,7 @@ states = findall(n -> occursin(".field.", n), names)
     @test all(block -> length(block) == 4, t.units)
     @test any(i -> !isempty(t.fields.blanket[i + 1]), eachindex(t.units))
     check_whole_model(t, rk, m)
+    check_centered_field(m, rk)
 end
 
 @testset "the coupling baseline is independent of neighboring field draws" begin
@@ -116,6 +93,7 @@ end
     @test length(intersect(field2, t2.globals)) == common
     @test sort!(vcat(intersect(field2, t2.globals), reduce(vcat, [filter(in(field2), block) for block in t2.units]))) == field2
     check_whole_model(t2, rk2, m2)
+    check_centered_field(m2, rk2)
 end
 
 @testset "the public fit runs, reads back and continues" begin
@@ -124,6 +102,7 @@ end
     fit = brm_svi_fit(m; rng=Xoshiro(2), threads=1, controls...)
     @test fit.diagnostics.iterations == 40
     @test all(isfinite, fit.diagnostics.elbo)
+    check_field_start_and_projection(m, fit)
     @test size(fit.draws, 1) == length(names)
     @test all(isfinite, fit.draws)
     # A stopped run continues to the same place as an unbroken one.
@@ -133,6 +112,9 @@ end
     resumed = brm_svi_resume(m, checkpoint; threads=1, ndraws=5)
     @test resumed.diagnostics.elbo == fit.diagnostics.elbo
     @test resumed.draws == fit.draws
+    @test sum(fit.diagnostics.sampling.field_neighbor_calls) > 0
+    @test resumed.diagnostics.sampling.field_neighbor_calls == fit.diagnostics.sampling.field_neighbor_calls
+    @test resumed.diagnostics.unit_gradient_calls == fit.diagnostics.unit_gradient_calls
 end
 
 @testset "a new observation window carries the field Gaussian on its fitted support" begin
@@ -266,6 +248,59 @@ Threads.nthreads() > 1 && @testset "a run is the same at any number of tasks" be
     @test one.draws == two.draws
 end
 
+@testset "a fixed field law needs only its bound coefficient rows" begin
+    fixed_data = station_data(; stations=4, seed=3)
+    # Include both shared and unit-owned states in the factor-level start.
+    first_site = findfirst(==("s1"), fixed_data.site)
+    fixed_data.east[fixed_data.site .== "s2"] .= fixed_data.east[first_site]
+    fixed_data.north[fixed_data.site .== "s2"] .= fixed_data.north[first_site]
+    fixed = @brm fixed_data begin
+        sigma ~ Exponential(1)
+        field ~ 0 + gmrf((east, north), time; neighbors=nb)
+        length_scale(field, gmrf((east, north), time), space) = 0.3
+        length_scale(field, gmrf((east, north), time), time) = 3.0
+        mu ~ 1 + (0 + x | site)
+        @plate for s in groups(site)
+            y[s] ~ Normal(mu[s] .+ field[s], sigma)
+        end
+    end
+    rk_fixed = RKBRMI(fixed)
+    m = brm_nlme_model(rk_fixed; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:subjects)
+    check_centered_field(m, rk_fixed)
+    fit = brm_svi_fit(m; rng=Xoshiro(23), batch_size=2, max_iterations=3, ndraws=2,
+        separator=:none, field_states=:units, unit_reoptimize=1)
+    @test all(isfinite, fit.draws)
+    saved = brm_svi_checkpoint(fit)
+    start = brm_svi_combine(m, [saved]; field_states=:units)
+    initialized = brm_svi_fit(m; start, field_states=:units, max_iterations=0, ndraws=0)
+    state = brm_svi_checkpoint(initialized)
+    source = BRM._brm_svi_source("field test", state, "initialized fit")
+    @test initialized.diagnostics.start.applied.units == length(m.view.levels)
+    @test any(name -> occursin(".field.", string(name)), state.globals)
+    @test !isempty(state.layout.field_projection)
+    for (label, unit) in state.units
+        fields = findall(key -> hasproperty(key, :coordinate) &&
+            haskey(state.layout.field_projection, key.coordinate), unit.keys)
+        isempty(fields) && continue
+        supplied = start.units[label]
+        order = [only(findall(isequal(unit.semantic[k]), supplied.keys)) for k in fields]
+        @test source.units[label].M[fields] ≈ supplied.M[order] atol=1e-10
+        # At fixed neighboring units, the within-owner covariance of the packed
+        # field coordinates is the block the slice combination supplied.
+        names = [unit.keys[k].coordinate for k in fields]
+        A = zeros(length(names), length(names))
+        for (i, name) in enumerate(names)
+            row = state.layout.field_projection[name]
+            for (input, w) in zip(row.inputs, row.weights)
+                j = findfirst(==(input), names)
+                j === nothing || (A[i, j] += w)
+            end
+        end
+        @test A * inv(Symmetric(unit.Λ))[fields, fields] * A' ≈
+            inv(Symmetric(supplied.Λ))[order, order] atol=1e-10
+    end
+end
+
 @testset "channels through a sampled factor" begin
     base = station_data(; stations=4, seed=5)
     channel = repeat(["a", "b"]; outer=length(base.y))
@@ -288,6 +323,7 @@ end
     mc = brm_nlme_model(rkc; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
     tc = BRM._brm_svi_target(mc; field_states=:units, separator=:none)
     check_whole_model(tc, rkc, mc)
+    check_centered_field(mc, rkc)
 end
 
 @testset "refusals name the reason" begin
@@ -315,4 +351,37 @@ end
     mm = brm_nlme_model(RKBRMI(mesh); ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
     err = try BRM._brm_svi_target(mm); nothing catch e; e end
     @test err isa BRM.BRMNLMEViewError && occursin("neighbors=m", sprint(showerror, err))
+end
+
+@testset "learned field maps carry across fixed-support windows" begin
+    data = station_data(; stations=4,seed=7)
+    opts = (; threads=1,batch_size=2,max_iterations=7,ndraws=3,unit_curvature=:pair)
+    fresh = brm_svi_fit(field_model(data); opts...,ad_backend=FIELD_AD,subject_group=:site,
+        unit_partition=:connected,field_states=:units,separator=:none,rng=Xoshiro(303),
+        centering=LearnedCentering(;delay=false))
+    keep = 1:2:length(data.y)
+    newdata = (;east=data.east[keep],north=data.north[keep],time=data.time[keep],
+        site=data.site[keep],x=0.2 .- data.x[keep],y=randn(Xoshiro(301),length(keep)),
+        state=collect(eachindex(keep)),nb=data.nb)
+    state = brm_svi_checkpoint(fresh)
+    result = brm_svi_fit(state,field_model(newdata);opts...,ad_backend=FIELD_AD,rng=Xoshiro(304))
+    check_field_window(fresh,result)
+    m = result.diagnostics.model
+    paused = brm_svi_fit(state,m;opts...,rng=Xoshiro(304),stop_after=2)
+    resumed = brm_svi_resume(m,paused;threads=1,ndraws=3)
+    @test resumed.diagnostics.elbo == result.diagnostics.elbo
+    @test resumed.draws == result.draws
+    # The same fitted field can lose all observations of one of its owners.
+    # Give its saved conditional a nonzero slope to exercise the path to g.
+    label = ("s1",)
+    saved = state.units[label]
+    saved.coupling.W .= 0.08
+    keep = [j for j in 1:2:length(data.y) if data.site[j] != only(label)]
+    partial = (;east=data.east[keep],north=data.north[keep],time=data.time[keep],
+        site=data.site[keep],x=data.x[keep],y=data.y[keep],state=collect(eachindex(keep)),nb=data.nb)
+    absent = brm_svi_fit(state,field_model(partial);opts...,ad_backend=FIELD_AD,rng=Xoshiro(305))
+    @test !(label in absent.diagnostics.unit_levels)
+    @test brm_svi_checkpoint(absent).units[label].M == saved.M
+    check_field_window(state,absent)
+
 end
