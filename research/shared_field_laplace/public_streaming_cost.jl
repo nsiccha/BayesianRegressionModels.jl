@@ -1,5 +1,6 @@
 # Fixed active window, growing synthetic absent-unit state. This is a cost
 # and marginalization control, not a multi-window posterior accuracy study.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL,
     Enzyme, DifferentiationInterface, Random, LinearAlgebra, Statistics,
     Serialization, SHA, Test, Treebars, Distributions

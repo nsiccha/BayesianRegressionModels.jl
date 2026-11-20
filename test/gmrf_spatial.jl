@@ -5,6 +5,7 @@
 # RKBRMI and SBBRMI: coordinate transport, replay, the sparse Laplace, the
 # read-support forms, `@plate` cells, prediction, starts and descriptions.
 # RUN: julia --project=test test/gmrf_spatial.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, LinearAlgebra, Distributions, Random
 using StanBlocks, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 import BridgeStan as BS

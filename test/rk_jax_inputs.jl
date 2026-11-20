@@ -1,4 +1,5 @@
 # Run with RK_JAX_PYTHON naming a Python with JAX.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 include(joinpath(pkgdir(ReactiveKernels), "test", "jax_python.jl"))
 

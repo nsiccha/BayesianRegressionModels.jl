@@ -1,5 +1,6 @@
 # Exercise the published OU declaration through its retained artifact, without fitting.
 # Run: BRM_JAX_REQUIRE=1 julia --project=test test/docs_ou_backends.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random
 using BayesianRegressionModels, StanBlocks, Distributions
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, ADTypes, LogDensityProblems

@@ -83,7 +83,7 @@ function _brm_laplace_coloring(view::BRMNLMEView)
     n = length(packed)
     pattern = blockdiag(_brm_nlme_eta_patterns(blocks, [[r] for r in reads])...) .|
         sparse(I, n, n)
-    colors = _brm_lazy(:SparseMatrixColorings, _brm_star_coloring_colors, pattern)
+    colors = _brm_star_coloring_colors(pattern)
     ncolors = maximum(colors)
     ncolors < width || return nothing
     # How many neighbours (the entry itself included) of each coordinate carry

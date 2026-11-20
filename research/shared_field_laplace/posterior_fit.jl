@@ -1,5 +1,6 @@
 # Fit only after a saved exact-reference summary passes all diagnostic gates.
 # julia --project=test research/shared_field_laplace/posterior_fit.jl 'SVI versus exact reference'
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("joint_svi_probe.jl")
 using Treebars, Serialization, Statistics
 

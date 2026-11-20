@@ -262,7 +262,7 @@ function _brm_gmrf_tracked_exact!(M::_BRMGMRFTracked)
     plan = nothing
     for t in 1:nt, j in 1:nc
         t == 1 && j == 1 || cholesky!(F, Symmetric(M.chains[j, t]))
-        plan = _brm_lazy(:SelectedInversion, _brm_selinv_pattern!, z, F, M.spatial,
+        plan = _brm_selinv_pattern!(z, F, M.spatial,
             destination, plan)
         λ = M.scale[j]
         with_q = dot(z, nonzeros(M.spatial))

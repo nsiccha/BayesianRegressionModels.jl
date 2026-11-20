@@ -8,6 +8,7 @@
 # the stress in a child Julia and checks it.
 #
 #     julia --project=test test/rk_enzyme_threads.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Distributions, LogDensityProblems, Random
 using ReactiveKernels, ReactiveKernelsPPL
 import Enzyme

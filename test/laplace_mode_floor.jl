@@ -5,6 +5,7 @@
 # the mode, not from that point, on every problem kind. A Gaussian term beside a large
 # intercept has a real floor above `tol`, which must still stop the search.
 # RUN: julia --project=test test/laplace_mode_floor.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems
 

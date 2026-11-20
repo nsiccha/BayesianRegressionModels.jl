@@ -8,6 +8,7 @@
 # each step's move of the conditional mean bounded by a quarter sd, the coupled fit
 # stays where the independent one is.
 # RUN: julia --project=test test/nlme_svi_coupling_rare_kind.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Treebars
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 import Random, Statistics

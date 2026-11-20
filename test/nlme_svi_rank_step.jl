@@ -13,6 +13,7 @@
 # reached a non-finite density (snag lowrank-slice-sv-baba88d2).
 #
 # RUN: julia --project=test test/nlme_svi_rank_step.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, Random, Statistics, WarmupHMC
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))

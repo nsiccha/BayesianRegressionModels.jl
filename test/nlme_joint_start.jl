@@ -1,5 +1,6 @@
 # Complete NLME covariance/natural-effect estimate -> same BRMI's Stan point.
 # RUN: julia --project=test test/nlme_joint_start.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using BridgeStan, LinearAlgebra
 

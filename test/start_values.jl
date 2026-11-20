@@ -5,6 +5,7 @@
 # and the Stan point must be one physical point (the semantic transport is the
 # independent oracle), the addressed constrained values must be exact, and
 # every unaddressed coordinate keeps its base value.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BridgeStan, CategoricalArrays, LinearAlgebra, Random
 import StanBlocks
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))

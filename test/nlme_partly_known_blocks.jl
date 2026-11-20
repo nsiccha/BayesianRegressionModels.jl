@@ -17,6 +17,7 @@
 #
 #     julia --project=<scratch-env> test/nlme_partly_known_blocks.jl [testset-filter...]
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using NLMEEstimation, LinearAlgebra, LogDensityProblems, Random, Statistics
 using BridgeStan, WarmupHMC

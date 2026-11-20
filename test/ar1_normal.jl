@@ -15,6 +15,7 @@
 # any order, ragged groups and gaps in time, and the replay of a fitted model
 # onto reordered and new rows.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LinearAlgebra: Symmetric
 

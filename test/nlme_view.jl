@@ -5,6 +5,7 @@
 # densities of exactly that subject's rows, and nothing else.
 #
 # RUN: julia --project=test test/nlme_view.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 @stestset "partition of a correlated two-parameter population model" begin

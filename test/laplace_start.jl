@@ -11,6 +11,7 @@
 # `base`; a plate-cell model (the whole-model Laplace) starts at a finite
 # point; a grouping crossed with the units starts as a shared latent through
 # `shared_groups`.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using WarmupHMC
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_crossed_fixture.jl"))

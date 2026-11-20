@@ -2,6 +2,7 @@
 # error must not shake a coupling already at its optimum. No model lowering.
 # RUN: julia --project=test test/nlme_svi_coupling_gradient.jl
 module CouplingGradientArithmetic
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Random, LinearAlgebra, Statistics
 include(joinpath(@__DIR__, "svi_arithmetic_imports.jl"))
 struct BRMI end

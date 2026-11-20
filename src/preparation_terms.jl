@@ -527,7 +527,7 @@ function _brm_car_scaling_factor(n::Int, pairs)
     factor = LinearAlgebra.cholesky(Q[1:(n - 1), 1:(n - 1)])
     y = factor \ ones(n - 1)
     total = sum(y)
-    diagonal = vcat(_brm_lazy(:SelectedInversion, _brm_selinv_diag, factor) .-
+    diagonal = vcat(_brm_selinv_diag(factor) .-
         2 .* y ./ n .+ total / n^2, total / n^2)
     all(>(0), diagonal) || error(
         "BRM term preparation: internal: a connected `car` component of $n areas " *

@@ -7,6 +7,7 @@
 #   the exact posterior, against its closed-form population sd;
 # - the coupling step against exact quadratic and nonlinear conditional optima.
 # RUN: julia --project=test test/nlme_svi_linear_coupling.jl [filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using Random, Statistics, LinearAlgebra, WarmupHMC, TreeArrays, MCMCDiagnosticTools
 

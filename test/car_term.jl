@@ -3,6 +3,7 @@
 # an adjacency graph, alone or in the BYM2 convolution. `nodes=all_areas`
 # declares the graph's complete support apart from the rows.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

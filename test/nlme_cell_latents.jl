@@ -15,6 +15,7 @@
 # it: "coordinate record kind `cell_latent` has no NLME role").
 #
 # Run: julia --startup-file=no --project=test test/nlme_cell_latents.jl [filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using Random
 

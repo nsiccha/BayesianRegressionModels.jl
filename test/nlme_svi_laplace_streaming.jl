@@ -1,5 +1,6 @@
 # Public frozen replay with fitted carry: bounded updates test transport and
 # target construction, not posterior accuracy or optimizer convergence.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, DifferentiationInterface, LinearAlgebra, Random, Serialization
 const BRM=BayesianRegressionModels

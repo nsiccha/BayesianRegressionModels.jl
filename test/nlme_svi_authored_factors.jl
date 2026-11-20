@@ -3,6 +3,7 @@
 # it (`_BRMSVIAuthoredPrior`, src/nlme_svi.jl). Unit membership is supplied
 # here as an independent oracle beside production structural ownership.
 # Run: julia --startup-file=no --project=test test/nlme_svi_authored_factors.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using ADTypes: AutoEnzyme
 import Enzyme

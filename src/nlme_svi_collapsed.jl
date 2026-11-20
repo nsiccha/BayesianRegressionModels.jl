@@ -170,7 +170,7 @@ function _brm_svi_collapsed_sites(base::_BRMSVISites, t; refresh=100)
     S = sparse(vcat(rows₁, rows₂), vcat(columns₁, columns₂),
         zeros(length(rows₁) + length(rows₂)), n, n)
     colors = n == 0 ? Int[] :
-        _brm_lazy(:SparseMatrixColorings, _brm_star_coloring_colors, prior)
+        _brm_star_coloring_colors(prior)
     ncolors = maximum(colors; init=0)
     # How many neighbours (the entry itself included) of each slot carry each color:
     # an entry is read where its column's color is unique.
@@ -423,7 +423,7 @@ function _brm_svi_collapsed_solve!(sites::_BRMSVICollapsedSites, t, q)
         Δ ./= 2
     end
     applied || (sites.skipped += 1)
-    sites.cache.logsd = log.(sqrt.(_brm_lazy(:SelectedInversion, _brm_selinv_diag, F)))
+    sites.cache.logsd = log.(sqrt.(_brm_selinv_diag(F)))
     q.ρ[globals] .= sites.cache.logsd
     sites.logdet = logdet(F)
     sites.cache.factor = F
@@ -436,7 +436,7 @@ function _brm_svi_collapsed_cached_factor!(sites::_BRMSVICollapsedSites)
     if F === nothing
         F, _ = _brm_svi_collapsed_factor(sites)
         F === nothing && return nothing
-        sites.cache.logsd = log.(sqrt.(_brm_lazy(:SelectedInversion, _brm_selinv_diag, F)))
+        sites.cache.logsd = log.(sqrt.(_brm_selinv_diag(F)))
         sites.cache.factor = F
     end
     F

@@ -5,6 +5,7 @@
 # transpile + stanc + finite BridgeStan density/gradient. Not a fit or a
 # posterior-equivalence test.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

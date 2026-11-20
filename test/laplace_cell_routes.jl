@@ -7,6 +7,7 @@
 # A model that takes the factor route on its own needs a real disagreement between
 # RK's strict preparations, so this forces the route by overriding the locality
 # report for one testset and restoring it afterwards.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems
 const LDP = LogDensityProblems

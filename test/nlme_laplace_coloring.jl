@@ -5,6 +5,7 @@
 # Hessian-vector product per within-unit position. Each problem is compared with
 # itself under the position coloring, which is exact for any unit; both are
 # exact, so they agree to rounding.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random
 

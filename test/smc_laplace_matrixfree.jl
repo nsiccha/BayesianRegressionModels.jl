@@ -1,4 +1,5 @@
 # RUN: julia --project=test test/smc_laplace_matrixfree.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Treebars
 include("smc_laplace_fixture.jl")
 const SMCEXT = Base.get_extension(BRM, :BayesianRegressionModelsSMCExt)

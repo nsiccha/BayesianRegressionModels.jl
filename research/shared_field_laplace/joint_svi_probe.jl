@@ -1,6 +1,7 @@
 # Private integration control. This deliberately costs full current-window
 # sweeps; it does NOT claim batch-local work or implement streaming projection.
 # Run: julia --project=test research/shared_field_laplace/joint_svi_probe.jl 'joint-window SVI'
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("nonlinear_probe.jl")
 include("quadrature.jl")
 using SHA

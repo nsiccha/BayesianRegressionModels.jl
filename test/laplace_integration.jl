@@ -13,6 +13,7 @@
 #     named plans and never by `:auto`, refused for non-Normal priors;
 #   - the refusals name their reason.
 # RUN: julia --project=test test/laplace_integration.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using WarmupHMC   # loads Optim, which brm_laplace_mode needs
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random

@@ -1,5 +1,6 @@
 # The footprint `gmrf` term on RKBRMI: density and native reverse derivative against
 # the plain core, state plates under `locality = :error`, frozen replay and refusals.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, LinearAlgebra, Random, Distributions
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
 import DifferentiationInterface as DI

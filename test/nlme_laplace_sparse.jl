@@ -9,6 +9,7 @@
 # for its draws.
 #
 # RUN: julia --project=test test/nlme_laplace_sparse.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics
 using SparseArrays: rowvals, nzrange, nonzeros

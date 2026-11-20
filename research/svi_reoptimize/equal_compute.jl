@@ -18,6 +18,7 @@
 #              against its NUTS reference, k = 0, 1, fit seeds 5, 6, 7.
 #
 #     [EQ_KS=1] julia --project=test research/svi_reoptimize/equal_compute.jl OUTDIR [phase...]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, Random, Statistics, LinearAlgebra, Printf
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, WarmupHMC, Distributions
 using DifferentiationInterface: AutoEnzyme

@@ -10,6 +10,7 @@
 # RK log density and gradient of the latent and the observed recurrence
 # against independent oracles.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LinearAlgebra: Symmetric
 

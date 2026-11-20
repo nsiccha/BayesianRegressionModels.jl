@@ -1,6 +1,6 @@
 # SVI's stationarity diagnostics (src/nlme_svi_stationarity.jl): rank-normalized
-# split R-hat and ESS of iterate histories, loaded on first use
-# (src/lazy_dependencies.jl).
+# split R-hat and ESS of iterate histories, loaded with that package
+# (src/fitting_extensions.jl).
 module BayesianRegressionModelsMCMCDiagnosticToolsExt
 
 import BayesianRegressionModels as BRM

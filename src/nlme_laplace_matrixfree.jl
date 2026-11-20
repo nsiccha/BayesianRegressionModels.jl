@@ -181,7 +181,7 @@ end
 Base.showerror(io::IO, e::_BRMOperatorSolveFailure) = print(io, e.message)
 
 _brm_checked_cg(H, b, options; M=I, rtol=options.solve_tolerance / 10, diagnostics=nothing) =
-    _brm_lazy(:Krylov, _brm_krylov_checked_cg, H, b, options; M, rtol, diagnostics)
+    _brm_krylov_checked_cg(H, b, options; M, rtol, diagnostics)
 function _brm_operator_solve(H::_BRMConditionalOperator, b, options; diagnostics=nothing)
     d = H.diagonal .+ H.shift
     all(>(0), d) || throw(_BRMOperatorSolveFailure("nonpositive conditional curvature diagonal"))
@@ -305,10 +305,10 @@ _brm_log_divided_difference(a, b) = a == b ? 1 / a : log1p((a - b) / b) / (a - b
 # curvature in its directions. That solve's residual is β_k |e_k' T_k⁻¹ e₁|, read
 # from T_k = L D L' as T grows, whose pivots also check the curvature.
 _brm_lanczos_run(operator, r, rtol, maxiter) =
-    _brm_lazy(:KrylovKit, _brm_krylovkit_lanczos_run, operator, r, rtol, maxiter)
+    _brm_krylovkit_lanczos_run(operator, r, rtol, maxiter)
 
 _brm_lanczos(operator, r, options) =
-    _brm_lazy(:KrylovKit, _brm_krylovkit_lanczos, operator, r, options)
+    _brm_krylovkit_lanczos(operator, r, options)
 
 # `r' log(A) r` on r's Krylov space, the residual of the solve that recurrence
 # implies, and the factorization G = P Γ P' (scaled by ‖r‖²) of the sensitivity
@@ -317,7 +317,7 @@ _brm_lanczos(operator, r, options) =
 # One probe of `_brm_operator_logdet!`: the recurrence's basis as a vector of
 # vectors, the quantities above (`log_r`) and its iteration count.
 _brm_lanczos_probe(operator, r, options) =
-    _brm_lazy(:KrylovKit, _brm_krylovkit_lanczos_probe, operator, r, options)
+    _brm_krylovkit_lanczos_probe(operator, r, options)
 
 # Which eigenvalues of G to keep: the largest, down to a tail of a negligible
 # share of the trace. Rounding's tiny negative eigenvalues are never kept.

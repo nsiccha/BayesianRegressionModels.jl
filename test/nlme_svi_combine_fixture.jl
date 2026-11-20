@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Random, Statistics
 
 # A public synthetic panel: subjects nested in regions, a class grouping crossed

@@ -44,8 +44,8 @@ LinearAlgebra.logdet(f::_BRMAugmentedFactor) = f.logdet
 Base.:\(f::_BRMAugmentedFactor, b::AbstractVector) = _brm_spl_augmented_solve(f, b)
 
 # The augmented system's inertia and log-determinant, from MUMPS's symmetric
-# indefinite factorization (src/lazy_dependencies.jl).
-_brm_spl_inertia(K) = _brm_lazy(:MUMPS, _brm_mumps_inertia, K)
+# indefinite factorization (src/fitting_extensions.jl).
+_brm_spl_inertia(K) = _brm_mumps_inertia(K)
 
 function _brm_spl_factor_selection(reads, integrated, population)
     sel = sort!(unique!(collect(Int, reads)))
@@ -522,18 +522,18 @@ function _brm_spl_augmented_factor(K, n; previous=nothing)
     # klu! reuses the old numeric pivots; a nonsingular updated matrix can
     # then hit a zero pivot. Re-pivot each new curvature with klu. The
     # selected-inverse workspace can still reuse an unchanged factor pattern.
-    F = positive_definite ? _brm_lazy(:KLU, _brm_klu, K) : nothing
+    F = positive_definite ? _brm_klu(K) : nothing
     _BRMAugmentedFactor(F, n, positive_definite, inertia.logdet, K,
         same ? previous.workspace : nothing, same ? previous.selected : similar(K), false)
 end
 
 # The selected inverse of K on its own pattern, from KLU's factor F, into
 # `f.selected`; the workspace is reused while K's pattern is. BRM never operates
-# on F itself: KLU's and SelectedInversion's extensions do (src/lazy_dependencies.jl).
+# on F itself: KLU's extension (src/fitting_extensions.jl) and SelectedInversion
+# (src/selected_inversion.jl) do.
 function _brm_spl_selected(f::_BRMAugmentedFactor)
     f.selected_ready && return f.selected
-    f.workspace = _brm_lazy(:SelectedInversion, _brm_lu_selinv!,
-        f.selected, f.workspace, f.F, f.K)
+    f.workspace = _brm_lu_selinv!(f.selected, f.workspace, f.F, f.K)
     f.selected_ready = true
     f.selected
 end
@@ -557,7 +557,7 @@ function _brm_spl_augmented_solve(factor, b::AbstractVector)
     rhs = zeros(size(factor.K, 1))
     function solve(v)
         fill!(rhs, 0.0); rhs[1:factor.n] .= v
-        _brm_lazy(:KLU, _brm_klu_solve, factor.F, rhs)[1:factor.n]
+        _brm_klu_solve(factor.F, rhs)[1:factor.n]
     end
     x = solve(b)
     r = b .- _brm_spl_augmented_action(factor, x)
@@ -579,4 +579,4 @@ end
 # positive definite. KrylovKit owns the reorthogonalized Lanczos recurrence.
 # The basis is capped independently of model size, so memory stays O(n).
 _brm_spl_covariance_root(solve, b; rtol=1e-10, maxdim=256) =
-    _brm_lazy(:KrylovKit, _brm_krylovkit_covariance_root, solve, b; rtol, maxdim)
+    _brm_krylovkit_covariance_root(solve, b; rtol, maxdim)

@@ -7,6 +7,7 @@
 # Several independent research controls share this fixture through converging
 # include paths. The standalone test filter must be registered only once.
 isdefined(@__MODULE__, :NLME_AD) || include(joinpath(@__DIR__, "../../test/nlme_fixtures.jl"))
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using LinearAlgebra, Random, LogDensityProblems
 import KrylovKit
 

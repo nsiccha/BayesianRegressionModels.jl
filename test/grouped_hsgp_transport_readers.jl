@@ -12,6 +12,7 @@
 #
 #     julia --project=test test/grouped_hsgp_transport_readers.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

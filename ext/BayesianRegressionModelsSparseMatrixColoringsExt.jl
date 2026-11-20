@@ -1,6 +1,6 @@
 # The greedy symmetric coloring of a Hessian pattern that the Laplace's η
 # Hessian (src/nlme_laplace_coloring.jl) and the collapsed SVI sites
-# (src/nlme_svi_collapsed.jl) read, loaded on first use (src/lazy_dependencies.jl).
+# (src/nlme_svi_collapsed.jl) read, loaded with that package (src/fitting_extensions.jl).
 module BayesianRegressionModelsSparseMatrixColoringsExt
 
 import BayesianRegressionModels as BRM

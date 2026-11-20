@@ -5,6 +5,7 @@
 # posterior mean and SD of every coordinate, in `packed_names`' order.
 module CenteringCurveReference
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using LinearAlgebra
 using LogDensityProblems: dimension, logdensity_and_gradient
 using LogExpFunctions: logsumexp

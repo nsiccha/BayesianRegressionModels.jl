@@ -1,5 +1,6 @@
 # Nested random effects (`nested_model` in nlme_fixtures.jl) through the NLME protocol.
 # RUN: julia --project=<env with NLMEEstimation> test/nlme_nested.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BridgeStan, NLMEEstimation, Random, LogDensityProblems, WarmupHMC
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 

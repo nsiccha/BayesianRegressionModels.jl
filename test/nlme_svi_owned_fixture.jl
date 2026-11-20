@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels
 
 function svi_owned_data(labels=collect(1:6); shared=false)

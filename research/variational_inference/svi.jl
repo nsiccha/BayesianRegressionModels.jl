@@ -65,6 +65,8 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, WarmupHMC, MCMCDiagnosticTools
+# BRM's fitting-time weak dependencies, which load its extensions for them.
+import KLU, Krylov, KrylovKit, LimitedLDLFactorizations, MUMPS, SparseMatrixColorings
 using Serialization, SHA, Dates
 using Treebars: with_progress, snapshot_progress
 using DifferentiationInterface: AutoEnzyme

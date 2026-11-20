@@ -7,6 +7,7 @@
 #
 #     julia --project=test research/svi_reoptimize/step_variants.jl [nseeds]
 module StepVariants
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using Random, LinearAlgebra, Statistics
 const TEST = joinpath(dirname(dirname(@__DIR__)), "test")
 include(joinpath(TEST, "svi_arithmetic_imports.jl"))

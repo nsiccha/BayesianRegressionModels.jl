@@ -1,4 +1,5 @@
 # Bounded algebra controls; no model fitting, replay, or AD preparation.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, LinearAlgebra, Random, Statistics
 const BRM = BayesianRegressionModels
 isdefined(BRM,:_brm_svi_carry_gaussian) ||

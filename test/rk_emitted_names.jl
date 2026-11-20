@@ -8,6 +8,7 @@
 # `log_v`, with `v = exp.(log_v)` its response-scale value on both routes.
 #
 #     julia --project=test test/rk_emitted_names.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LogExpFunctions: logit
 

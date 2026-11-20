@@ -1,6 +1,7 @@
 # A read-pair gmrf field through brm_svi_fit: the partition's unit terms and the global
 # term add up to the whole model, the public fit runs and predicts, and the mesh form
 # is refused by name.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, LinearAlgebra, Random, Statistics
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, DifferentiationInterface
 const BRM = BayesianRegressionModels

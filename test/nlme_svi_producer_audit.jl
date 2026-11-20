@@ -1,5 +1,6 @@
 # Producer-owned acceptance helper. BRM internals stay inside its validation
 # harness; the returned artifact contains data only, never prepared queries.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, LogDensityProblems, LinearAlgebra
 
 function svi_producer_audit(t, points; atol=2e-8, rtol=2e-9)

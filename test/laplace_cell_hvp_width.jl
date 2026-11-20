@@ -3,6 +3,7 @@
 # batches must give the same block and target as one batch over every direction
 # (compiled here only where that is still cheap), and a much wider cell must
 # not compile a wider program at all.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Treebars
 const LDP = LogDensityProblems

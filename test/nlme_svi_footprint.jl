@@ -1,5 +1,6 @@
 # A unit's evaluation costs its footprint and prior support, whatever the number of
 # globals, and its compact gradients agree with the dense interface.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, Random
 include("nlme_svi_owned_fixture.jl")

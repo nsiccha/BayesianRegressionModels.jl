@@ -16,6 +16,7 @@
 #
 # Run: julia --startup-file=no --project=test test/rk_data_expression_scalars.jl [testset substring ...]
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random
 

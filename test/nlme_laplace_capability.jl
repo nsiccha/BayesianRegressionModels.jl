@@ -1,5 +1,6 @@
 # Optional Laplace support must not prevent ordinary NLME fitting.
 # Run in the NLMEEstimation scratch environment described in test/README.md.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using NLMEEstimation
 import NLMEEstimation as NE
 using Random

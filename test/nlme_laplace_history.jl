@@ -1,6 +1,7 @@
 # A non-concave conditional density has two genuine local maxima. Returning
 # to a population point after a distant proposal must not select another one.
 # RUN: julia --project=test test/nlme_laplace_history.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems
 

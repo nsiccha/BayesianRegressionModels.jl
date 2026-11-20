@@ -3,6 +3,7 @@
 # examples/example.jl. No factor refresh as population coordinates change.
 # RUN: BRM_PRECONDITIONER_PROJECT=/path/to/isolated/env julia --project=test research/matrixfree_conditional/preconditioned.jl NX NY HOURS MEMORY [NODES]
 haskey(ENV,"BRM_PRECONDITIONER_PROJECT") && push!(LOAD_PATH,ENV["BRM_PRECONDITIONER_PROJECT"])
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using LimitedLDLFactorizations
 import Krylov
 using Statistics

@@ -35,6 +35,7 @@
 # plan/AST halves stay dependency-free in test/rk_emitter.jl and
 # test/rk_ast.jl.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode

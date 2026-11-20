@@ -5,6 +5,7 @@
 # nlme_svi_centering_algebra.jl; the weak case's exact posterior and its structured
 # mean-field optimum in research/svi_reoptimize/weak_exact.jl.
 # RUN: julia --project=test test/nlme_svi_default_centering.jl [filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using Random, Statistics, WarmupHMC, TreeArrays, MCMCDiagnosticTools
 

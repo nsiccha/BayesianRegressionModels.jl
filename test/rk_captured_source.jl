@@ -1,5 +1,6 @@
 # Captured source must preserve the backend's actual submodels and callable
 # module, so an upstream sequential interpreter can read the authored sites.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels

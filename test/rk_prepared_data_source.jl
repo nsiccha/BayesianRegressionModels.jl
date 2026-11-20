@@ -1,5 +1,6 @@
 # Public synthetic preparation: fitted metadata fixes the coordinate geometry;
 # executable indices, dummies and completion contributions live in source.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 @stestset "data preparation kernels retain named recipes and printed replay" begin

@@ -3,6 +3,7 @@
 # medians as `brm_start(rk, (;); base=:prior_median)`, for declared laws, a
 # known hyperparameter and a law reading a model-scope parameter.
 # RUN: julia --project=test test/gmrf_laplace_start.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include("gmrf_rk_cell_models.jl")
 using Optim
 import LogDensityProblems as LDP

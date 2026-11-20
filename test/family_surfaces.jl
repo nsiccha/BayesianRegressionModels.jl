@@ -3,6 +3,7 @@
 # Run on a capable host:
 #   julia --startup-file=no --project=. test/family_surfaces.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using Distributions

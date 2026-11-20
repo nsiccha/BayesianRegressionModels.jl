@@ -7,6 +7,7 @@
 # back a prefix over all units, and an iteration's cost grew with the number of
 # units. The model is the reporter's TOY3 (nlme_svi_events_fixture.jl).
 # RUN: julia --project=test test/nlme_svi_cell_latent_partition.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using ADTypes: AutoEnzyme

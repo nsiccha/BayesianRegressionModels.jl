@@ -8,6 +8,7 @@
 #
 #     julia --project=<scratch-env> test/rk_cdar_fit.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using NLMEEstimation, LinearAlgebra, Random
 const NE = NLMEEstimation

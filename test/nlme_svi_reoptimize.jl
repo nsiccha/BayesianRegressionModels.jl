@@ -12,6 +12,7 @@
 # that cannot honour it refuse it, and checkpoints resume exactly.
 #
 #     julia --project=test test/nlme_svi_reoptimize.jl [testset filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Random, Statistics, LinearAlgebra
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
 const BRM = BayesianRegressionModels

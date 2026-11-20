@@ -54,7 +54,7 @@ function _brm_svi_laplace_gauss_rule(pivots, offdiagonal)
 end
 
 _brm_svi_laplace_logquadratic(H, r; spectral_lower, atol=1e-9, rtol=1e-9, maxdim=64) =
-    _brm_lazy(:KrylovKit, _brm_krylovkit_logquadratic, H, r;
+    _brm_krylovkit_logquadratic(H, r;
         spectral_lower, atol, rtol, maxdim)
 
 # Fixed independent Rademacher probes. Quadrature uncertainty and sampling

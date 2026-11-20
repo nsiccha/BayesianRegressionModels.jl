@@ -17,6 +17,16 @@ that groups by its input names the caller's columns for its fit-role inputs.
 Run it with
 `julia --startup-file=no --project=test test/rk_descriptor.jl`.
 
+`lazy_dependencies.jl` checks the rule BRM's first-use loading of its
+fitting-time packages needs (`src/lazy_dependencies.jl`): no code in `src/` or
+`ext/` outside package X's own extension names X (KLU, Krylov, KrylovKit,
+LimitedLDLFactorizations, MCMCDiagnosticTools, MUMPS, SelectedInversion,
+SparseMatrixColorings), read from the parsed source so comments and strings do
+not count. It also checks each package's extension entry in `Project.toml`,
+and, in a fresh process, that `using BayesianRegressionModels` loads none of
+them while a first `_brm_lazy` call loads one and returns its result. Run it
+with `julia --startup-file=no --project=test test/lazy_dependencies.jl`.
+
 `hsgp_basis_js.jl` checks `StatisticalPreparation.hsgp_basis`:
 - **Exactness.** It equals bit for bit an independent oracle, SB's per-axis
   `_brm_apply_hsgp` tensored in `CartesianIndices(k)` order. This covers one to

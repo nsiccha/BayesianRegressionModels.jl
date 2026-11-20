@@ -131,7 +131,7 @@ function _brm_svi_laplace_third(t,u,v)
 end
 
 _brm_svi_laplace_solve(t,H,b,operation,krylovdim;rtol,atol)=
-    _brm_lazy(:KrylovKit,_brm_krylovkit_svi_laplace_solve,t,H,b,operation,krylovdim;rtol,atol)
+    _brm_krylovkit_svi_laplace_solve(t,H,b,operation,krylovdim;rtol,atol)
 
 # Deterministic starts and a fixed iteration/backtracking cap; no warm history
 # enters the target. A certified Gaussian block normally takes one Newton step.

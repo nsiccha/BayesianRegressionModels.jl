@@ -5,6 +5,7 @@
 # src/nlme_svi.jl: the collapsed sparse globals (src/nlme_svi_collapsed.jl) extend
 # Serialization and use the sparse factor and selected inversion, and the
 # stationarity checks read MCMCDiagnosticTools' split-Rhat.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 import Serialization, MCMCDiagnosticTools, SparseArrays, SelectedInversion
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange,
     blockdiag

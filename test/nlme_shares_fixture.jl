@@ -4,6 +4,7 @@
 # units) ⊃ districts ⊃ district-years ⊃ municipality-years, and a law that
 # reads the regions' and districts' random effects.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Random
 
 # District-years of four municipality-years; two suppressed cells in every

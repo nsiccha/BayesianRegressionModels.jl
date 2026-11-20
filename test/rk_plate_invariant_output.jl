@@ -6,6 +6,7 @@
 # Every case but the one-cell control has three cells: one cell cannot tell a
 # number from a one-entry array. These are toy data; the likelihoods are checked
 # against `Distributions.logpdf`.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems
 

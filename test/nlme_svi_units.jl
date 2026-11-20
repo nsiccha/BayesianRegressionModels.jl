@@ -1,4 +1,5 @@
 module SVIUnitArithmetic
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Random, LinearAlgebra, Statistics
 include(joinpath(@__DIR__, "svi_arithmetic_imports.jl"))
 struct BRMI end

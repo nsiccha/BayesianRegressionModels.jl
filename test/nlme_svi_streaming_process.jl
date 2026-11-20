@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, Serialization, Random
 include(joinpath(@__DIR__, "nlme_svi_streaming_fixture.jl"))

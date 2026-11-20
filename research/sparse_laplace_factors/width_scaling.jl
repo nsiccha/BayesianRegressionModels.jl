@@ -1,6 +1,7 @@
 # Public planner construction, with no AD backend available: every effect of
 # the sole wide term must be sampled before any derivative preparation.
 # Run each point under /usr/bin/time -v in a separate process for peak RSS.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, LinearAlgebra, SHA
 width, cells = parse.(Int, ARGS[1:2])
 data = (; unit=["u$i" for i in 1:width], rows=[collect(1:width) for _ in 1:cells],

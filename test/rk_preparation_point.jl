@@ -20,6 +20,7 @@
 #
 # Run: julia --startup-file=no --project=test test/rk_preparation_point.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, LogDensityProblems
 using DifferentiationInterface: AutoEnzyme

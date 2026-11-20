@@ -8,6 +8,7 @@
 # sampler (WarmupHMC here) and are named without one; a later call continues
 # from an earlier fit; `:auto` re-measures the plan at rung 2's point.
 # RUN: julia --project=test test/laplace_ladder.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using WarmupHMC   # loads Optim, which rung 2's optimizer needs
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random

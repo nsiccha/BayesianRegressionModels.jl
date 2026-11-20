@@ -1,4 +1,5 @@
 module FilterSMCFixture
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Random, Serialization, ReactiveKernelsPPL
 
 linear(data) = @brm data begin

@@ -1,4 +1,5 @@
 # RUN: julia --project=test test/start_terms.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, BridgeStan, Distributions, LinearAlgebra
 using ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels

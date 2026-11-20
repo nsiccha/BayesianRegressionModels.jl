@@ -19,6 +19,7 @@
 #
 # Run: julia --startup-file=no --project=test test/runtime_numeric_settings.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, LinearAlgebra
 

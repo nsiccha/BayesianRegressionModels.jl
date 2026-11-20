@@ -25,6 +25,7 @@
 #
 # Run: julia --project=test test/nlme_car_separator.jl [testset-filter...]
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, LinearAlgebra, Random
 include(joinpath(@__DIR__, "nlme_unit_checks.jl"))

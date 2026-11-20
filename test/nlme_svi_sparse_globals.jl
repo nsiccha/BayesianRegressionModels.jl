@@ -12,6 +12,7 @@
 # family's optimum, and the boundaries' fitted means and sds are compared with it.
 #
 # RUN: julia --project=test test/nlme_svi_sparse_globals.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 using LinearAlgebra, Random, SparseArrays, Statistics

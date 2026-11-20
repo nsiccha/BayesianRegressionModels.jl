@@ -1,6 +1,6 @@
 # The matrix-free Laplace's fixed reference precision (`_brm_fixed_reference`,
-# src/nlme_laplace_preconditioner.jl), loaded on first use
-# (src/lazy_dependencies.jl). The result holds plain sparse factors only.
+# src/nlme_laplace_preconditioner.jl), loaded with that package
+# (src/fitting_extensions.jl). The result holds plain sparse factors only.
 module BayesianRegressionModelsLimitedLDLFactorizationsExt
 
 import BayesianRegressionModels as BRM

@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.353
+
+- **Breaking:** KLU, Krylov, KrylovKit, LimitedLDLFactorizations,
+  MCMCDiagnosticTools, MUMPS and SparseMatrixColorings are weak dependencies
+  (decision `0ilan3m`); 0.2.349 loaded them on first use. A consumer that fits
+  adds them to its environment and loads them before fitting, for example
+  `import KLU, Krylov, KrylovKit, LimitedLDLFactorizations, MCMCDiagnosticTools,
+  MUMPS, SparseMatrixColorings`; each loads BRM's extension for it. Fitting
+  code that needs one that is not loaded stops with an error naming it and the
+  line that loads every one the session lacks. A consumer that only builds
+  models and simulates installs none of them. SelectedInversion stays a hard
+  dependency loaded with BRM, because every `car` term computes its scaling
+  factor with it at preparation.
+
 ## 0.2.352
 
 - `rw(time; order = 2)` is a second-order random walk, and

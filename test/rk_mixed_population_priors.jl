@@ -1,5 +1,6 @@
 # Independent normalized control for the delivered mixed-family component.
 # Population prior arguments retain their existing numeric-constant boundary.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using Distributions, Enzyme
 using DifferentiationInterface: AutoEnzyme

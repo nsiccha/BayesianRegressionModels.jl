@@ -28,6 +28,7 @@
 # owner's gap, so the fix flips it.
 #
 # Run: RK_JAX_PYTHON=<python with jax> [BRM_JAX_REQUIRE=1] julia --project=test test/rk_jax_models.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra
 using BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL

@@ -1,6 +1,7 @@
 # Run with the repository's test environment and a compute token.
 # Reuse the authored fixture and its inexpensive structural checks.
 empty!(ARGS); push!(ARGS, "selections stay compact")
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include(joinpath(@__DIR__, "../../test/laplace_factors.jl"))
 
 function measure_assembly(n)

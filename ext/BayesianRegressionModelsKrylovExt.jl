@@ -1,5 +1,5 @@
 # The matrix-free Laplace's checked conjugate-gradient solve (`_brm_checked_cg`,
-# src/nlme_laplace_matrixfree.jl), loaded on first use (src/lazy_dependencies.jl).
+# src/nlme_laplace_matrixfree.jl), loaded with that package (src/fitting_extensions.jl).
 module BayesianRegressionModelsKrylovExt
 
 import BayesianRegressionModels as BRM

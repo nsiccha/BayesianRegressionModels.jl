@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 include(joinpath(@__DIR__, "..", "src", "nlme_selection.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_workspace.jl"))

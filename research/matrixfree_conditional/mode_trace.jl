@@ -1,5 +1,6 @@
 # Trace the existing mode primitives without changing their tolerances or policy.
 # RUN: julia --project=test research/matrixfree_conditional/mode_trace.jl NX NY NT [STEPS]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("nonlinear.jl")
 
 function trace_mode(nx,ny,nt; steps=12)

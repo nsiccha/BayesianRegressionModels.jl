@@ -5,6 +5,7 @@
 # bindings). Split out so transpile probes can include the builders without
 # running the record loop.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using SHA, Statistics  # batch 8: sha-pinned mcycle.csv data prep
 
 # rate_2: two independent Beta-Binomials. (@brm refused: vector-of-sampled-
