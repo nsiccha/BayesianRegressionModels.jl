@@ -202,6 +202,15 @@ Frozen replay retains the mesh, times and channels, and can evaluate new
 spatial locations inside that mesh. New state times or channels require a
 conditional prediction law and are refused by frozen replay.
 
+    gmrf((east, north); mesh=(vertices=xy, cells=triangles))
+
+A spatial field: the same Matérn field with no time axis, and so no temporal
+length, one channel and no `cor`. Its state is one coordinate per mesh vertex,
+its hyperparameters `sd(lp, gmrf((east, north)))` and
+`length_scale(lp, gmrf((east, north)))` (`, space)` may be added). Like the
+space-time field, its mesh form also works in `@plate` cells, and it takes the
+read-support forms below (`neighbors=m`, `multiresolution=m`) at model scope.
+
     gmrf((east, north), time[, channel]; neighbors=m, cor=Omega)
 
 The same covariance without a mesh: a nearest-neighbour (Vecchia) sparse

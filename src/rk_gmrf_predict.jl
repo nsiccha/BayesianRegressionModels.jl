@@ -5,7 +5,7 @@
 function _rk_constrained_draw end
 
 """
-    brm_gmrf_predict(rk::RKBRMI, draws, field; east, north, time, channel=nothing,
+    brm_gmrf_predict(rk::RKBRMI, draws, field; east, north, time=nothing, channel=nothing,
         neighbors=nothing, rng=nothing) -> Matrix
 
 The read-pair field `field` (`field ~ 0 + gmrf(...; neighbors=m)`, named by its predictor)
@@ -16,17 +16,19 @@ at points the fit need not have read, one row per point and one column per colum
 A point follows the term's covariance given its `neighbors` nearest read positions at the
 read times around it (default: the term's own count). With `rng` each entry is drawn from
 that conditional; without it, each is the conditional mean at that draw. A point on a
-read state returns that state.
+read state returns that state. A spatial field, `gmrf((east, north); neighbors=m)`, takes
+no `time`; a space-time field requires it.
 
 Marginals are the law's, but the points are conditionally independent of each other given
 the states, so a joint quantity over several new points, such as an areal total, is not.
 The mesh form predicts through [`reprocess`](@ref) and has no such restriction.
 """
-function brm_gmrf_predict(rk::RKBRMI, draws::AbstractMatrix, field::Symbol; east, north, time,
-        channel=nothing, neighbors=nothing, rng=nothing)
+function brm_gmrf_predict(rk::RKBRMI, draws::AbstractMatrix, field::Symbol; east, north,
+        time=nothing, channel=nothing, neighbors=nothing, rng=nothing)
     names = _rk_layout_coordinate_names(rk)
     U = _brm_cut_draws(draws, names; prefix="brm_gmrf_predict")
     record = _brm_gmrf_footprint_record(rk, field)
+    time = _brm_gmrf_predict_times(record, time, length(east))
     support = only(rk.plan.columns[record.fitted])
     f = support.geometry
     channels = _brm_gmrf_predict_channels(support, channel, length(east))
@@ -40,6 +42,18 @@ function brm_gmrf_predict(rk::RKBRMI, draws::AbstractMatrix, field::Symbol; east
         column .*= law.sigma
     end
     out
+end
+
+# A spatial field's points all read its one time.
+function _brm_gmrf_predict_times(record, time, n)
+    if _brm_gmrf_spatial(record.axes)
+        time === nothing || throw(ArgumentError(
+            "brm_gmrf_predict: this field is spatial, `gmrf((east, north); …)`, and has no time; omit `time`"))
+        return fill(_BRM_GMRF_SPATIAL_TIME, n)
+    end
+    time === nothing && throw(ArgumentError(
+        "brm_gmrf_predict: this field has a time axis; pass `time`, one entry per point"))
+    time
 end
 
 function _brm_gmrf_footprint_record(rk::RKBRMI, field::Symbol)

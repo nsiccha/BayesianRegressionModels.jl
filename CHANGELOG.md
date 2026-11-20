@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.345
+
+- `gmrf((east, north); mesh=…)` is a purely spatial Matérn (ν = 1) field: it
+  takes no time column, so it has no temporal length, and its hyperparameters
+  are `sd(lp, gmrf((east, north)))` and `length_scale(lp, gmrf((east, north)))`
+  (`, space` is accepted). It has one state per mesh vertex and one channel, so
+  it takes no `cor=`. It also takes `neighbors=m` and `multiresolution=m`, works
+  in `@plate` cells, on SBBRMI and RKBRMI, under `reprocess`, `brm_fitted_state`,
+  `brm_start` and the sparse embedded Laplace, and its descriptions say it has
+  no time axis. Its law is the space-time field's on one time with any temporal
+  length, which one time never reads. `brm_gmrf_predict` takes no `time` for
+  such a field.
+- A term-prior address names a term's only parameter of its class without a
+  component.
+
 ## 0.2.344
 
 - RKBRMI uses one emitted and lowered program across category counts for

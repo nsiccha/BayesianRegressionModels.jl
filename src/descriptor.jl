@@ -2690,7 +2690,8 @@ _brm_term_label(::typeof(car), t, target) =
     Symbol(:car_, target, :_, name(_sb_named_inner(:car, only(getargs(t)))))
 function _brm_term_label(::typeof(gmrf), t, target)
     a = _brm_gmrf_arguments(t)
-    columns = (a.axes..., a.time, (a.channel === nothing ? () : (a.channel,))...)
+    columns = (a.axes..., (a.time === nothing ? () : (a.time,))...,
+        (a.channel === nothing ? () : (a.channel,))...)
     Symbol(:gmrf_, target, :_, join(name.(columns), "_"))
 end
 
@@ -2772,8 +2773,7 @@ _brm_term_parameter_bindings(::typeof(rw), _t) =
     (; sd=:sigma, innovations=:z)
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
-_brm_term_parameter_bindings(::typeof(gmrf), _t) =
-    _BRM_GMRF_PARAMETER_BINDINGS
+_brm_term_parameter_bindings(::typeof(gmrf), t) = _brm_gmrf_parameter_bindings(t)
 # `effects` is the per-area field in the order of the fitted graph's sorted area
 # labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`.
 _brm_term_parameter_bindings(::typeof(car), t) =
@@ -3160,7 +3160,7 @@ function _brm_term_assigned_value(brmi::BRMI, logical::Symbol, term, parameter::
     term isa ExprColumn || return nothing
     component = parameter === :spatial_length ? :space :
                 parameter === :temporal_length ? :time : nothing
-    slots = [slot for slot in _brm_term_prior_slots(getf(term))
+    slots = [slot for slot in _brm_term_prior_slots(term)
              if slot.class === class && slot.component === component]
     length(slots) == 1 || return nothing
     per_term = _brm_term_override(

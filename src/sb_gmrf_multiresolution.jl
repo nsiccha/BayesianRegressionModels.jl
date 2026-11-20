@@ -148,6 +148,19 @@ _sb_gmrf_multiresolution = StanBlocks.@slic begin
     return sigma * values[index]
 end
 
+# A spatial field's paths each hold one time, so the law never reads the
+# temporal length (`_sb_gmrf_space` in `sb_gmrf.jl`).
+_sb_gmrf_multiresolution_space = StanBlocks.@slic begin
+    sigma ~ lognormal(0.0, 1.0; lower=0.0)
+    spatial_length ~ lognormal(0.0, 1.0; lower=0.0)
+    field::vector[n_field] ~ brm_gmrf_multiresolution(1.0, L, times, path_ptr, path_time)
+    weights = brm_gmrf_multiresolution_basis(spatial_length, east, north, origin, item_ptr,
+        item_position, item_lag, neighbor_ptr, neighbor, state_pattern, basis_ptr, basis_node, M, minimum_distance)
+    values = brm_gmrf_multiresolution_read(field, weights, C, n_read, basis_ptr, basis_node,
+        read_ptr, path_ptr, mapid, run_ptr, run_start, run_stop, run_delta)
+    return sigma * values[index]
+end
+
 function _sb_gmrf_multiresolution_data(prepared)
     s, g = prepared.state, prepared.state.support
     spatial = _brm_gmrf_footprint_data(g.spatial.conditionals)

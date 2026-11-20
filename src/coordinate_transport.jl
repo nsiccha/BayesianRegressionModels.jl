@@ -1263,7 +1263,7 @@ end
 # by fitted vertex/channel/time identities, never by the observation order.
 function _brm_transport_gmrf_axes(term)
     args = _brm_gmrf_arguments(term)
-    (name.(args.axes)..., name(args.time),
+    (name.(args.axes)..., (args.time === nothing ? () : (name(args.time),))...,
         (args.channel === nothing ? () : (name(args.channel),))...)
 end
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
@@ -1290,6 +1290,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             "brm_coordinate_transport: GMRF $(base) has different fitted state axes")
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
+        # A spatial field's temporal length is a constant of both programs.
+        parameter === :temporal_length && _brm_gmrf_spatial_term(entry.value) && continue
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
@@ -1339,6 +1341,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
+        # A spatial field's temporal length is a constant of both programs.
+        parameter === :temporal_length && _brm_gmrf_spatial_term(entry.value) && continue
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
@@ -2842,6 +2846,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
+        # A spatial field's temporal length is a constant of both programs.
+        parameter === :temporal_length && _brm_gmrf_spatial_term(entry.value) && continue
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
