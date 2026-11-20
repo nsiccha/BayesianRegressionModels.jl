@@ -90,6 +90,7 @@ brm_filter_step
 brm_filter_stream
 brm_filter_tune
 brm_fitted_state
+brm_laplace_integration
 brm_laplace_mode
 brm_laplace_plan
 brm_nlme_conditional_point
