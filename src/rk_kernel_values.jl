@@ -1565,9 +1565,14 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
             declaration=declared[latent], name=latent, kernel=kernel.name,
             bijection=bijections[latent]))
     end
+    # A collection member's own records (`members`) name what its program
+    # declares, which the coordinate transport pairs per member.
+    members = Dict{Symbol,Any}(first(statement.args) => last(statement.args).args[3].coordinates
+        for statement in slice.body if _rk_is_cell_component(statement))
     for component in components
         _rk_coordinate_record!(coordinates, (; kind=:cell_component,
-            declaration=declared[component], name=component, kernel=kernel.name))
+            declaration=declared[component], name=component, kernel=kernel.name,
+            members=members[component]))
     end
     # A latent through a bijection is one joint draw per cell whose length the
     # cell's data decide: the first law argument that reads data and nothing

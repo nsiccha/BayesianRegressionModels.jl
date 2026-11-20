@@ -431,12 +431,15 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     push!(definitions, _brm_documented_statement(definition, header))
     push!(statements, Expr(:call, :~, target, Expr(:call, entry, args...)))
     # A plate invocation keeps its fit computations inside the indexed
-    # submodel. Its caller supplies their per-member inputs.
+    # submodel. Its caller supplies their per-member inputs. The member's own
+    # coordinate records travel with it, so the coordinate transport can pair
+    # what the member declares (its population coefficients) by meaning.
     if cell !== nothing
         # Some fitted inputs, such as HSGP mode counts, are model settings
         # without a separate raw data column in the enclosing program.
-        return Dict{Symbol,Symbol}(column_names[input] =>
+        fits = Dict{Symbol,Symbol}(column_names[input] =>
             get(column_names, source, column_names[input]) for (input, source) in fit_inputs)
+        return (; fits, coordinates)
     end
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs

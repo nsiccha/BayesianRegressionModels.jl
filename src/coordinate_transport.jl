@@ -437,7 +437,11 @@ random-effect block declared inside a function-style component call
 scope, by that call's own grouping levels and margins: RK `kin.<block>.z`
 with Stan `kin_<block>_z_flat`, its semantic addresses carrying
 `scope = (:kin,)` (a tuple path for nested calls), so repeated calls over equal
-labels stay apart. A provider declaration
+labels stay apart. A member of a component repeated over records
+(`for entry in records; blocks[entry.id] ~ component(entry); end`) pairs its
+population coefficients by the member's key and coefficient label, with
+`scope = (:blocks, key)` in their semantic addresses; a member's own
+random-effect block is not paired yet. A provider declaration
 `<target>.<path>` pairs with the sampled SB output that the same `<target>`
 declaration owns under StanBlocks' submodel name `<target>_<path>` (path
 segments joined by `_`), element by element; a simplex declaration pairs as a
@@ -594,7 +598,8 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
               "\n  Covered: scalar parameters, response cutpoints and " *
               "thresholds, `Ordinal` per-threshold coefficients, authored " *
               "`Dirichlet` simplexes, ordinary-prior " *
-              "population and categorical coefficients, plain non-centered or " *
+              "population and categorical coefficients (a repeated component " *
+              "member's too), plain non-centered or " *
               "centered random-effect " *
               "blocks with sampled scales, stratified `gr(g, by=b)` blocks, " *
               "also declared inside a component call, " *
@@ -1646,7 +1651,7 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         kind::Symbol, target::Symbol, rk, d, stan, stan_pos;
         only_declaration::Union{Nothing,Symbol}=nothing, relation::Symbol=:identity,
         carrier::Union{Nothing,Symbol}=nothing, physical_value::Union{Nothing,Symbol}=nothing,
-        context::Tuple=(), declaration_scope::Symbol=target)
+        context::Tuple=(), declaration_scope::Symbol=target, member_first::Bool=false)
     owned = Dict{String,BRMOutput}(String(o.name) => o for o in d.outputs
         if !isnothing(o.declaration) && o.declaration.target === target &&
             o.declaration.context == context && o.kind === :parameter)
@@ -1700,8 +1705,12 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
                 "declaration `$declaration` of layout transform `$(only(transforms))`")
             positions = Set(_brm_element_coordinates(output, stan))
             for element in elements
-                stan_name = isempty(element.index) ? carrier :
-                    string(carrier, ".", join(element.index, "."))
+                # A collection cell's RK coordinate leads with its member; the
+                # stacked Stan carrier ends with it.
+                stan_index = member_first && !isempty(element.index) ?
+                    (Base.tail(element.index)..., first(element.index)) : element.index
+                stan_name = isempty(stan_index) ? carrier :
+                    string(carrier, ".", join(stan_index, "."))
                 get(stan_pos, stan_name, 0) in positions || continue
                 push!(pairs, BRMCoordinatePair((; address..., index=element.index),
                     element.name, stan_name, declaration, element.index, relation))
@@ -1899,11 +1908,75 @@ function _brm_transport_component_records!(pairs, blocks, simplexes, centered, m
     nothing
 end
 
+# A plate cell's component call, such as one member of a component repeated
+# over records. Its declarations pair by their scoped spelling, and a
+# collection member's population coefficients by meaning (below), which
+# supersedes a spelling match of the same coordinates.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:cell_component}, record, rk, d, stan, stan_pos)
+    first_generic = length(pairs) + 1
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :submodel, record.name, rk, d, stan, stan_pos;
-        context=(record.kernel,), declaration_scope=record.declaration)
+        context=(record.kernel,), declaration_scope=record.declaration, member_first=true)
+    members = _brm_transport_member_population(record, d, stan)
+    isempty(members) && return nothing
+    rk_claimed = Set(pair.rk for pair in members)
+    stan_claimed = Set(pair.stan for pair in members)
+    deleteat!(pairs, [i for i in first_generic:length(pairs)
+        if pairs[i].rk in rk_claimed || pairs[i].stan in stan_claimed])
+    append!(pairs, members)
+    nothing
+end
+
+# A collection member's population coefficients. RK declares them in the
+# member's program, as a scalar per coefficient or a `beta_pop` vector, and
+# indexes the cell's copy by member first. StanBlocks stacks each member's
+# coefficient vector in one carrier with the member last. A coefficient pairs
+# by its label, read from that member's own SB fit, never by position.
+function _brm_transport_member_population(record, d, stan)
+    pairs = BRMCoordinatePair[]
+    population = [r for r in get(record, :members, ()) if r.kind === :population]
+    isempty(population) && return pairs
+    path = (record.kernel, record.name)
+    axis = get(_brm_collection_paths(d.plan.parent), path, nothing)
+    axis === nothing && return pairs
+    fits = _brm_member_fits(d, axis)
+    fits === nothing && _brm_transport_error(:unsupported_coverage,
+        "brm_coordinate_transport: collection `$(axis.collection)` declares population " *
+        "coefficients in its members but has no per-member SB fit")
+    caller = "brm_coordinate_transport"
+    for (i, key) in enumerate(axis.keys)
+        scope = (axis.collection, key)
+        call = _brm_submodel_entry(d, scope)
+        blocks = Dict{Symbol,Any}()
+        for r in population
+            block = get!(blocks, r.predictor) do
+                binding = _brm_member_population_block(fits[i], r.predictor, scope, caller)
+                binding.kind === :ordinary || _brm_transport_error(:unsupported_coverage,
+                    "brm_coordinate_transport: member $scope population predictor " *
+                    "`$(r.predictor)` uses a $(binding.kind) prior scheme")
+                output = _brm_member_population_carrier(call, binding, scope, caller)
+                elements = _brm_member_element_coordinates(output, stan)
+                length(elements) == length(binding.labels) || error(
+                    "brm_coordinate_transport: member $scope population carrier " *
+                    "`$(output.name)` has $(length(binding.labels)) labels but " *
+                    "$(length(elements)) Stan coordinates")
+                (; labels=binding.labels, names=stan[elements])
+            end
+            position = findall(==(r.coefficient), block.labels)
+            length(position) == 1 || _brm_transport_error(:unsupported_coverage,
+                "brm_coordinate_transport: member $scope coefficient " *
+                "`$(r.coefficient)` of `$(r.predictor)` occurs $(length(position)) " *
+                "times among the SB labels $(Tuple(block.labels))")
+            declaration = Symbol(record.declaration, ".", r.declaration)
+            index = (i, get(r, :index, ())...)
+            push!(pairs, BRMCoordinatePair((; kind=:population, scope,
+                    predictor=r.predictor, coefficient=r.coefficient),
+                Symbol(declaration, ".", join(index, ".")), block.names[only(position)],
+                declaration, index, :identity))
+        end
+    end
+    pairs
 end
 
 # A stratified `gr(g, by=b)` block: each stratum's scales and correlation
