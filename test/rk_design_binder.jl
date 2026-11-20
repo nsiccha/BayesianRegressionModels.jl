@@ -638,6 +638,18 @@ end
             @test !occursin("replayed in full", sprint(show, binder))
         end
     end
+    # A data-free prediction gets its cutpoint count from the exported fit.
+    design = without(map(v -> v[2:5], data), :k)
+    for build in (BM.ordered, BM.ordered_authored)
+        rk = RKBRMI(build(data))
+        free = RKBRMI(build(data), brm_fitted_state(rk))
+        prediction = reprocess(free, design)
+        @test prediction.model.layout.total == rk.model.layout.total
+        bound = rk_bound_data(prediction)
+        @test absent(bound.k)
+        @test same_inputs(rk_design_binder(free)(design), bound)
+        @test Tuple(i.name for i in brm_descriptor(prediction).inputs) == keys(bound)
+    end
     # A design is refused where `reprocess` refuses its weights or outcomes.
     for (build, bad, message) in (
             (BM.weighted_normal, (; n=[1, -1, 2, 1]), "nonnegative integer-valued counts"),

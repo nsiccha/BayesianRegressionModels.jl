@@ -145,8 +145,7 @@ end
 
 @stestset "retained build pairs implicit OrderedLogistic cutpoints" begin
     # An authored location, as in a downstream retained artifact: the value
-    # route emits `y_cutpoints ~ Ordered(Normal(0.0, 1.0), 3)` and SBBRMI
-    # `ordered[3] y_cutpoints` (gappy raw codes, K = maximum(y) = 4).
+    # route and Stan both have three cutpoints for these gappy codes (maximum 4).
     data = (; subject=[1,2,3,1,2,3,1,2], x=[-1.2,-0.4,0.1,0.5,0.9,1.4,-0.8,0.3],
         y=[1,2,2,4,4,4,1,2])
     brmi = @brm data begin

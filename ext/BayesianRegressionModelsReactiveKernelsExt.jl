@@ -355,11 +355,10 @@ end
 # (`RKBRMI(brmi, state)`) lowers with its fitted values `frozen` and without the
 # fit-role inputs they were fitted from, which RKPPL binds absent.
 function _rk_lower_program(program::_RKProgram, plan::_RK_PLAN_TYPES; frozen=nothing)
-    columns = BRM._rk_source_data_columns(plan, program.inputs)
+    columns = BRM._rk_source_data_columns(plan, program.inputs; frozen)
     conditioned = BRM._rk_observed_names(plan)
     frozen === nothing && return lower_rkppl(program.emitted.main, columns;
         mod=program.mod, conditioned), columns
-    foreach(name -> delete!(columns, name), keys(frozen.inputs))
     lower_rkppl(program.emitted.main, columns; mod=program.mod, conditioned,
         frozen), columns
 end

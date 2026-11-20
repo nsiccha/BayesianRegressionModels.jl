@@ -127,7 +127,7 @@ function _brm_rk_descriptor_inputs(rk, emitted)
     # RK preparation evaluates the program's data-only definitions (a design
     # matrix, group indices) and binds their values in their place; the
     # program's own inputs do not name them.
-    source = Set{Symbol}(keys(_rk_source_data_columns(plan, emitted)))
+    source = Set{Symbol}(keys(_rk_source_data_columns(rk, emitted)))
     # A fit-role input (`_rk_fit_twin!`) is a bound copy of the column the
     # program fits its preprocessing from; it names the column it copies.
     fits = _rk_plan_fit_inputs(plan)

@@ -477,7 +477,8 @@ struct _RKVectorParameter
     # A data-owned extent is bound as a validated integer shape input.
     # `size` describes this binding for BRM's shape checks.
     extent::Union{Nothing,Symbol}
-    # The argument the program reads for a law `args` holds the numbers of:
+    # The computed size of implicit ordinal thresholds, or the argument
+    # the program reads for a law `args` holds the numbers of:
     # `Dirichlet(K, a)` with a data `a`. `nothing` spells `args`.
     spelled::Any
 end
@@ -8356,6 +8357,28 @@ function _rk_gate_joint_factors!(response_specs::AbstractVector,
     nothing
 end
 
+# Size the implicit thresholds from the fitted response. OrderedLogistic uses
+# the largest code (gaps are possible on the value route), while Ordinal codes
+# the response against its fitted level table.
+function _rk_threshold_vector!(derived, columns, taken, response, raw, name,
+        family, size; ordered_logit=false)
+    count = if ordered_logit
+        fit = _rk_fit_input!(derived, columns, taken, response,
+            _brm_fit_input_source(response, raw))
+        Expr(:call, :Int, Expr(:call, :maximum, fit))
+    else
+        levels = _rk_response_level_table!(derived, columns, taken, response, raw)
+        Expr(:call, :length, levels)
+    end
+    extent = _rk_ast_fresh_name(string(name, "_length"), taken)
+    push!(derived, _RKDerivedSpec(extent, Expr(:call, :-, count, 1), name))
+    _RKVectorParameter(name, family, (0.0, 1.0), size, name, nothing, extent)
+end
+
+_rk_threshold_extent(v::_RKVectorParameter) = something(v.spelled, v.size)
+_rk_threshold_extent(vectors, thresholds) =
+    only(_rk_threshold_extent(v) for v in vectors if v.name === thresholds)
+
 # Leveled spec fields for one response. Appends implicit threshold
 # vectors (cutpoints/thresholds/coefs) to `implicit`; multinomial count
 # columns split in the caller (`response_values === nothing` marks it).
@@ -8363,7 +8386,7 @@ function _rk_plan_leveled!(entry, family::Symbol,
         predictor::Union{Symbol,Nothing}, extra::Vector{Symbol},
         implicit::Vector{_RKVectorParameter},
         vectors::Dict{Symbol,_RKVectorParameter}, data::AbstractDict,
-        predictor_specs::AbstractVector)
+        predictor_specs::AbstractVector, derived, columns, taken)
     prefix = "RK backend"
     key, rhs, raw = entry.key, entry.rhs, entry.raw_response
     if family === :categorical_logit
@@ -8391,16 +8414,18 @@ function _rk_plan_leveled!(entry, family::Symbol,
             threshold_columns=Symbol[], threshold_coefs=nothing,
             response_values=recoded, cross_columns=Symbol[])
     elseif family === :ordered_logit
+        union!(taken, keys(data))
         recoded, K = _rk_ordered_levels(key, raw)
         cut = Symbol(key, :_cutpoints)
-        push!(implicit, _RKVectorParameter(cut, :ordered_normal, (0.0, 1.0),
-            K - 1, cut))
+        push!(implicit, _rk_threshold_vector!(derived, columns, taken, key, raw,
+            cut, :ordered_normal, K - 1; ordered_logit=true))
         return (; predictor, n_levels=K, thresholds=cut,
             extra_predictors=Symbol[], count_columns=Symbol[],
             ordinal_structure=nothing, discrimination=nothing,
             threshold_columns=Symbol[], threshold_coefs=nothing,
             response_values=recoded, cross_columns=Symbol[])
     elseif family === :ordinal
+        union!(taken, keys(data))
         recoded, K, _ = _rk_leveled_levels(key, raw)
         structure = _brm_ordinal_tag(getargs(rhs)[1], OrdinalStructure;
             prefix) isa Cumulative ? :cumulative : :stopping
@@ -8410,8 +8435,8 @@ function _rk_plan_leveled!(entry, family::Symbol,
         append!(implicit, coef_implicit)
         thresh = Symbol(key, :_thresholds)
         vfam = structure === :cumulative ? :ordered_normal : :vector_normal
-        push!(implicit, _RKVectorParameter(thresh, vfam, (0.0, 1.0), K - 1,
-            thresh))
+        push!(implicit, _rk_threshold_vector!(derived, columns, taken, key, raw,
+            thresh, vfam, K - 1))
         return (; predictor, n_levels=K, thresholds=thresh,
             extra_predictors=Symbol[], count_columns=Symbol[],
             ordinal_structure=structure, discrimination, threshold_columns,
@@ -9441,7 +9466,7 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         leveled = family in _RK_LEVELED_FAMILIES ?
             _rk_plan_leveled!(entry, family, predictor, extra,
                 implicit_vectors, vector_by_name, context.data,
-                predictor_specs) :
+                predictor_specs, derived, columns, taken) :
             _rk_unleveled(entry, predictor)
         coarsened_upper = nothing
         if family in (:categorical_logit, :ordinal, :categorical)

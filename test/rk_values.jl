@@ -443,8 +443,13 @@ end
     backend = RKBRMI(brmi)
     @test backend.plan isa BRM._RKValuePlan
     source = string(Base.remove_linenums!(deepcopy(BRM._rk_emit_ast(backend.plan).main)))
-    @test occursin("y_cutpoints ~ Ordered(Normal(0.0, 1.0), 3)", source)
+    @test occursin("y_cutpoints ~ Ordered(Normal(0.0, 1.0), y_cutpoints_length)", source)
     @test occursin("y .~ OrderedLogistic.(loc, Ref(y_cutpoints))", source)
+    smaller = reprocess(backend, merge(df, (; y=min.(df.y, 2))); freeze_constants=false)
+    @test smaller.model.layout.total == backend.model.layout.total - 2
+    @test BRM._rk_program_statements(BRM._rk_emit_ast(smaller.plan)) ==
+        BRM._rk_program_statements(BRM._rk_emit_ast(backend.plan))
+    @test string(smaller.model.program) == string(backend.model.program)
     u = check_value_gradient(backend)
     nt = constrain(backend.model.layout, u)
     c = nt.y_cutpoints
@@ -452,6 +457,9 @@ end
     eta = only(nt.pop_slope.beta_pop) .* df.x .+ nt.bias
     expected_ll = ordered_logistic_reference.(eta, Ref(c), df.y)
     @test value_query(backend, :pointwise, u).y ≈ expected_ll
+    # Integral floating-point outcomes are codes too, including a missing code.
+    float_codes = reprocess(backend, merge(df, (; y=Float64.(df.y))); freeze_constants=false)
+    @test value_query(float_codes, :pointwise, u).y ≈ expected_ll
     @test value_query(backend, :likelihood, u) ≈ sum(expected_ll)
     prior = logpdf(Normal(), only(nt.pop_slope.beta_pop)) +
         logpdf(Normal(), nt.bias) + sum(logpdf.(Normal(), c))
@@ -509,6 +517,12 @@ end
         @testset "$label" begin
             backend = RKBRMI(brmi)
             @test backend.plan isa BRM._RKValuePlan
+            larger = reprocess(backend, merge(df, (; y=[1, 2, 2, 4, 3, 4, 1, 2]));
+                freeze_constants=false)
+            @test larger.model.layout.total == backend.model.layout.total + 1 + Int(effects)
+            @test BRM._rk_program_statements(BRM._rk_emit_ast(larger.plan)) ==
+                BRM._rk_program_statements(BRM._rk_emit_ast(backend.plan))
+            @test string(larger.model.program) == string(backend.model.program)
             u = check_value_gradient(backend)
             nt = constrain(backend.model.layout, u)
             c = nt.y_thresholds

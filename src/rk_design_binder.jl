@@ -408,7 +408,7 @@ end
 # data-free backend binds no fit-role input: its frozen fitted values take
 # their place.
 function _rk_design_fitted(rk::RKBRMI, groups)
-    columns = _rk_source_data_columns(rk.plan, _rk_retained_program(rk))
+    columns = _rk_source_data_columns(rk, _rk_retained_program(rk))
     # Each fitted input, by the column whose resampling refits it.
     fits = merge(_rk_plan_fit_inputs(rk.plan), _rk_plan_graph_inputs(rk.plan))
     constants = _rk_fit_constant_names(rk)
@@ -429,11 +429,7 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     # a plan whose value checks the binder cannot read replays in full.
     replay.program === rk.program || return _RKDesignClass([:callables])
     _rk_design_checked(replay.plan) || return _RKDesignClass([:plan])
-    columns = _rk_source_data_columns(replay.plan, _rk_retained_program(rk))
-    # A data-free replay binds its fitted values frozen, not the fit-role inputs
-    # they are fitted from.
-    replay.fitted === nothing ||
-        foreach(name -> delete!(columns, name), keys(replay.fitted.frozen.inputs))
+    columns = _rk_source_data_columns(replay, _rk_retained_program(rk))
     twins = _rk_plan_fit_inputs(replay.plan)
     fitted = binder.fitted
     sources = Pair{Symbol,Any}[]
