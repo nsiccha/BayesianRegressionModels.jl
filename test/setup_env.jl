@@ -67,7 +67,7 @@ const PINS = [
     ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "fadb947a30617bfcb22d999fe1943507faffd6a6"), # 0.1.135: prose headings nest under their section; includes 0.1.65 plain-text views and 0.1.62 documentation projection
     ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "66772c9b3eced58a2d49ccee49af01d1f50ab47f"), # 0.5.21: HTMXObjects 0.1.135 requires DynamicObjects 0.5.19
     ("TreeArrays", "https://github.com/nsiccha/TreeArrays.jl.git", "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"),
-    ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"),
+    ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "4c3390492d4973423e9a25f7616393e686de2259"),
     # Fleet-only pivoted KLU selected inversion; registered 0.2.2 lacks it.
     ("SelectedInversion", "https://github.com/timweiland/SelectedInversion.jl.git", "8b1ee1077cea94c1aff746e182681ae39ce91526"),
     # One-sided LogNormal moments and tail-stable truncation mass, plus the
