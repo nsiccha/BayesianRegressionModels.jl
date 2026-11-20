@@ -4825,7 +4825,8 @@ _sb_effect_unresolved_note(unresolved) =
     "such a coefficient explicitly with `effect(linear_predictor, coefficient)` " *
     "to see why."
 
-function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenance::Bool=false)
+function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing,
+                                    provenance::Bool=false, design_labels=())
     specs = effect_priors(brmi)
     isempty(specs) && return Dict{Symbol,Any}()
 
@@ -4835,7 +4836,9 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
     # cannot name is SKIPPED rather than fatal. Naming every `linear_predictors`
     # entry eagerly made one unrelated scalar prior (`log_F_bottle ~ Normal(0,
     # 0.5)`) fatal for the whole model as soon as any effect prior existed.
-    resolved = Dict{Symbol,Union{Vector{Symbol},Nothing}}()
+    # A prepared model already knows the labels of its emitted columns. Only
+    # walk a formula when the caller has no design record for that predictor.
+    resolved = Dict{Symbol,Union{Vector{Symbol},Nothing}}(design_labels)
     unresolved = Dict{Symbol,String}()
     labels_of(lp::Symbol) = get!(resolved, lp) do
         # `nothing` for a binding that is not a population formula at all
