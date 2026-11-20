@@ -1265,6 +1265,40 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
 end
 
+# A single-path random walk, paired by its time axis and parameter roles: the
+# innovation scale as a scalar, and elementwise in step order the innovations
+# (zero start) or the standardized values (sum to zero), which both backends
+# sample in the same coordinates.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:rw}, record, rk, d, stan, stan_pos)
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === rw &&
+            name(_sb_named_inner(:rw, only(getargs(e.value)))) === record.time,
+        "`rw($(record.time))`")
+    base = (; kind=:rw, predictor=record.predictor, term=entry.term)
+    roles = record.sum_to_zero ? ((:sd, :sigma), (:structured, :phi)) :
+        ((:sd, :sigma), (:innovations, :z))
+    for (parameter, local_name) in roles
+        # A scale held at a known value, or set to a value computed from model
+        # values, is no coordinate on either backend.
+        isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
+            entry.value, parameter)) || continue
+        stan_names = _brm_transport_elements(
+            _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+            (; base..., parameter))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        if parameter === :sd
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=1),
+                declaration, only(stan_names), declaration, (), :identity))
+        else
+            for (j, stan_name) in enumerate(stan_names)
+                push!(pairs, BRMCoordinatePair((; base..., parameter, index=j),
+                    Symbol(declaration, ".", j), stan_name, declaration, (j,), :identity))
+            end
+        end
+    end
+end
+
 # A native field's scalar roles and joint state. State positions are paired
 # by fitted vertex/channel/time identities, never by the observation order.
 function _brm_transport_gmrf_axes(term)

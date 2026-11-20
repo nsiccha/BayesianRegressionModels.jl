@@ -696,6 +696,6 @@ end
         y ~ Normal(mu, sigma)
     end)
     @test_throws r"groups no random-effect block" spl_problem(rk, :b)
-    @test_throws r"groups no random-effect block, `cdar` walk or `car` field" spl_problem(rk, :x)
+    @test_throws r"groups no random-effect block, `cdar` or `rw` walk or `car` field" spl_problem(rk, :x)
     @test_throws ArgumentError spl_problem(rk, ())
 end

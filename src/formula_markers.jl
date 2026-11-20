@@ -96,21 +96,39 @@ function dar end
 
 """
     rw(time)
+    rw(time; order = 2)
+    rw(time; order = 1 | 2, sum_to_zero = true)
 
-Random-walk trajectory marker. The StanBlocks backend emits the path
+Random-walk trajectory marker over the sorted distinct values of `time`; each
+row reads the point of its own time value, so rows may share a time (several
+groups per day get one shared walk). Only the order of the values matters, not
+their gaps. It is a direct predictor summand: no additional population
+coefficient multiplies the path. `sd(lp, rw(time))` addresses the innovation
+scale `sigma > 0` whatever the keywords; the term has no persistence, so
+`ar(lp, rw(time))` is refused.
 
-`x[1] = 0`, `x[t+1] = x[t] + sigma * z[t]`,
+`order` (1, the default, or 2) is the order of the differences that are
+innovations, and `sum_to_zero` (default `false`) how the walk's level is
+pinned:
 
-over the sorted distinct values of `time` — i.e. `dar(time)` with the
-differences' persistence fixed at zero — with `sigma > 0` and standardized
-innovations `z`; each row reads the point of its own time value, so rows may
-share a time (several groups per day get one shared walk). It is a direct
-predictor summand: a formula intercept supplies the initial level and no
-additional population coefficient multiplies the path. `sd(lp, rw(time))`
-addresses `sigma`; the term has no persistence, so `ar(lp, rw(time))` is
-refused. On replay, times after the last fitted one are appended (a forecast):
-their innovations are drawn in generated quantities, so the walk continues
-from its fitted end. Dispatch tag — see `_sb_rw1`.
+- **Zero start** (`sum_to_zero = false`). `x[1] = 0` at the first time and
+  each step adds a standardized innovation `z[t]`: order 1 is
+  `x[t+1] = x[t] + sigma * z[t]`; order 2 is `x[2] = sigma * z[1]` and
+  `x[t+1] - 2x[t] + x[t-1] = sigma * z[t]`, the law of `dar(time)` with its
+  persistence fixed at 1. A formula intercept is the level at the first time.
+- **Sum to zero** (`sum_to_zero = true`). The intrinsic walk: the values have
+  log density `-(n - order) * log(sigma) - sum(d .^ 2) / (2 sigma^2)`, `d` the
+  `order`-th differences of the `n` values, times the soft sum-to-zero `car`
+  uses, `sum(x) ~ Normal(0, 0.001 n sigma)` (`car`'s `Normal(0, 0.001 n)` on the
+  standardized values `x / sigma`, which are its coordinates). A formula intercept is the
+  walk's mean level, and an order-2 walk's linear trend has a flat prior
+  (identified by the data): R-INLA's `rw1` / `rw2` with `constr = TRUE`. The
+  walk needs at least `order + 1` distinct times.
+
+On replay, times after the last fitted one are appended (a forecast): their
+innovations are drawn in generated quantities, so the walk continues from its
+fitted end by its recurrence. Dispatch tag — see `_sb_rw1`, `_sb_rw2` and
+`_sb_rw_sum`.
 """
 function rw end
 
