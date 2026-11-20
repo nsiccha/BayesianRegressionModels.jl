@@ -121,8 +121,8 @@ end
 # A saved centering policy: `(; start, step)` and, from BRM 0.2.322, `constant_laws`.
 # A state saved before it centred constant-law vectors and keeps doing so. A saved
 # state carries its own controls, so its policy never delays: a carried unit keeps
-# its frame and a new one starts at `start`. A streaming state names its field
-# policy `fields`; an optimizer checkpoint's controls hold it as `field_pass`.
+# its frame and a new one starts at `start`. A streaming state with the field
+# map on names `fields`; an optimizer checkpoint's controls hold `field_pass`.
 _brm_svi_saved_centering(saved) = LearnedCentering(
     LearnedCentering(; saved.start, saved.step, delay=false,
         fields=Bool(get(saved, :fields, get(saved, :field_pass, false)))),

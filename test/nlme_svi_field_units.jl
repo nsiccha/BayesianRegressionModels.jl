@@ -423,7 +423,7 @@ end
     @test !isempty(fresh.diagnostics.centering.cells)
     @test !any(cell -> cell.kind === :gmrf, fresh.diagnostics.centering.cells)
     state = brm_svi_checkpoint(fresh)
-    @test state.layout.centering.fields === false
+    @test !haskey(state.layout.centering, :fields)
     # One station has no observation in the new window.
     label = ("s1",)
     keep = [j for j in 1:2:length(data.y) if data.site[j] != only(label)]
@@ -437,7 +437,7 @@ end
     @test !(label in update.diagnostics.unit_levels)
     carried = brm_svi_checkpoint(update)
     @test carried.units[label].M == state.units[label].M
-    @test carried.layout.centering.fields === false
+    @test !haskey(carried.layout.centering, :fields)
     m = update.diagnostics.model
     paused = brm_svi_fit(state, m; opts..., rng=Xoshiro(404), stop_after=2)
     resumed = brm_svi_resume(m, paused; threads=1, ndraws=3)

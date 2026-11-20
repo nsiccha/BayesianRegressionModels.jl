@@ -113,10 +113,14 @@ function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates;
     units
 end
 
-_brm_svi_centering_layout(q) = hasproperty(q, :centering) ?
-    (; centering=(; q.centering.start, q.centering.step,
-        constant_laws=_brm_svi_saved_centering(q.centering).constant_laws,
-        fields=_brm_svi_saved_centering(q.centering).fields)) : NamedTuple()
+# The centering policy a streaming state saves. It names `fields` only when the
+# field map is on, so a state of a fit without it keeps the layout it always had.
+function _brm_svi_centering_layout(q)
+    hasproperty(q, :centering) || return NamedTuple()
+    saved = _brm_svi_saved_centering(q.centering)
+    policy = (; q.centering.start, q.centering.step, saved.constant_laws)
+    (; centering=saved.fields ? merge(policy, (; fields=true)) : policy)
+end
 
 function brm_svi_checkpoint(fit)
     hasproperty(fit, :diagnostics) && hasproperty(fit.diagnostics, :q) ||
