@@ -1,6 +1,6 @@
 # A read-pair field's states in units' own factors (`field_states=:units`): the pieces add
 # up to the whole model, in value and gradient, and the public fit runs, resumes and stays
-# the same at any number of tasks. Mesh fields and streaming are refused by name.
+# the same at any number of tasks. A new observation window reuses the fitted support.
 using Test, BayesianRegressionModels, LinearAlgebra, Random, Statistics
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, DifferentiationInterface
 const BRM = BayesianRegressionModels
@@ -133,6 +133,80 @@ end
     resumed = brm_svi_resume(m, checkpoint; threads=1, ndraws=5)
     @test resumed.diagnostics.elbo == fit.diagnostics.elbo
     @test resumed.draws == fit.draws
+end
+
+@testset "a new observation window carries the field Gaussian on its fitted support" begin
+    data = station_data(; stations=4, seed=3)
+    # Include shared field coordinates as well as coordinates held by the stations.
+    first_site = findfirst(==("s1"), data.site)
+    data.east[data.site .== "s2"] .= data.east[first_site]
+    data.north[data.site .== "s2"] .= data.north[first_site]
+    controls = (; threads=1, batch_size=3, max_iterations=6, ndraws=3,
+        centering=nothing, coupling=nothing)
+    fitted = brm_svi_fit(field_model(data); controls..., ad_backend=FIELD_AD, rng=Xoshiro(81),
+        subject_group=:site, unit_partition=:connected, separator=:none, field_states=:units)
+    state = brm_svi_checkpoint(fitted)
+    @test state.layout.options.field_states === :units
+    @test any(name -> occursin(".field.", string(name)), state.globals)
+    keep = 1:2:length(data.y)
+    window = (; east=data.east[keep], north=data.north[keep], time=data.time[keep],
+        site=data.site[keep], x=0.2 .- data.x[keep], y=randn(Xoshiro(82), length(keep)),
+        state=collect(eachindex(keep)), nb=data.nb)
+    update = brm_svi_fit(state, field_model(window); controls..., ad_backend=FIELD_AD, rng=Xoshiro(83))
+    carried = brm_svi_checkpoint(update)
+    @test carried.updates == 1 && carried.layout.options.field_states === :units
+    m = update.diagnostics.model
+    stopped = brm_svi_fit(state, m; controls..., rng=Xoshiro(83), stop_after=2)
+    resumed = brm_svi_resume(m, stopped; threads=1, ndraws=3)
+    @test resumed.diagnostics.elbo == update.diagnostics.elbo
+    @test resumed.draws == update.draws
+    @test_throws "field_states" brm_svi_fit(state, m; controls..., field_states=:global)
+
+    # Whole new-window likelihood from RK, plus the saved Gaussians. In particular
+    # the original Vecchia law must contribute neither its value nor its gradients.
+    target = BRM._brm_svi_target(m; previous=state, field_states=:units, separator=:none)
+    t, _ = BRM._brm_svi_initialize(target, state, state.q.family; start=nothing,
+        inits=nothing, global_scale=1.0, unit_scale=1.0)
+    sampler = prepare_sampler(m.backend.model, rk_bound_plan(m.backend), m.unit; backend=FIELD_AD)
+    levels = BRM._brm_svi_unit_levels(t)
+    for offset in (-0.15, 0.2)
+        u = offset .+ 0.1 .* sin.(eachindex(m.unit))
+        whole_grad = similar(u)
+        whole, _ = sampler_value_and_gradient!(sampler, whole_grad, u)
+        prior, prior_grad = BRM._rk_nlme_population_prior_value_gradient(m.population_prior, u)
+        g = u[t.globals]
+        δ = g - state.q.μ
+        variance = exp.(2 .* state.q.ρ)
+        expected = whole - prior - sum(δ.^2 ./ variance .+ log.(2π .* variance)) / 2
+        expected_grad = whole_grad - prior_grad
+        expected_grad[t.globals] .-= δ ./ variance
+        value, gg = BRM._brm_svi_global_term(t, g)
+        grad = zeros(length(u))
+        grad[t.globals] .= gg
+        for (i, block) in enumerate(t.units)
+            saved = state.units[levels[i]]
+            keys = BRM._brm_svi_owned_unit_keys(m, t.units, i)
+            order = [only(findall(==(key), saved.keys)) for key in keys]
+            diff = u[block] - saved.M[order]
+            precision = saved.Λ[order, order]
+            expected += (logdet(Symmetric(precision)) - length(block) * log(2π) -
+                dot(diff, precision, diff)) / 2
+            expected_grad[block] .-= precision * diff
+            gz = zeros(length(block))
+            value += BRM._brm_svi_unit_term!(gg, gz, t, i, g, u[block])
+            grad[t.globals] .+= gg
+            grad[block] .+= gz
+        end
+        @test value ≈ expected atol=2e-9 rtol=2e-11
+        @test grad ≈ expected_grad atol=2e-8 rtol=2e-9
+    end
+    # A prepared model can have the same packed field length and different locations.
+    moved = RKBRMI(field_model(merge(window, (; east=window.east .+ 10))))
+    @test_throws "preprocessing changed" brm_svi_fit(state, moved; controls..., ad_backend=FIELD_AD)
+    # Identical field geometry with a previously private state read by a different station.
+    swapped = replace(window.site, "s3"=>"s4", "s4"=>"s3")
+    @test_throws ArgumentError brm_svi_fit(state, field_model(merge(window, (; site=swapped)));
+        controls..., ad_backend=FIELD_AD)
 end
 
 @testset "a non-finite unit's point holds this iteration's field states" begin

@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.345
+
+- Model-scope `gmrf(...; neighbors=m)` terms on RKBRMI expose
+  `<id>.conditional_mean` and `<id>.conditional_scale` in packed field order.
+  Each pair gives the Gaussian prior for that standardized field coordinate
+  given its earlier states and the earlier channels at the same state.
+  **Breaking:** These ports change the emitted program identity. Finish any
+  existing SVI or SMC run on its original version or start a fresh checkpoint.
+- `brm_svi_fit(checkpoint, model)` accepts disjoint observation windows for
+  `field_states=:units` on the same fitted read-pair GMRF support with the
+  same coordinate ownership. The checkpoint carries the field-state policy.
+
 ## 0.2.344
 
 - RKBRMI uses one emitted and lowered program across category counts for

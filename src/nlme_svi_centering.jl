@@ -655,10 +655,8 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
             end
         end
     end
-    # Shared field weights are global coordinates. A gmrf/car/cdar field's scales
-    # are computed inside its kernel; an HSGP's are a graph value, but its shared
-    # weights are globals, and a grouped HSGP whose levels are the units is a
-    # family above.
+    # Field coordinates without a learned frame. Grouped HSGPs whose levels
+    # coincide with units are handled above.
     globals = Set(t.globals)
     for record in _brm_nlme_records(m.backend.plan)
         record.kind in (:hsgp, :gmrf_footprint, :car, :cdar) || continue
@@ -676,16 +674,20 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
         end
         owned = [p for (p, name) in enumerate(view.coordinates)
             if _brm_nlme_owned(name, record.declaration)]
+        reason = if record.kind === :gmrf_footprint
+            "the GMRF uses its packed coordinates because its conditional means can read other units' states"
+        elseif record.kind === :car
+            "the structured CAR prior specifies edge differences and component sums, " *
+                "so SVI holds the field in its sampled coordinates"
+        else
+            "the CDAR walk uses its sampled innovation parameterization"
+        end
         shared = [p for p in owned if p in globals && view.role[p] === :shared_latent]
         isempty(shared) || push!(uncentered, (; kind=record.kind,
-            record.declaration, level=nothing, coordinates=view.coordinates[shared],
-            reason="a shared field's coordinates are global, and its weights' scales " *
-                "are computed inside its kernel, not read as graph values"))
+            record.declaration, level=nothing, coordinates=view.coordinates[shared], reason))
         local_states = [p for p in owned if owner[p] > 0]
         isempty(local_states) || push!(uncentered, (; kind=record.kind,
-            record.declaration, level=nothing, coordinates=view.coordinates[local_states],
-            reason="a field's unit-owned states have conditional scales computed inside " *
-                "its kernel, not read as graph values"))
+            record.declaration, level=nothing, coordinates=view.coordinates[local_states], reason))
     end
     # `@plate` cell latents and the sampled locals of a component called in a cell: the
     # plan reads no location or scale for them, so they keep their packed coordinates

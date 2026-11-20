@@ -96,9 +96,11 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
         max_promoted_coordinates=128, cell_units=nothing, field_states=:global)
     field_states in (:global, :units) || throw(ArgumentError(
         "brm_svi_fit: field_states must be :global or :units, got $(repr(field_states))"))
-    field_states === :units && previous !== nothing && throw(ArgumentError(
-        "brm_svi_fit: field_states=:units has no streaming form: a new window adds states the " *
-        "carried factors cannot name. Fit the window with field_states=:global, or refit"))
+    if previous !== nothing
+        saved = get(get(previous.layout, :options, (;)), :field_states, :global)
+        field_states === saved || throw(ArgumentError(
+            "brm_svi_fit: the streaming checkpoint holds field_states=$saved, requested $field_states"))
+    end
     m.cell_query === nothing && _brm_nlme_error(
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
@@ -112,7 +114,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     !connected && policy !== :none && throw(ArgumentError(
         "brm_svi_fit: automatic separators require unit_partition=:connected"))
     cell_units = _brm_svi_cell_units_option(cell_units, connected)
-    inventory =field_states === :units ? _brm_svi_field_inventory(m) : ()
+    inventory = field_states === :units ? _brm_svi_field_inventory(m) : ()
     ownership = connected ? _brm_svi_connected_ownership(m; global_coordinates, previous,
         separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates,
         cell_units, fields=inventory) :
@@ -138,7 +140,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     t = (; m, globals, units, ownership, previous, partition=(; partition.context), plan,
        plans=[plan], work, places,
        touched=_brm_svi_field_touched!(_brm_svi_touched_globals(places, prior), fields), prior,
-       fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
+       field_states, fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
     # From the model's own prior, before a streaming fit puts its carried factor
     # there: what the sd bound, a stopgap, multiplies (src/nlme_svi_sd_bound.jl),
     # and the mean a non-finite evaluation's globals are measured from.
@@ -2370,7 +2372,8 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   (default) gives each state its own global Gaussian factor. `:units` puts a state read
   by one unit into that unit's factor, next to its effects, so its cost and storage follow
   the unit's reads, and a state read by several units stays global. It reads the field's
-  lengths from the globals, and has no streaming form. A mesh `gmrf` is refused either way:
+  lengths from the globals. A streaming update accepts new observations on the fitted
+  field support with the same coordinate ownership. A mesh `gmrf` is refused either way:
   one factor per mesh state collapses the learned lengths.
 - `start` / `inits` — where the global and unit means start: BRM's prior-median
   starting point by default, a full RK packed point `start`, or values keyed

@@ -128,6 +128,15 @@ new-point variation. These draws have pointwise conditional laws and do
 not supply the joint covariance needed for uncertainty in spatial totals.
 Observation noise is added only when predicting measurements.
 
+For a model-scope `gmrf(...; neighbors=m)`, the fitted RK graph exposes
+`<id>.conditional_mean` and `<id>.conditional_scale`. Entry `k` in each
+vector gives the mean and standard deviation of the prior on packed field
+coordinate `k`, given the model's length scales, channel correlation and
+preceding field coordinates. Channels vary fastest. With correlated channels,
+each coordinate also conditions on earlier channels at that state. Multiply
+both quantities by the term's marginal field SD to express them in the
+predictor's units.
+
 The figure isolates the OU temporal factor at one location and channel,
 computed directly as `exp(-gap / ell_t)`. It shows how a fixed prior
 correlation time changes dependence; it is not a posterior reconstruction.
@@ -143,6 +152,10 @@ may live in independent plate cells; the cell predictor must be `0 + gmrf`,
 and shared channel correlation belongs outside the cell. Neighbor fields
 do not use that plate or embedded-Laplace surface. `field_states=:units`
 lets supported field states become SVI units; see the [SVI example](variational-inference.md).
+An SVI checkpoint with unit-owned states can take new observations at the
+fitted positions, times and channels. Retained coordinates keep their owners.
+The new window uses the saved joint approximation as its prior. Adding field
+states requires rebuilding the fit.
 Embedded Laplace is an explicit mesh integration choice. Large operator
 solves use a fixed-probe determinant estimate, so even a Gaussian integral
 can be approximate. Check the solver and probe settings against the

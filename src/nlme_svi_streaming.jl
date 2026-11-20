@@ -146,6 +146,9 @@ function brm_svi_checkpoint(fit)
     units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks;
         levels, centering_maps=maps)
     options = d.separator === nothing ? (; separator=:none) : _brm_svi_policy_options(d.separator)
+    if hasproperty(d, :optimizer) && get(d.optimizer.identity, :field_states, :global) === :units
+        options = merge(options, (; field_states=:units))
+    end
     layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals),
         _brm_svi_centering_layout(d.q)...)
     factors = _rk_svi_factors(m.backend, m.unit)
@@ -187,13 +190,15 @@ end
 function _brm_svi_carried_state(previous::BRMSVIState, t, q,
         centering_maps=_brm_svi_centering_maps(t, q))
     m = t.m
+    options = _brm_svi_separator_options(t)
+    t.field_states === :units && (options = merge(options, (; field_states=:units)))
     BRMSVIState(3, deepcopy(previous.preprocessing), previous.source_id,
         copy(previous.globals), _brm_svi_global_record(m, q, t.globals, t.ownership.factors;
             previous=previous.q),
         _brm_svi_save_units!(deepcopy(previous.units), m, q, t.units;
             levels=_brm_svi_unit_levels(t), centering_maps), previous.group,
         previous.nested, previous.shared, copy(previous.fixed),
-        previous.unit_partition, (; options=_brm_svi_separator_options(t),
+        previous.unit_partition, (; options,
             global_keys=_brm_svi_global_keys(m, t.globals), _brm_svi_centering_layout(q)...),
         previous.updates + 1)
 end
@@ -374,7 +379,11 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
     prior = _BRMSVIStreamingPrior(_brm_svi_global_factor(q),
         _brm_svi_global_geometry(q), deepcopy((; q.M, q.Λ, q.U)), carried, t.prior, controls,
         couplings)
-    merge(_brm_svi_carried_touched(t, couplings), (; prior)), q
+    # Frozen preprocessing has matched the field geometry and channel labels,
+    # and every carried block above has matched its coordinates. Their joint
+    # Gaussian replaces the authored field prior, including its global states.
+    # No new-window term needs a draw from another field owner's factor.
+    merge(_brm_svi_carried_touched(t, couplings), (; prior, fields=nothing)), q
 end
 
 function _brm_svi_global_term(prior::_BRMSVIStreamingPrior, t, g)
@@ -423,6 +432,8 @@ absent labels retain their factors in the checkpoint and recover them on
 return. An existing unit's latent coordinate set must stay fixed (persistent
 statics, not growing time-state blocks). Global coordinates and preprocessing
 must stay fixed. For nested units, pass the new window's `nested_groups` map.
+For a `field_states=:units` checkpoint, supply observations on the same fitted
+positions, times and channels. A retained field coordinate keeps its owner.
 Only new-window units are minibatched; diagnostics count their gradient calls.
 Checkpoint size grows with distinct units, not the number of observations.
 """
