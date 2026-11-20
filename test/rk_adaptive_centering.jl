@@ -390,6 +390,37 @@ car_data() = (; area=["a", "b", "c", "d", "e", "f", "g", "a", "e"],
     end
 end
 
+# A scaled ICAR field (`type=:icar, scaled=true`, snag brm-car-icar-has-d25d72ec):
+# its `phi` cells scaled by `sigma / sqrt(s_c)`, centred on 0, then the island
+# "g"'s `theta` cell with scale `sigma`, centred on the intercept.
+@stestset "car fields: scaled ICAR phi cells by 1/sqrt(s_c), island theta on the intercept" begin
+    data = car_data()
+    rk = RKBRMI(@brm data begin
+        mu ~ 1 + car(area; edges=(from, to), type=:icar, scaled=true)
+        y ~ Normal(mu, 1.0)
+    end)
+    names = layout_names(rk)
+    record = only(r for r in BRM._rk_coordinate_records(rk.plan) if r.kind === :car)
+    term = only(t for p in rk.plan.predictors for t in p.terms if t.kind === :car)
+    decl = String(record.declaration)
+    S = term.options.n_struct
+    struct_pos = rk.plan.columns[term.options.struct_pos]
+    inv_scale = rk.plan.columns[term.options.inv_scale]
+    area_of = [findfirst(==(j), struct_pos) for j in 1:S]
+    field(x) = getproperty(BRM._rk_constrained_values(rk, x), record.declaration)
+    intercept = position(names, "mu_Intercept")
+    cells = vcat(
+        [(position(names, "$decl.phi.$j"), x -> 0.0,
+          x -> log(field(x).sigma) + log(inv_scale[area_of[j]]) / 2) for j in 1:S],
+        [(position(names, "$decl.theta.1"), x -> x[intercept], x -> log(field(x).sigma))])
+    @test length(cells) == 8
+    check_scalar_cells(rk, cells)
+    rows = adaptive_centering_controls(adaptive_centering_problem(rk,
+        rk_logdensity_problem(rk; ad_backend=AD), AD; fields=true), rk)
+    @test [r.term for r in rows] == vcat(fill(1, S), 2)
+    @test last(rows).level == "g"
+end
+
 @stestset "a cdar walk alone: innovation scales are the walk's marginal spread" begin
     data = (; week=repeat(1:5, 4), patch=repeat(["p", "q", "r", "s"], inner=5),
               y=sin.(1:20) ./ 2, C=[1.0 0.3 0.0 0.0; 0.3 1.0 0.2 0.0;

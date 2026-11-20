@@ -3270,6 +3270,21 @@ StanBlocks.@deffun begin
         end
         sigma * out
     end
+    # The variance-scaled ICAR field (`scaled=true`): BYM2 with its mixing share
+    # held at 1, so an island `k` reads its own `theta[island_idx[k]]`.
+    car_icar_scaled_effects(sigma::real, phi::vector[n], theta::vector[I],
+                            struct_idx::int[N], island_idx::int[N],
+                            inv_scale::vector[N])::vector[N] = begin
+        out::vector[N]
+        for k in 1:N
+            if struct_idx[k] > 0
+                out[k] = sqrt(inv_scale[k]) * phi[struct_idx[k]]
+            else
+                out[k] = theta[island_idx[k]]
+            end
+        end
+        sigma * out
+    end
     car_rows(effects::vector[N], row_idx::int[R])::vector[R] = effects[row_idx]
 end
 
@@ -3286,6 +3301,14 @@ _sb_car_bym2 = StanBlocks.@slic begin
     phi::vector[n_struct] ~ brm_icar(node1, node2, comp_start, comp_size)
     theta ~ std_normal(; n=n_nodes)
     effects = car_bym2_effects(sigma, rho, phi, theta, struct_idx, inv_scale)
+    return car_rows(effects, row_idx)
+end
+
+_sb_car_icar_scaled = StanBlocks.@slic begin
+    sigma ~ normal(0., 1.; lower=0.)
+    phi::vector[n_struct] ~ brm_icar(node1, node2, comp_start, comp_size)
+    theta ~ std_normal(; n=n_island)
+    effects = car_icar_scaled_effects(sigma, phi, theta, struct_idx, island_idx, inv_scale)
     return car_rows(effects, row_idx)
 end
 
@@ -12085,7 +12108,7 @@ function _sb_rw_submodel_expr(term_overrides, t)
     _sb_configured_term_submodel(_sb_rw1, (:sigma, sigma_cfg))
 end
 
-function _sb_car_submodel_expr(term_overrides, t, type::Symbol)
+function _sb_car_submodel_expr(term_overrides, t, type::Symbol, scaled::Bool=type === :bym2)
     rho_cfg = _sb_term_cfg(term_overrides, t, :mixing)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
     # merging a `rho` statement into the ICAR submodel would sample an unused
@@ -12093,9 +12116,10 @@ function _sb_car_submodel_expr(term_overrides, t, type::Symbol)
     type === :icar && !isnothing(rho_cfg) && error(
         "sbimpl: `$(rho_cfg.spelling)` addresses a BYM2 mixing " *
         "share, but `car(...; type=:icar)` has none")
-    base = type === :bym2 ? :_sb_car_bym2 : :_sb_car_icar
+    base = type === :bym2 ? :_sb_car_bym2 : scaled ? :_sb_car_icar_scaled : :_sb_car_icar
     (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return base
-    _sb_configured_term_submodel(type === :bym2 ? _sb_car_bym2 : _sb_car_icar,
+    _sb_configured_term_submodel(
+        type === :bym2 ? _sb_car_bym2 : scaled ? _sb_car_icar_scaled : _sb_car_icar,
         (:rho, rho_cfg), (:sigma, sigma_cfg))
 end
 
@@ -16862,13 +16886,16 @@ end
 # term's own name. `_sb_car_data!` writes them, so a fresh `reprocess` rebuild
 # and the construction emit the same keys.
 const _SB_CAR_GRAPH_FIELDS = (:nodes, :n_struct, :n_nodes, :node1, :node2,
-    :comp_start, :comp_size, :struct_idx, :inv_scale)
+    :comp_start, :comp_size, :struct_idx, :inv_scale, :island_idx, :n_island)
 _sb_car_graph_record(st) =
     NamedTuple{_SB_CAR_GRAPH_FIELDS}(map(f -> getproperty(st, f), _SB_CAR_GRAPH_FIELDS))
-function _sb_car_keys(col_name::Symbol, type::Symbol)
+function _sb_car_keys(col_name::Symbol, type::Symbol, scaled::Bool=type === :bym2)
     names = type === :bym2 ?
         (:n_struct, :n_nodes, :node1, :node2, :comp_start, :comp_size,
          :struct_idx, :inv_scale, :row_idx) :
+        scaled ?
+        (:n_struct, :n_island, :node1, :node2, :comp_start, :comp_size,
+         :struct_idx, :island_idx, :inv_scale, :row_idx) :
         (:n_struct, :node1, :node2, :comp_start, :comp_size, :struct_idx, :row_idx)
     NamedTuple{names}(map(n -> Symbol(col_name, :_, n), names))
 end
@@ -16880,7 +16907,7 @@ function _sb_car_data!(data, keys_, st)
 end
 _sb_predictor_term!(stmts, data, ::typeof(car), t;
                     target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
-    area, (from, to), nodes, type = _brm_car_arguments(t)
+    area, (from, to), nodes, type, scaled = _brm_car_arguments(t)
     aname, araw = _sb_inner_data(:car, area)
     fname, fraw = _sb_inner_data(:car, from)
     tname, traw = _sb_inner_data(:car, to)
@@ -16896,7 +16923,7 @@ _sb_predictor_term!(stmts, data, ::typeof(car), t;
     prepared = _brm_prepare_term(t, target, (; data=inner))
     st = prepared.state
     col_name = Symbol(:car_, target, :_, aname)
-    keys_ = _sb_car_keys(col_name, type)
+    keys_ = _sb_car_keys(col_name, type, scaled)
     for key in values(keys_)
         haskey(data, key) && error("sbimpl: `car` reserves data key `$key`, but that name is already used")
     end
@@ -16906,8 +16933,8 @@ _sb_predictor_term!(stmts, data, ::typeof(car), t;
     # the other keys ride along.
     graph = _sb_car_graph_record(st)
     _sb_record_preproc!(data, keys_.row_idx, PreprocEntry(:car,
-        (; type, graph, keys=keys_), raw_ref, true))
-    submodel = _sb_car_submodel_expr(term_overrides, t, type)
+        (; type, scaled, graph, keys=keys_), raw_ref, true))
+    submodel = _sb_car_submodel_expr(term_overrides, t, type, scaled)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; data, stem=col_name, keys_...)))
     col_name

@@ -162,6 +162,7 @@ const _BRMD_TEXT_LOCALES = (
         areal_effect = "The areal effect is indexed by each row's area. Its intrinsic CAR field φ has the pairwise-difference density over the declared neighbour pairs (i ~ j) and one soft sum-to-zero per connected component of areas with neighbours.",
         areal_bym2 = "BYM2 mixes φ with independent standard-normal area noise θ; ρ is the spatially structured share of the variance and s_c the fitted scaling factor of component c, so σ is a marginal SD. An area without neighbours keeps only σθ.",
         areal_icar_isolated = "An area without neighbours has no spatial effect.",
+        areal_icar_scaled = "Each area's φ is divided by √s_c, with s_c the fitted scaling factor of its connected component, so σ is a marginal SD; an area without neighbours has its own standard-normal effect σθ.",
         differenced_autoregressive = "The first differences follow AR(1); the formula intercept supplies the initial level, and the integrated trajectory has no additional population coefficient.",
         # Declarations.
         submodel_output = "`{owner}` is the returned value of its included scientific submodel, whose internal parameters and calls are described separately.",
@@ -380,6 +381,7 @@ const _BRMD_TEXT_LOCALES = (
         areal_effect = "Der areale Effekt wird über das Gebiet jeder Zeile indiziert. Sein intrinsisches CAR-Feld φ hat die Dichte der paarweisen Differenzen über die deklarierten Nachbarpaare (i ~ j) und je eine weiche Nullsummenbedingung pro Zusammenhangskomponente der Gebiete mit Nachbarn.",
         areal_bym2 = "BYM2 mischt φ mit unabhängigem standardnormalverteiltem Gebietsrauschen θ; ρ ist der räumlich strukturierte Anteil der Varianz und s_c der angepasste Skalierungsfaktor der Komponente c, sodass σ eine marginale SD ist. Ein Gebiet ohne Nachbarn behält nur σθ.",
         areal_icar_isolated = "Ein Gebiet ohne Nachbarn hat keinen räumlichen Effekt.",
+        areal_icar_scaled = "φ wird in jedem Gebiet durch √s_c geteilt, mit s_c dem angepassten Skalierungsfaktor seiner Zusammenhangskomponente, sodass σ eine marginale SD ist; ein Gebiet ohne Nachbarn hat einen eigenen standardnormalverteilten Effekt σθ.",
         differenced_autoregressive = "Die ersten Differenzen folgen einem AR(1)-Prozess; der Achsenabschnitt der Formel liefert das Anfangsniveau, und die integrierte Trajektorie hat keinen zusätzlichen Populationskoeffizienten.",
         submodel_output = "`{owner}` ist der Rückgabewert des eingebundenen wissenschaftlichen Teilmodells; dessen interne Parameter und Aufrufe werden separat beschrieben.",
         assignment = "`{owner}` ist eine deterministische Zuweisung der deklarierten Argumente.",

@@ -3480,7 +3480,8 @@ function _control_rows!(rows, state::BRMCDARAdaptiveCenteringState, _, offset, v
 end
 
 # `term` is 1 for an `:icar` area's structured `phi` cell and 2 for a `:bym2`
-# area's unstructured `theta` cell, the field's position in the emitted law.
+# area's unstructured `theta` cell or a scaled `:icar` island's, the field's
+# position in the emitted law.
 function _control_rows!(rows, state::BRMCARAdaptiveCenteringState, _, offset, values,
                         names, _)
     controls, targets = values
@@ -3490,7 +3491,8 @@ function _control_rows!(rows, state::BRMCARAdaptiveCenteringState, _, offset, va
         push!(rows, _control_row(offset + p, BRM._adaptive_car_index(block, cell),
             names, :car; binding=block.logical, margin=(; predictor=block.logical,
             coefficient=block.term), level=block.areas[BRM._adaptive_car_area(block, cell)],
-            term=block.bym2 ? 2 : 1, c=controls[offset + p], target=targets[offset + p]))
+            term=BRM._adaptive_car_term(block, cell), c=controls[offset + p],
+            target=targets[offset + p]))
     end
     offset + length(state.sources)
 end

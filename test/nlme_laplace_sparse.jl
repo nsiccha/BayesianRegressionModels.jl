@@ -395,6 +395,65 @@ end
     end
 end
 
+# A scaled ICAR field (`type=:icar, scaled=true`, snag brm-car-icar-has-d25d72ec):
+# the structured areas' covariance `D P⁻¹ D` with `D = diag(1 / sqrt(s_c))`, `s_c`
+# from the dense pseudo-inverse of each component's Laplacian, and the island "g"
+# its own unit variance; the island's `theta` is integrated with the field.
+function spl_scaled_car_row_covariance(area, from, to)
+    nodes = sort(unique(vcat(from, to)))
+    k = Dict(l => i for (i, l) in enumerate(nodes))
+    L = zeros(length(nodes), length(nodes))
+    for (a, b) in zip(from, to)
+        i, j = k[a], k[b]
+        L[i, i] += 1; L[j, j] += 1; L[i, j] -= 1; L[j, i] -= 1
+    end
+    scale = Dict{String,Float64}()
+    for comp in (["a", "b", "c", "d", "h"], ["e", "f"])
+        idx = [k[l] for l in comp]
+        Lc = L[idx, idx]
+        s_c = exp(mean(log.(diag(pinv(Lc)))))
+        foreach(l -> scale[l] = s_c, comp)
+        u = [l in comp ? 1.0 : 0.0 for l in nodes]
+        L .+= u * u' / (0.001 * length(comp))^2
+    end
+    D = Diagonal([1 / sqrt(scale[l]) for l in nodes])
+    A = [haskey(k, a) && n == a ? 1.0 : 0.0 for a in area, n in nodes]
+    island = [!haskey(k, a) && a == b ? 1.0 : 0.0 for a in area, b in area]
+    A * D * inv(L) * D * A' + island
+end
+
+@stestset "car fields: the scaled ICAR field's exact Gaussian marginal, its island integrated" begin
+    data = SPL_CAR
+    rk = RKBRMI(@brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + car(area; edges=(from, to), type=:icar, scaled=true)
+        y ~ Normal(mu, sigma)
+    end)
+    p = spl_problem(rk, :area)
+    @test length(p.integrated) == 7 + 1
+    φs = [0.4 .* randn(SPL_RNG, length(p.population)) for _ in 1:3]
+    function oracle(φ)
+        u = spl_point(p, φ)
+        ψ = BRM._brm_slap_psi!(zeros(length(p.port)), p, BRM._rk_slap_values(p.kernels, u))
+        μ0 = [ψ[p.entry[t]] for t in eachindex(p.family)]
+        σ = [exp(ψ[p.entry[t] + 1]) for t in eachindex(p.family)]
+        τ = only(spl_block_values(rk, p, u, 1).sigma)
+        Σ = Diagonal(σ .^ 2) + τ^2 * spl_scaled_car_row_covariance(data.area, data.from, data.to)
+        plan = RKEXT._rk_translated_plan(rk.plan)
+        prior = Base.invokelatest(prepare_query(rk.model, plan, :prior), u) +
+            Base.invokelatest(prepare_query(rk.model, plan, :log_jacobian), u)
+        prior + logpdf(MvNormal(μ0, Symmetric(Σ)), data.y)
+    end
+    values = [LogDensityProblems.logdensity_and_gradient(p, φ) for φ in φs]
+    expected = oracle.(φs)
+    # equal up to the field prior's normalizing constant, a constant of the graph
+    @test values[2][1] - values[1][1] ≈ expected[2] - expected[1] atol=1e-8
+    @test values[3][1] - values[1][1] ≈ expected[3] - expected[1] atol=1e-8
+    for (φ, (_, gradient)) in zip(φs, values)
+        @test gradient ≈ spl_fd(oracle, φ) rtol=1e-6 atol=1e-6
+    end
+end
+
 @stestset "cdar walks: the exact Gaussian marginal of a stationary AR(1), and counts" begin
     data = WALK_DF
     rk = RKBRMI(walk_model(data))

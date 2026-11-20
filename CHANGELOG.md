@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.345
+
+- `car(area; edges=(from, to), type=:icar, scaled=true)` is the variance-scaled
+  ICAR (Besag) field, R-INLA's `besag` with `scale.model = TRUE`: each area's
+  ICAR value is divided by `sqrt(s_c)`, the scaling factor of its connected
+  component, so `sd(lp, car(area))` is the field's marginal SD, and each island
+  has its own `Normal(0, sigma)` effect. It is the BYM2 field with its mixing
+  share held at 1. It works on SBBRMI, RKBRMI, adaptive centering and
+  `brm_laplace_problem(rk; integrate = (:area,))`. `scaled` defaults to `false`
+  for `:icar`, so existing models keep their meaning; `:bym2` is always scaled
+  and refuses `scaled=false`. The `rkppl_model(:car_icar_scaled)` body and
+  `StatisticalPreparation.car_graph`'s new `n_island` and `island_pos` fields
+  serve hand-written `@rkppl` models.
+
 ## 0.2.344
 
 - RKBRMI uses one emitted and lowered program across category counts for

@@ -2775,11 +2775,16 @@ _brm_term_parameter_bindings(::typeof(cdar), _t) =
 _brm_term_parameter_bindings(::typeof(gmrf), _t) =
     _BRM_GMRF_PARAMETER_BINDINGS
 # `effects` is the per-area field in the order of the fitted graph's sorted area
-# labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`.
-_brm_term_parameter_bindings(::typeof(car), t) =
-    getkwargs(t).type === :bym2 ?
+# labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`,
+# and a scaled ICAR field's `phi` and its islands' `theta`.
+function _brm_term_parameter_bindings(::typeof(car), t)
+    _, _, _, type, scaled = _brm_car_arguments(t)
+    type === :bym2 ?
         (; sd=:sigma, mixing=:rho, structured=:phi, unstructured=:theta, effects=:effects) :
+    scaled ?
+        (; sd=:sigma, structured=:phi, unstructured=:theta, effects=:effects) :
         (; sd=:sigma, structured=:phi, effects=:effects)
+end
 _brm_term_parameter_bindings(_f, _t) = NamedTuple()
 
 # Terms whose owner output is the summand the linear predictor adds as is, so
@@ -2904,13 +2909,16 @@ not term labels. Supported parameter roles are:
 | `rw(...)` | `:sd`, `:innovations`, `:value` |
 | `cdar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
 | `car(...; type=:bym2)` | `:sd`, `:mixing`, `:structured`, `:unstructured`, `:effects`, `:value` |
+| `car(...; type=:icar, scaled=true)` | `:sd`, `:structured`, `:unstructured`, `:effects`, `:value` |
 | `car(...; type=:icar)` | `:sd`, `:structured`, `:effects`, `:value` |
 
 A `car` term's label is `:car_<logical>_<area>`. `:effects` is its per-area field
 (one coordinate per area of the fitted graph, in sorted label order, islands
 included) and, like `:value`, a transformed parameter; `:structured` is the
 standardized ICAR field over the areas with neighbours, grouped by connected
-component.
+component. `:unstructured` is BYM2's standard-normal noise per area, and a scaled
+ICAR field's per island (one per island in sorted label order; empty when the
+graph has none).
 
 `:value` is the term's own collected contribution: the per-row vector this
 predictor's occurrence of the term adds to the linear predictor. It is a

@@ -148,7 +148,7 @@ see [`reprocess`](@ref). Dispatch tag — see `_sb_cdar` and `_sb_cdar_iid`.
 function cdar end
 
 """
-    car(area; edges=(from, to), type=:icar | :bym2)
+    car(area; edges=(from, to), type=:icar | :bym2, scaled=false)
 
 Areal spatial effect over an adjacency graph. `area` is the grouping column of
 the rows; `edges` names two equal-length data vectors whose `k`-th entries are
@@ -166,12 +166,18 @@ standard-normal `theta`, the mixing share `rho` in `[0, 1]`, and `s` the scaling
 factor of each component (the geometric mean of the diagonal of the generalized
 inverse of its ICAR precision), computed from the graph at preparation; an
 island's effect is `sigma * theta` (Freni-Sterrantino et al. 2018).
+`type=:icar, scaled=true` emits the variance-scaled ICAR field, R-INLA's `besag`
+with `scale.model = TRUE`: `sigma * phi[area] / sqrt(s)` for an area with
+neighbours and `sigma * theta[island]` for an island, one standard-normal
+`theta` per island. It is the BYM2 field with `rho = 1`, and `sigma` is its
+marginal SD. `:bym2` is always scaled, so `scaled=false` is refused there.
 
 It is a direct predictor summand: the formula intercept carries the level and no
 population coefficient multiplies it. `sd(lp, car(area))` addresses `sigma`
 (default half-`Normal(0, 1)`), `mixing(lp, car(area))` the BYM2 `rho` (default
 `Beta(0.5, 0.5)`). On replay the graph is frozen from the fit and every row must
-name a fitted area. Dispatch tag — see `_sb_car_icar` / `_sb_car_bym2`.
+name a fitted area. Dispatch tag — see `_sb_car_icar` / `_sb_car_icar_scaled` /
+`_sb_car_bym2`.
 """
 function car end
 

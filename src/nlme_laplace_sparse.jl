@@ -355,10 +355,11 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
             phi = Symbol(r.declaration, ".", r.locals.phi)
             block!(r.declaration, r.area, draws!(reshape([Symbol(phi, ".", l)
                 for l in 1:graph.S], :, 1)), hyper; graph.edges, graph.sums, graph.λ)
-            if r.type === :bym2
+            # BYM2's iid part of every area, or a scaled ICAR field's islands
+            if haskey(r.locals, :theta)
                 theta = Symbol(r.declaration, ".", r.locals.theta)
                 ntheta = count(n -> _brm_nlme_owned(n, theta), names)
-                block!(theta, r.area, draws!(reshape([Symbol(theta, ".", l)
+                ntheta > 0 && block!(theta, r.area, draws!(reshape([Symbol(theta, ".", l)
                     for l in 1:ntheta], :, 1)), hyper)
             end
         end
