@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.350
+
+- `brm_population_effect_coordinates(d, logical, names; coefficient, submodel)`
+  addresses a population coefficient of one member of a component repeated
+  over records, by the member's key, as `brm_term_coordinates` and
+  `brm_ranef_sd_coordinates` do. For a member formula
+  `shift ~ 1 + settings.dose`,
+  `brm_population_effect_coordinates(d, :shift, names; submodel=(:blocks, :left))`
+  returns the left member's intercept. The result also carries `submodel`.
+- `brm_coordinate_transport` pairs a member's population coefficients by the
+  member and the coefficient label. Earlier an intercept-only member's
+  coefficients did not pair. A member whose formula has a covariate paired
+  completely but exchanged the coefficients of different members, so RK and
+  Stan densities disagreed through the transport. Such transports are now
+  correct. A member's own random-effect block still does not pair.
+
 ## 0.2.349
 
 - `using BayesianRegressionModels` no longer loads the packages only fitting
