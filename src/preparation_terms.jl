@@ -35,7 +35,7 @@ function _brm_term_prior_spec(term, target, context, class; component=nothing)
                _brm_resolve_term_priors(brmi)
     per_term = something(_brm_term_override(get(resolved, target, Dict()), term), Dict())
     slots = filter(slot -> slot.class === class && slot.component === component,
-                   _brm_term_prior_slots(getf(term)))
+                   _brm_term_prior_slots(term))
     isempty(slots) && return nothing
     entry = get(per_term, only(slots).name, nothing)
     isnothing(entry) ? nothing : entry.spec

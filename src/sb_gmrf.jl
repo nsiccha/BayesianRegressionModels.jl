@@ -339,6 +339,27 @@ _sb_gmrf = StanBlocks.@slic begin
     return brm_gmrf_rows(sigma, field, index1, index2, index3, weight1, weight2, weight3)
 end
 
+# A spatial field, `gmrf((east, north); …)`: the same laws on a support with
+# one time, which forms no OU transition, so the laws never read their
+# temporal length. They receive a constant in its place, and the field has no
+# temporal parameter.
+_sb_gmrf_vecchia_space = StanBlocks.@slic begin
+    sigma ~ lognormal(0.0, 1.0; lower=0.0)
+    spatial_length ~ lognormal(0.0, 1.0; lower=0.0)
+    field::vector[n_field] ~ brm_gmrf_vecchia(spatial_length, 1.0, L, east, north, origin,
+        item_ptr, item_position, item_lag, pattern_ptr, pattern_states, neighbor_ptr, neighbor,
+        state_pattern, M)
+    return sigma * field[index]
+end
+
+_sb_gmrf_space = StanBlocks.@slic begin
+    sigma ~ lognormal(0.0, 1.0; lower=0.0)
+    spatial_length ~ lognormal(0.0, 1.0; lower=0.0)
+    field::vector[n_field] ~ brm_gmrf(spatial_length, 1.0, L, times,
+        permutation, mass, gptr, grow, gval, lptr, lrow, previous_ptr, previous_col, previous_pos)
+    return brm_gmrf_rows(sigma, field, index1, index2, index3, weight1, weight2, weight3)
+end
+
 _sb_is_direct_term(::typeof(gmrf)) = true
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(gmrf), term,
         summands; term_overrides=Dict{Symbol,Any}(), kwargs...)
@@ -350,10 +371,13 @@ _sb_term_slot_config(::Val{:temporal_length}, entry) =
     _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry))
 
 function _sb_gmrf_submodel_expr(overrides, term, footprint::Bool; multiresolution::Bool=false)
-    slots = (:sigma, :spatial_length, :temporal_length)
+    spatial = _brm_gmrf_spatial_term(term)
+    slots = spatial ? (:sigma, :spatial_length) : (:sigma, :spatial_length, :temporal_length)
     cfgs = map(slot -> _sb_term_cfg(overrides, term, slot), slots)
     # The submodel itself, not its name: a caller's `mod` need not see this module.
-    base = multiresolution ? _sb_gmrf_multiresolution : footprint ? _sb_gmrf_vecchia : _sb_gmrf
+    base = spatial ?
+        (multiresolution ? _sb_gmrf_multiresolution_space : footprint ? _sb_gmrf_vecchia_space : _sb_gmrf_space) :
+        (multiresolution ? _sb_gmrf_multiresolution : footprint ? _sb_gmrf_vecchia : _sb_gmrf)
     all(isnothing, cfgs) && return base
     _sb_configured_term_submodel(base, zip(slots, cfgs)...)
 end
@@ -419,8 +443,8 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
     rows = Dict{Symbol,Any}(s => _sb_df_column(df, s) for s in training.source)
     if !freeze && get(training.state, :multiresolution, nothing) !== nothing
         state = training.state
-        times = _brm_gmrf_times(rows[training.source[3]])
-        channels = length(training.source) == 3 ? [1] : _brm_fit_levels(rows[training.source[4]])
+        times = _brm_gmrf_times(_brm_gmrf_row_time(training.source, rows))
+        channels = _brm_gmrf_has_channel(training.source) ? _brm_fit_levels(rows[training.source[4]]) : [1]
         if state.correlation !== nothing
             all(c -> c in state.channels, channels) || throw(ArgumentError(
                 "gmrf replay with channel correlation cannot introduce new channel labels"))
@@ -428,14 +452,14 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
         end
         multiresolution = _sb_gmrf_fresh_count(df, state, :multiresolution)
         support = _brm_multiresolution_support(rows[training.source[1]], rows[training.source[2]],
-            rows[training.source[3]], length(channels); rank=multiresolution)
+            _brm_gmrf_row_time(training.source, rows), length(channels); rank=multiresolution)
         training = _BRMPreparedTerm(gmrf, training.source,
             merge(state, (; times, channels, support, multiresolution)), training.dependencies)
     elseif !freeze && training.state.neighbors !== nothing
         # A fresh fit's footprint is its own rows' read pairs.
         state = training.state
-        times = _brm_gmrf_times(rows[training.source[3]])
-        channels = length(training.source) == 3 ? [1] : _brm_fit_levels(rows[training.source[4]])
+        times = _brm_gmrf_times(_brm_gmrf_row_time(training.source, rows))
+        channels = _brm_gmrf_has_channel(training.source) ? _brm_fit_levels(rows[training.source[4]]) : [1]
         if state.correlation !== nothing
             all(c -> c in state.channels, channels) || throw(ArgumentError(
                 "gmrf replay with channel correlation cannot introduce new channel labels"))
@@ -443,7 +467,7 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
         end
         neighbors = _sb_gmrf_fresh_count(df, state, :neighbors)
         footprint = _brm_vecchia_footprint(rows[training.source[1]], rows[training.source[2]],
-            rows[training.source[3]], length(channels); neighbors)
+            _brm_gmrf_row_time(training.source, rows), length(channels); neighbors)
         training = _BRMPreparedTerm(gmrf, training.source,
             merge(state, (; times, channels, footprint, neighbors)), training.dependencies)
     elseif !freeze
@@ -451,9 +475,9 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
         vertices = _sb_df_column(df, state.vertices_source)
         cells = _sb_df_column(df, state.cells_source)
         mesh = _brm_gmrf_mesh(vertices, cells)
-        times = _brm_gmrf_times(rows[training.source[3]])
-        channels = length(training.source) == 3 ? [1] :
-            _brm_fit_levels(rows[training.source[4]])
+        times = _brm_gmrf_times(_brm_gmrf_row_time(training.source, rows))
+        channels = _brm_gmrf_has_channel(training.source) ?
+            _brm_fit_levels(rows[training.source[4]]) : [1]
         # A declared correlation retains its channel labels, including when
         # some channels have no replay rows. Changing that joint law needs a
         # new formula, as for the other correlated structured terms.
@@ -495,7 +519,7 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
     arguments = _brm_gmrf_arguments(term)
     footprint = arguments.neighbors !== nothing
     multiresolution = arguments.multiresolution !== nothing
-    raw = (arguments.axes..., arguments.time,
+    raw = (arguments.axes..., (arguments.time === nothing ? () : (arguments.time,))...,
         (arguments.channel === nothing ? () : (arguments.channel,))...,
         (footprint || multiresolution ? () : (arguments.mesh.vertices, arguments.mesh.cells))...)
     inner = Dict{Symbol,Any}(_sb_inner_data(:gmrf, value) for value in raw)
@@ -505,6 +529,9 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
     # fitted metadata, so replay and descriptions agree with the emitted law.
     prior_keys = (:sigma_prior, :spatial_prior, :temporal_prior)
     priors = map(prior_keys, (:sigma, :spatial_length, :temporal_length)) do key, slot
+        # A spatial field keeps its constant temporal length (no address reaches it).
+        slot === :temporal_length && arguments.time === nothing &&
+            return getproperty(prepared.state, key)
         cfg = _sb_term_cfg(term_overrides, term, slot)
         _sb_refuse_derived(cfg, "a `gmrf` parameter")
         isnothing(cfg) ? getproperty(prepared.state, key) :
@@ -515,7 +542,7 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
     state = prepared.state
     stem = Symbol("gmrf_", target, "_", join(prepared.source, "_"))
     _sb_record_term_binding!(data, stem, target, term; scope=term_scope,
-        family=:gmrf, term_label=stem, term_parameters=_BRM_GMRF_PARAMETER_BINDINGS)
+        family=:gmrf, term_label=stem, term_parameters=_brm_gmrf_parameter_bindings(term))
     field_data = _sb_gmrf_data(prepared)
     keys_ = NamedTuple{keys(field_data)}(map(key -> Symbol(stem, :_, key), keys(field_data)))
     for (name, value) in pairs(field_data)

@@ -11299,7 +11299,7 @@ Base.@nospecializeinfer function _sb_collect_hyper_plans(@nospecialize(brmi::BRM
         # exists only on `gp`/`hsgp`, so anything else fails here first.
         component = length(address) >= 4 ? address[4] : nothing
         slots = filter(s -> s.class === class && s.component === component,
-                       _brm_term_prior_slots(getf(term)))
+                       _brm_term_prior_slots(term))
         isempty(slots) && error(
             "$prefix: `$spelling` — `$(nameof(getf(term)))` has no " *
             "$(_brm_term_prior_class(Val(class))) to predict")

@@ -789,7 +789,9 @@ _brmd_builtin_call(::typeof(cdar),c)=haskey(c.keywords,:cor) ? BRMDescriptionFra
     BRMDescriptionFragment(
     prose=(_brmd_text(c,:damped_walk_independent),),
     equations=("\\delta_1=\\sigma z_1,\\quad\\delta_t=\\rho\\delta_{t-1}+\\sigma\\sqrt{1-\\rho^2}z_t,\\quad z_t\\sim\\mathcal N(0,I)",),covers=(c.id,))
-_brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
+# A spatial field (`gmrf((east, north); …)`) has no time axis and one channel.
+_brmd_builtin_call(::typeof(gmrf),c)=length(c.arguments)==1 ? _brmd_spatial_gmrf(c) :
+    haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
     prose=(_brmd_text(c,:space_time_gmrf_multiresolution),),
     equations=("f(s,t,c)=\\sigma\\sum_k b_{sk}(\\ell_s)z_k(t,c),\\quad\\sum_k b_{sk}^2=1",
         "\\operatorname{Cov}(f(s,t,c),f(s',t',c'))=\\sigma^2(b_s^\\mathsf{T}b_{s'})\\exp(-|t-t'|/\\ell_t)\\Omega_{cc'},\\quad\\rho=2\\ell_s"),
@@ -803,6 +805,21 @@ _brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:multiresolution) ? BRMDe
     equations=("K=\\kappa^2 C+G,\\quad Q_s=\\frac{KC^{-1}K}{4\\pi\\kappa^2},\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
         "a_t=\\exp[-(t_t-t_{t-1})/\\ell_t],\\quad u_1\\sim\\mathcal N(0,\\Omega\\otimes Q_s^{-1}),\\quad u_t\\mid u_{t-1}\\sim\\mathcal N(a_tu_{t-1},(1-a_t^2)\\Omega\\otimes Q_s^{-1})",
         "f_i=\\sigma\\sum_{v\\in\\triangle_i}w_{iv}u_{v,c_i,t_i},\\quad\\sum_v w_{iv}=1"),
+    covers=(c.id,))
+_brmd_spatial_gmrf(c)=haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
+    prose=(_brmd_text(c,:spatial_gmrf_multiresolution),),
+    equations=("f(s)=\\sigma\\sum_k b_{sk}(\\ell_s)z_k,\\quad\\sum_k b_{sk}^2=1,\\quad z_k\\sim\\mathcal N(0,1)",
+        "\\operatorname{Cov}(f(s),f(s'))=\\sigma^2 b_s^\\mathsf{T}b_{s'},\\quad\\rho=2\\ell_s"),
+    covers=(c.id,)) : haskey(c.keywords,:neighbors) ? BRMDescriptionFragment(
+    prose=(_brmd_text(c,:spatial_gmrf_vecchia),),
+    equations=("K_{ij}=M_1(\\kappa r_{ij}),\\quad M_1(x)=xK_1(x),\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
+        "x_i\\mid x_{N(i)}\\sim\\mathcal N(b_i^{\\mathsf T}x_{N(i)},F_i),\\quad b_i=K_{N(i)N(i)}^{-1}K_{N(i)i},\\quad F_i=1-K_{iN(i)}b_i",
+        "f_i=\\sigma x_i"),
+    covers=(c.id,)) : BRMDescriptionFragment(
+    prose=(_brmd_text(c,:spatial_gmrf),),
+    equations=("K=\\kappa^2 C+G,\\quad Q_s=\\frac{KC^{-1}K}{4\\pi\\kappa^2},\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
+        "u\\sim\\mathcal N(0,Q_s^{-1})",
+        "f_i=\\sigma\\sum_{v\\in\\triangle_i}w_{iv}u_v,\\quad\\sum_v w_{iv}=1"),
     covers=(c.id,))
 # Temporal terms require their recurrence, rather than just a term caption.
 _brmd_builtin_call(::typeof(rw),c) = BRMDescriptionFragment(
