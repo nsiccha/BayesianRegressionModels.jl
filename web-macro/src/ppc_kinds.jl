@@ -331,53 +331,53 @@ posterior_spec(::PPCKind, long, df, obs_y; title) = nothing
 
 function prior_spec(p::ScalarPPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) * AoG.mapping(:y, group=:draw => nonnumeric) *
-        AoG.visual(ECDFPlot; opacity=0.3) *
+    vdata(pred) * mapping(:y, group=:draw => nonnumeric) *
+        visual(ECDFPlot; opacity=0.3) *
         config(title=title)
 end
 function posterior_spec(p::ScalarPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    pred_layer = AoG.data(pred) *
-        AoG.mapping(:y, group=:draw => nonnumeric) *
-        AoG.visual(ECDFPlot; opacity=0.3)
+    pred_layer = vdata(pred) *
+        mapping(:y, group=:draw => nonnumeric) *
+        visual(ECDFPlot; opacity=0.3)
     spec = p.is_primary ?
         pred_layer +
-            AoG.data(obs_table(p, df, obs_y)) * AoG.mapping(:y) *
-                AoG.visual(ECDFPlot; color="black", strokeWidth=2) :
+            vdata(obs_table(p, df, obs_y)) * mapping(:y) *
+                visual(ECDFPlot; color="black", strokeWidth=2) :
         pred_layer
     spec * config(title=title)
 end
 
 function prior_spec(p::ScalarRePPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) *
-        AoG.mapping(:y, row=:group => nonnumeric, group=:draw => nonnumeric) *
-        AoG.visual(ECDFPlot; opacity=0.3) *
+    vdata(pred) *
+        mapping(:y, row=:group => nonnumeric, group=:draw => nonnumeric) *
+        visual(ECDFPlot; opacity=0.3) *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 function posterior_spec(p::ScalarRePPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    pred_layer = AoG.data(pred) *
-        AoG.mapping(:y, row=:group => nonnumeric, group=:draw => nonnumeric) *
-        AoG.visual(ECDFPlot; opacity=0.3)
+    pred_layer = vdata(pred) *
+        mapping(:y, row=:group => nonnumeric, group=:draw => nonnumeric) *
+        visual(ECDFPlot; opacity=0.3)
     spec = p.is_primary ?
         pred_layer +
-            AoG.data(obs_table(p, df, obs_y)) *
-                AoG.mapping(:y, row=:group => nonnumeric) *
-                AoG.visual(ECDFPlot; color="black", strokeWidth=2) :
+            vdata(obs_table(p, df, obs_y)) *
+                mapping(:y, row=:group => nonnumeric) *
+                visual(ECDFPlot; color="black", strokeWidth=2) :
         pred_layer
     spec * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 
 function prior_spec(p::LinearPPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) * AoG.mapping(:x, :y, group=:draw) * lineribbon() *
+    vdata(pred) * mapping(:x, :y, group=:draw) * lineribbon() *
         config(title=title)
 end
 function posterior_spec(p::LinearPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    p.is_primary || return AoG.data(pred) *
-        AoG.mapping(:x, :y, group=:draw) * lineribbon() *
+    p.is_primary || return vdata(pred) *
+        mapping(:x, :y, group=:draw) * lineribbon() *
         config(title=title)
     obs = obs_table(p, df, obs_y)
     ppc_overlay(obs, pred; x=:x, y=:y, group=:draw) * config(title=title)
@@ -385,15 +385,15 @@ end
 
 function prior_spec(p::LinearRePPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) *
-        AoG.mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
+    vdata(pred) *
+        mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
         lineribbon() *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 function posterior_spec(p::LinearRePPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    p.is_primary || return AoG.data(pred) *
-        AoG.mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
+    p.is_primary || return vdata(pred) *
+        mapping(:x, :y, group=:draw, row=:group => nonnumeric) *
         lineribbon() *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
     obs = obs_table(p, df, obs_y)
@@ -403,40 +403,40 @@ end
 
 function prior_spec(p::CategoricalPPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) *
-        AoG.mapping(:y, row=:level => nonnumeric, group=:draw => nonnumeric) *
-        AoG.visual(ECDFPlot; opacity=0.3) *
+    vdata(pred) *
+        mapping(:y, row=:level => nonnumeric, group=:draw => nonnumeric) *
+        visual(ECDFPlot; opacity=0.3) *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 function posterior_spec(p::CategoricalPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    pred_layer = AoG.data(pred) *
-        AoG.mapping(:y, row=:level => nonnumeric, group=:draw => nonnumeric) *
-        AoG.visual(ECDFPlot; opacity=0.3)
+    pred_layer = vdata(pred) *
+        mapping(:y, row=:level => nonnumeric, group=:draw => nonnumeric) *
+        visual(ECDFPlot; opacity=0.3)
     spec = p.is_primary ?
         pred_layer +
-            AoG.data(obs_table(p, df, obs_y)) *
-                AoG.mapping(:y, row=:level => nonnumeric) *
-                AoG.visual(ECDFPlot; color="black", strokeWidth=2) :
+            vdata(obs_table(p, df, obs_y)) *
+                mapping(:y, row=:level => nonnumeric) *
+                visual(ECDFPlot; color="black", strokeWidth=2) :
         pred_layer
     spec * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 
 function prior_spec(p::MultiContinuousPPC, long, df; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    AoG.data(pred) * AoG.mapping(:x, :y, group=:draw, row=:predictor) *
+    vdata(pred) * mapping(:x, :y, group=:draw, row=:predictor) *
         lineribbon() *
         config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end
 function posterior_spec(p::MultiContinuousPPC, long, df, obs_y; title)
     pred = pred_table(p, long, df); isnothing(pred) && return nothing
-    pred_layer = AoG.data(pred) *
-        AoG.mapping(:x, :y, group=:draw, row=:predictor) * lineribbon()
+    pred_layer = vdata(pred) *
+        mapping(:x, :y, group=:draw, row=:predictor) * lineribbon()
     spec = p.is_primary ?
         pred_layer +
-            AoG.data(obs_table(p, df, obs_y)) *
-                AoG.mapping(:x, :y, row=:predictor) *
-                AoG.visual(Scatter; color="black") :
+            vdata(obs_table(p, df, obs_y)) *
+                mapping(:x, :y, row=:predictor) *
+                visual(Scatter; color="black") :
         pred_layer
     spec * config(title=title, facet=(; linkxaxes=:none, linkyaxes=:none))
 end

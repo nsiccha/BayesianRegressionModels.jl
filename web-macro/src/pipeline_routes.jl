@@ -163,33 +163,33 @@
             # overlay vertical rules at truth values, colored by :index to
             # match the base layer's (nominal-sorted) coloring.
             overlay_xy    = isnothing(truth) ? nothing :
-                AoG.data(truth) * AoG.mapping(:index, :truth, row=:param) *
-                AoG.visual(AoG.Scatter; color=:black)
+                vdata(truth) * mapping(:index, :truth, row=:param) *
+                visual(Scatter; color=:black)
             overlay_vrule = isnothing(truth) ? nothing :
-                AoG.data(truth) * AoG.mapping(:truth; row=:param,
-                                               color=:index => nonnumeric) *
-                AoG.visual(VLines)
+                vdata(truth) * mapping(:truth; row=:param,
+                                       color=:index => nonnumeric) *
+                visual(VLines)
             add(spec, overlay) = isnothing(overlay) ? spec : spec + overlay
-            spec_pi = add(AoG.data(summary) *
-                          AoG.mapping(:index, :median, row=:param) *
+            spec_pi = add(vdata(summary) *
+                          mapping(:index, :median, row=:param) *
                           pointinterval(; bands, orientation=:vertical),
                           overlay_xy) *
                       config(title=pi_title, facet=(; linkyaxes=:none))
-            spec_lr = add(AoG.data(summary) *
-                          AoG.mapping(:index, :median, row=:param) *
+            spec_lr = add(vdata(summary) *
+                          mapping(:index, :median, row=:param) *
                           lineribbon(; bands),
                           overlay_xy) *
                       config(title=lr_title, facet=(; linkyaxes=:none))
-            spec_hist = add(AoG.data(long) *
-                            AoG.mapping(:value; row=:param,
-                                        color=:index => nonnumeric) *
-                            AoG.visual(ECDFPlot),
+            spec_hist = add(vdata(long) *
+                            mapping(:value; row=:param,
+                                    color=:index => nonnumeric) *
+                            visual(ECDFPlot),
                             overlay_vrule) *
                         config(title=ecdf_title, facet=(; linkxaxes=:none))
-            spec_den = add(AoG.data(long) *
-                           AoG.mapping(:value; row=:param,
-                                       color=:index => nonnumeric) *
-                           AoG.histogram(; bins=30),
+            spec_den = add(vdata(long) *
+                           mapping(:value; row=:param,
+                                   color=:index => nonnumeric) *
+                           histogram(; bins=30),
                            overlay_vrule) *
                        config(title=den_title, facet=(; linkxaxes=:none))
             tabs = tabset(
