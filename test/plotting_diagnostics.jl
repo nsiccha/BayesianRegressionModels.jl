@@ -11,11 +11,18 @@ function objects(value)
     end
 end
 
-# Inline data tables: `values` holding row objects. AoV also writes `values` on
-# an axis that lists its ticks (every log axis since AoV 0.2.40), so a bare
-# `haskey(d, "values")` can find a tick list beside the table.
+# Inline data tables: `values` holding row objects, outside AoV's `_aov*`
+# runtime records (a summarised figure keeps a copy of its rows in
+# `_aovSummary`). AoV also writes `values` on an axis that lists its ticks
+# (every log axis since AoV 0.2.40), so a bare `haskey(d, "values")` can find a
+# tick list beside the table.
+spec_objects(value) = value isa AbstractDict ?
+    vcat([value], reduce(vcat, (spec_objects(v) for (k, v) in value
+                                if !startswith(string(k), "_aov")); init=Any[])) :
+    value isa AbstractVector ? reduce(vcat, (spec_objects(v) for v in value); init=Any[]) :
+    Any[]
 datatables(spec) = filter(d -> get(d, "values", nothing) isa AbstractVector &&
-    all(r -> r isa AbstractDict, d["values"]), objects(spec))
+    all(r -> r isa AbstractDict, d["values"]), spec_objects(spec))
 
 @testset "optional AoV diagnostic specifications" begin
     @test !isnothing(Base.get_extension(BayesianRegressionModels,
