@@ -521,6 +521,26 @@ end
         @test p.nonfinite == q.nonfinite == 0
         @test p.unconverged == q.unconverged == 0
     end
+    # A sum-to-zero walk's level is held by its soft sum the same way.
+    walk = let rng = Xoshiro(5), t = repeat(1:15, inner=2)
+        (; t, y=[rand(rng, Poisson(exp(0.5 + 0.3sin(s / 3)))) for s in t])
+    end
+    rw = RKBRMI(@brm walk begin
+        log(mu) ~ 1 + rw(t; sum_to_zero = true)
+        effect(mu, :) ~ Normal(0.0, 10.0)
+        y ~ Poisson(mu)
+    end)
+    for integrate in ((:t,), (:t, :coefficients))
+        q = spl_problem(rw, integrate)
+        @test length(q.wcols) == 1
+        for s in (-0.5, -20.0, -30.0)
+            φ = fill(0.1, length(q.population))
+            φ[findfirst(==(Symbol("rw_mu_t.sigma")), q.names)] = s
+            value, gradient = LogDensityProblems.logdensity_and_gradient(q, φ)
+            @test isfinite(value)
+            @test gradient ≈ spl_fd(q, φ) rtol=1e-6 atol=1e-6
+        end
+    end
     # The blockwise step's per-block prior values (`fb`): moving one step
     # block's effects changes the whole prior by exactly that block's change.
     # The soft sums reach the blocks their `wsblocks` name (its counter once
