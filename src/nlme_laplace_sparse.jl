@@ -1356,16 +1356,17 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
         end
         for e in axes(b.edges, 2)
             i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
-            w = b.weights[e]
+            # the edge's weight (`w` counts the soft sums, for `p.wsblocks`)
+            we = b.weights[e]
             d = z[i] - z[j]
-            _brm_spl_add_value!(fc, correction, p.component[i], -w * d^2 / 2)
+            _brm_spl_add_value!(fc, correction, p.component[i], -we * d^2 / 2)
             if fb !== nothing
-                fb[p.sblock[i]] -= w * d^2 / 2
-                p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= w * d^2 / 2)
+                fb[p.sblock[i]] -= we * d^2 / 2
+                p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= we * d^2 / 2)
             end
             if g !== nothing
-                g[i] -= w * d
-                g[j] += w * d
+                g[i] -= we * d
+                g[j] += we * d
             end
         end
         for (c, levels) in enumerate(b.sums)
@@ -1402,23 +1403,52 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
     nothing
 end
 
-# With the factor F of A = h − U Λ Uᵀ (h without the soft sums' rank-one
-# part): X = A⁻¹U and the Cholesky factor of G = Λ⁻¹ + UᵀX, or `nothing` when
-# no block has soft sums. Then h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ and log det h = log det A +
-# log det G + Σ log λ, with k extra solves for k sums.
+# A soft sum's anchor: its first effect, at weight ρ = λ × its size, added to
+# the factored matrix (`_brm_spl_factor!`) and taken out again by
+# `_brm_spl_woodbury`.
+_brm_spl_anchor(p::BRMSparseLaplaceProblem, c) =
+    (first(p.wcols[c]), p.wλ[c] * length(p.wcols[c]))
+
+# The soft sums' rank-one part λ u uᵀ stays out of the sparse factor, which
+# would otherwise fill in a dense block per sum. Without it, h's sparse part
+# can be singular to rounding along a sum's level: the level is then held only
+# by the soft sum when its likelihood curvature vanishes (a field's scale near
+# zero) or an integrated coefficient takes it up (an intercept beside an ICAR
+# field, snag brm-laplace-coef-2aea38ff). So F factors A = h − U Λ Uᵀ, the
+# sparse part plus each sum's anchor ρ e eᵀ, and here U = [u…, e…] with
+# Λ = diag(λ…, −ρ…): X = A⁻¹U and the LU factor of the symmetric indefinite
+# G = Λ⁻¹ + UᵀX, or `nothing` when no block has soft sums. Then
+# h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ and log det h = log det A + log|det G| + Σ log|Λ|,
+# with 2k extra solves for k sums. With A positive definite, h is positive
+# definite exactly when G has k negative eigenvalues, one per anchor
+# (`definite`; the inertia of [A U; Uᵀ −Λ⁻¹] two ways).
 function _brm_spl_woodbury(p::BRMSparseLaplaceProblem, F)
     isempty(p.wcols) && return nothing
-    U = zeros(length(p.integrated), length(p.wcols))
+    k = length(p.wcols)
+    U = zeros(length(p.integrated), 2k)
+    λ = zeros(2k)
     for (c, cols) in enumerate(p.wcols)
+        i, ρ = _brm_spl_anchor(p, c)
         U[cols, c] .= 1.0
+        U[i, k + c] = 1.0
+        λ[c] = p.wλ[c]
+        λ[k + c] = -ρ
     end
     X = F \ U
-    (; U, X, G=cholesky(Symmetric(Diagonal(1 ./ p.wλ) + U' * X)))
+    G = Diagonal(1 ./ λ) + U' * X
+    G = (G + G') / 2
+    all(isfinite, G) || return (; U, X, λ, G=nothing, definite=false)
+    values = eigvals(Symmetric(G))
+    definite = count(<(0), values) == k && !any(iszero, values)
+    (; U, X, λ, G=lu(G; check=false), definite)
 end
+
+# Whether h is positive definite, from F and the soft sums' correction W.
+_brm_spl_definite(F, W) = issuccess(F) && (W === nothing || W.definite)
 
 _brm_spl_solve(F, W, b) = (x = F \ b; W === nothing ? x : x .- W.X * (W.G \ (W.U' * x)))
 _brm_spl_logdet(p::BRMSparseLaplaceProblem, F, W) =
-    logdet(F) + (W === nothing ? 0.0 : logdet(W.G) + sum(log, p.wλ))
+    logdet(F) + (W === nothing ? 0.0 : first(logabsdet(W.G)) + sum(x -> log(abs(x)), W.λ))
 
 # Each component's share of log det h, from the factor's diagonal in its
 # permuted order (h is block diagonal over the components). CHOLMOD's
@@ -1500,7 +1530,7 @@ function _brm_spl_unit_values(p::BRMSparseLaplaceProblem, state, owners, nunits)
 end
 
 # A draw from N(0, h⁻¹): x ~ N(0, A⁻¹) through A's factor, then for the soft
-# sums x − X G⁻¹ (Uᵀx + η), η ~ N(0, Λ⁻¹), whose covariance is
+# sums x − X K Uᵀx (`_brm_spl_draw_map`), whose covariance is
 # A⁻¹ − X G⁻¹ Xᵀ = h⁻¹.
 function _brm_spl_draw(p::BRMSparseLaplaceProblem, state, rng)
     state.F isa _BRMOperatorFactor && return _brm_operator_draw(state.F, rng)
@@ -1509,7 +1539,21 @@ function _brm_spl_draw(p::BRMSparseLaplaceProblem, state, rng)
     x = state.F.UP \ randn(rng, length(p.integrated))
     W = state.W
     W === nothing && return x
-    x .- W.X * (W.G \ (W.U' * x .+ randn(rng, length(p.wλ)) ./ sqrt.(p.wλ)))
+    x .- W.X * (_brm_spl_draw_map(W) * (W.U' * x))
+end
+
+# K such that (I − X K Uᵀ) A⁻¹ (I − X K Uᵀ)ᵀ = A⁻¹ − X G⁻¹ Xᵀ, which holds
+# for symmetric K with 2K − K S K = G⁻¹, S = UᵀX = R Rᵀ: K = R⁻ᵀ M R⁻¹ with
+# M = I − (I − Rᵀ G⁻¹ R)^½. Λ may be indefinite (the anchors), so no draw
+# η ~ N(0, Λ⁻¹) enters. I − Rᵀ G⁻¹ R = Rᵀ (S⁻¹ − G⁻¹) R and
+# S − S G⁻¹ S = Uᵀ h⁻¹ U is positive semidefinite, so the root is real; its
+# eigenvalues are clamped at zero against rounding.
+function _brm_spl_draw_map(W)
+    R = cholesky(Symmetric((W.U' * W.X + W.X' * W.U) / 2)).L
+    T = R' * (W.G \ Matrix(R))
+    E = eigen(Symmetric(I - (T + T') / 2))
+    M = I - E.vectors * Diagonal(sqrt.(max.(E.values, 0.0))) * E.vectors'
+    R' \ (M / R)
 end
 
 # A shift for every effect: one number for all, or one per component.
@@ -1517,14 +1561,23 @@ _brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::Real) = shift
 _brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::AbstractVector) =
     shift[p.component]
 
-# The factor of h + shift I, reusing the symbolic analysis. `shift` is one
-# number, or one per component (`p.components`; h is block diagonal over them).
+# The factor of h + shift I, plus each soft sum's anchor (`_brm_spl_anchor`,
+# which `_brm_spl_woodbury` takes out again), reusing the symbolic analysis.
+# `shift` is one number, or one per component (`p.components`; h is block
+# diagonal over them).
 function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h; shift=0.0)
     p.algebra === nothing || return _brm_operator_factor(p, h; shift)
-    if shift isa AbstractVector
+    if shift isa AbstractVector || !isempty(p.wcols)
         hs = copy(h)
-        nonzeros(hs)[p.diagonal] .+= _brm_spl_effect_shift(p, shift)
-        H = Hermitian(hs, :L); shift = 0.0
+        if shift isa AbstractVector
+            nonzeros(hs)[p.diagonal] .+= _brm_spl_effect_shift(p, shift)
+            shift = 0.0
+        end
+        for c in eachindex(p.wcols)
+            i, ρ = _brm_spl_anchor(p, c)
+            nonzeros(hs)[p.diagonal[i]] += ρ
+        end
+        H = Hermitian(hs, :L)
     else
         H = Hermitian(h, :L)
     end
@@ -1542,7 +1595,10 @@ const _BRM_SPL_SHIFTS = ntuple(k -> 10.0^(k - 5), 12)
 
 # Whether component `members`' block of h + μ I is positive definite (its
 # soft sums' rank-one part, which `_brm_spl_woodbury` keeps out of the
-# factor, only adds a positive semidefinite term).
+# factor, only adds a positive semidefinite term). A sufficient test: a block
+# whose sparse part is singular only along a sum's level reads as indefinite
+# here and takes a shift, though h itself is definite there; the whole-h test
+# in `_brm_spl_shifted_direction` comes first and is exact.
 _brm_spl_block_definite(p::BRMSparseLaplaceProblem, h::SparseMatrixCSC, members, μ) =
     issuccess(cholesky(Hermitian(h[members, members], :L); shift=μ, check=false))
 
@@ -1555,7 +1611,8 @@ function _brm_spl_shifted_direction(p::BRMSparseLaplaceProblem, h, g)
     p.algebra === nothing || return _brm_operator_direction(p, h, g)
     nc = length(p.components)
     F = _brm_spl_factor!(p, h)
-    issuccess(F) && return (_brm_spl_solve(F, _brm_spl_woodbury(p, F), g), zeros(nc))
+    W = issuccess(F) ? _brm_spl_woodbury(p, F) : nothing
+    _brm_spl_definite(F, W) && return (_brm_spl_solve(F, W, g), zeros(nc))
     shift = zeros(nc)
     for (c, members) in enumerate(p.components)
         _brm_spl_block_definite(p, h, members, 0.0) && continue
@@ -1565,7 +1622,9 @@ function _brm_spl_shifted_direction(p::BRMSparseLaplaceProblem, h, g)
     end
     F = _brm_spl_factor!(p, h; shift)
     issuccess(F) || return nothing
-    (_brm_spl_solve(F, _brm_spl_woodbury(p, F), g), shift)
+    W = _brm_spl_woodbury(p, F)
+    _brm_spl_definite(F, W) || return nothing
+    (_brm_spl_solve(F, W, g), shift)
 end
 
 # The direction alone (`_brm_spl_shifted_direction`).
@@ -1756,12 +1815,14 @@ function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     end
     any(>(0), view(search.stage_shifts, :, 2:length(stages))) && (p.folds += 1)
     F = _brm_spl_factor!(p, h)
-    issuccess(F) || _brm_nlme_error("brm_laplace_problem: the integrated effects' " *
-        "density has a stationary point that is not a maximum at this population point")
+    W = issuccess(F) ? _brm_spl_woodbury(p, F) : nothing
+    _brm_spl_definite(F, W) || _brm_nlme_error("brm_laplace_problem: the integrated " *
+        "effects' density has a stationary point that is not a maximum at population " *
+        "point $(repr(collect(φ)))")
     p.u[p.integrated] .= z
     u = copy(pop.uA)
     u[p.integrated] .= z
-    (; finite=true, pop..., z, u, h, F, W=_brm_spl_woodbury(p, F), iterations)
+    (; finite=true, pop..., z, u, h, F, W, iterations)
 end
 
 # One step along the Newton direction δ for the moving components, in place
