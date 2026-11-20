@@ -156,9 +156,11 @@ lowering, not `car_units`). Groupings may be crossed, nested with any number
 of levels per parent, or cut across the NLME units. The problem is then a
 [`BRMSparseLaplaceProblem`](@ref) over every other coordinate, the latent
 draws of the other groupings included. The name `:coefficients` adds the
-formula's population coefficients, each one its own integrated block. INLA
-keeps fixed effects in the latent Gaussian field the same way. Every
-coefficient must have a Normal prior of constant mean and scale. A field's
+formula's population coefficients, each one its own integrated block (each
+level of a factor block with per-level priors too). INLA keeps fixed effects
+in the latent Gaussian field the same way. Every coefficient must have a
+Normal prior of constant mean and scale: literal numbers, scalar data fields
+or `name = constant(expr)` values. A field's
 per-component soft sum-to-zero stays out of the sparse factor (Woodbury);
 every component must be read by some row. Every observation is a regression response of one of the
 structured problem's four families, whose rows it shares, or sits in a

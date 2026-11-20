@@ -10,7 +10,9 @@
 #     at d = 3);
 #   - formula coefficients integrate as blocks (`integrate = (..., :coefficients)`):
 #     exact on a Normal model, differentiable on a count model, admitted by
-#     named plans and never by `:auto`, refused for non-Normal priors;
+#     named plans and never by `:auto`, refused for non-Normal priors, with
+#     priors read from data fields, `constant`s and per-level data vectors
+#     integrating exactly as their literal twins;
 #   - the refusals name their reason.
 # RUN: julia --project=test test/laplace_integration.jl
 using WarmupHMC   # loads Optim, which brm_laplace_mode needs
@@ -291,6 +293,88 @@ lint_fd(f, x; h=1e-5) = [(f(x .+ h .* (1:length(x) .== j)) - f(x .- h .* (1:leng
     outer = brm_laplace_integration(pa; point=pa_point, design=:ccd, draws=2000, rng=Xoshiro(4))
     ia = [findfirst(==(n), BRM._rk_layout_coordinate_names(rk)) for n in coefficient]
     @test vec(mean(out.draws[ia, :]; dims=2)) ≈ vec(mean(outer.draws[ia, :]; dims=2)) atol=0.1
+end
+
+# Prior values are runtime model inputs (user principle `runtime-model-dimensions`),
+# so a coefficient prior read from the data integrates as its literal twin does
+# (snag brm-coefficients-b99ddbca), and so do a factor block's per-level priors.
+@stestset "coefficient priors from data integrate as their literal twins" begin
+    d = LINT_COEF_DATA
+    twin = RKBRMI(@brm (; d.a, d.x, d.y) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | a)
+        effect(mu, Intercept) ~ Normal(0.5, 10.0)
+        effect(mu, x) ~ Normal(-0.25, 2.0)
+        y ~ Normal(mu, sigma)
+    end)
+    fields = RKBRMI(@brm (; d.a, d.x, d.y, loc=0.5, s=10.0, locx=-0.25, sx=2.0) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | a)
+        effect(mu, Intercept) ~ Normal(loc, s)
+        effect(mu, x) ~ Normal(locx, sx)
+        y ~ Normal(mu, sigma)
+    end)
+    constants = RKBRMI(@brm (; d.a, d.x, d.y, half=5.0) begin
+        sigma ~ Exponential(1)
+        s = constant(2 * half)
+        sx = constant(half - 3.0)
+        mu ~ 1 + x + (1 | a)
+        effect(mu, Intercept) ~ Normal(0.5, s)
+        effect(mu, x) ~ Normal(-0.25, sx)
+        y ~ Normal(mu, sigma)
+    end)
+    pt = brm_laplace_problem(twin; ad_backend=NLME_AD, integrate=(:a, :coefficients))
+    for rk in (fields, constants)
+        p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:a, :coefficients))
+        @test p.names == pt.names
+        for phi in ([0.1, -0.3], [0.4, 0.2])
+            v, g = LogDensityProblems.logdensity_and_gradient(p, phi)
+            vt, gt = LogDensityProblems.logdensity_and_gradient(pt, phi)
+            @test v == vt && g == gt
+        end
+        plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=(:a, :coefficients), draws=8)
+        @test all(t -> t.admitted, plan.terms)
+    end
+    # a factor block's per-level priors from a data vector: one block per level,
+    # exact on a Normal model (closed form in the coefficients)
+    g = repeat(["g1", "g2", "g3"], 7)[1:20]
+    rf = RKBRMI(@brm (; d.a, g, d.y, w_scale=[1.0, 2.0]) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + g + (1 | a)
+        effect(mu, g) .~ Normal.(0.0, w_scale)
+        y ~ Normal(mu, sigma)
+    end)
+    p = brm_laplace_problem(rf; ad_backend=NLME_AD, integrate=(:a, :coefficients))
+    coefficient = [b.declaration for b in p.blocks if b.group === :coefficients]
+    @test coefficient == [Symbol("mu_g.1"), Symbol("mu_g.2"), :mu_Intercept]
+    @test [c.prior for c in BRM._brm_spl_coefficient_records(rf)] ==
+        [:(Normal(0.0, 1.0)), :(Normal(0.0, 2.0)), :(Normal(0.0, 1.0))]
+    pa = brm_laplace_problem(rf; ad_backend=NLME_AD, integrate=(:a,))
+    ib = [findfirst(==(c), pa.names) for c in coefficient]
+    io = [findfirst(==(n), pa.names) for n in p.names]
+    function closed(phi)
+        full(β) = (x = zeros(length(pa.population)); x[io] .= phi; x[ib] .= β; x)
+        gβ(β) = last(LogDensityProblems.logdensity_and_gradient(pa, full(β)))[ib]
+        E = Matrix(1.0I, 3, 3)
+        H = hcat([(gβ(1e-4 .* E[:, j]) .- gβ(-1e-4 .* E[:, j])) ./ 2e-4 for j in 1:3]...)
+        H = (H + H') / 2
+        β = -(H \ gβ(zeros(3)))
+        LogDensityProblems.logdensity(pa, full(β)) + 3 / 2 * log(2π) - logdet(-H) / 2
+    end
+    for phi in ([0.1, -0.3], [0.4, 0.2])
+        v, gr = LogDensityProblems.logdensity_and_gradient(p, phi)
+        @test v ≈ closed(phi) atol=1e-9
+        @test gr ≈ lint_fd(x -> LogDensityProblems.logdensity(p, x), phi) atol=1e-6
+    end
+    # another per-level family is refused by name, as a coefficient's is
+    rc = RKBRMI(@brm (; d.a, g, d.y, w_scale=[1.0, 2.0]) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + g + (1 | a)
+        effect(mu, g) .~ Cauchy.(0.0, w_scale)
+        y ~ Normal(mu, sigma)
+    end)
+    @test_throws "the coefficient `g_lvl_2` of `mu` has the prior `Cauchy(0.0, 1.0)`" brm_laplace_problem(rc;
+        ad_backend=NLME_AD, integrate=(:a, :coefficients))
 end
 
 @stestset "refusals name their reason" begin

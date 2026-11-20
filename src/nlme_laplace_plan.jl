@@ -219,14 +219,14 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     # Formula coefficients are terms only when `:coefficients` is named, so an
     # automatic plan never integrates them (decision `0r49iwd`).
     coefficients = :coefficients in forced || :coefficients in sampled
-    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT ||
-        (coefficients && r.kind === :population)]
+    records = [c for r in _rk_coordinate_records(backend) for c in
+        (r.kind in _BRM_SPL_LATENT ? [r] : coefficients ? _brm_spl_coefficient_records(r) : [])]
     isempty(records) && _brm_nlme_error("brm_laplace_plan: the model has no random-effect " *
         "block, `cdar` or `rw` walk, `car` field or declared vector to integrate")
     terms = map(records) do r
         (; declaration=_brm_spl_record_declaration(r), grouping=_brm_spl_record_group(r),
             kind=r.kind === :stratified_ranef ? :ranef : r.kind,
-            never=_brm_plan_never(r))
+            never=_brm_plan_never(backend, r))
     end
     outer = _brm_spl_gaussian_outer(backend, [t for t in terms if t.never === nothing])
     terms = [any(d -> _brm_nlme_owned(d, t.declaration), outer) ?
@@ -364,7 +364,7 @@ _brm_plan_entry(t, class, reason, admitted, importance_ess) = (; t.declaration,
     t.grouping, t.kind, class, reason, admitted, importance_ess)
 
 # Why the sparse Laplace never integrates a record, or `nothing`.
-function _brm_plan_never(r)
+function _brm_plan_never(backend, r)
     r.kind === :vector && get(r, :gaussian, nothing) === nothing &&
         return "the declared vector does not have an unconstrained independent Normal prior"
     r.kind === :stratified_ranef && return "a stratified block is not integrated yet"
@@ -372,7 +372,7 @@ function _brm_plan_never(r)
         return "a Student-t block's draws are not Gaussian"
     r.kind === :car && r.separation !== nothing &&
         return "a `car_units` field's draws are not integrated"
-    r.kind === :population && _brm_spl_coefficient_prior(r) === nothing &&
+    r.kind === :population && _brm_spl_coefficient_prior(backend, r) === nothing &&
         return "its prior `$(r.prior)` is not a Normal of constant mean and scale"
     nothing
 end

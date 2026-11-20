@@ -376,9 +376,9 @@ function _brm_ladder_integration(backend, p, rungs, integration; ad_backend, dra
     keywords = Base.structdiff(integration, NamedTuple{(:coefficients,)})
     bound = get(integration, :max_dimension, 10)
     records = get(integration, :coefficients, true) ?
-        [r for r in _rk_coordinate_records(backend) if r.kind === :population] : NamedTuple[]
+        _brm_spl_coefficient_records(backend) : NamedTuple[]
     names = Symbol[_brm_spl_coefficient_name(r) for r in records]
-    bad = [r for r in records if _brm_spl_coefficient_prior(r) === nothing]
+    bad = [r for r in records if _brm_spl_coefficient_prior(backend, r) === nothing]
     coefficient_reason = !get(integration, :coefficients, true) ?
             "the call passes integration = (; coefficients = false)" :
         isempty(records) ? "the model has no population coefficient with its own prior" :
