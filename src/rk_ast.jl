@@ -164,16 +164,22 @@ function _RKSourceInputs(emitted::_RKEmittedProgram)
     foreach(stmt -> _rk_source_outputs!(declared, stmt), emitted.main.args)
     _RKSourceInputs(computed, read, setdiff!(_rk_program_value_reads(emitted), declared))
 end
-_rk_source_data_columns(plan, emitted::_RKEmittedProgram) =
-    _rk_source_data_columns(plan, _RKSourceInputs(emitted))
+_rk_source_data_columns(plan, emitted::_RKEmittedProgram; frozen=nothing) =
+    _rk_source_data_columns(plan, _RKSourceInputs(emitted); frozen)
+_rk_source_data_columns(rk::RKBRMI, emitted::_RKEmittedProgram) =
+    _rk_source_data_columns(rk.plan, emitted;
+        frozen=isnothing(rk.fitted) ? nothing : rk.fitted.frozen)
 
 # Bind only source inputs. A column describing geometry must never shadow
 # the emitted assignment that owns its executable value.
-function _rk_source_data_columns(plan, source::_RKSourceInputs)
+function _rk_source_data_columns(plan, source::_RKSourceInputs; frozen=nothing)
     (; computed, read) = source
     columns = Dict{Symbol,Any}()
     for (name, value) in plan.columns
         (name in computed || !(name in read)) && continue
+        # A frozen fitted value supplies this read even on a prediction design
+        # which omits the response column used to fit it.
+        frozen !== nothing && haskey(frozen.inputs, name) && continue
         _rk_bind_source_column!(columns, name, value, plan)
     end
     for (name, value) in _rk_extent_bindings(plan)
@@ -1409,10 +1415,11 @@ end
 function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
     if parameter.family === :ordered_normal
         return Expr(:call, :~, parameter.name, Expr(:call, :Ordered,
-            Expr(:call, :Normal, parameter.args...), parameter.size))
+            Expr(:call, :Normal, parameter.args...), _rk_threshold_extent(parameter)))
     elseif parameter.family === :vector_normal
         return Expr(:call, :.~, Expr(:ref, parameter.name,
-            Expr(:call, :(:), 1, parameter.size)), _rk_ast_dotted(:Normal, parameter.args...))
+            Expr(:call, :(:), 1, _rk_threshold_extent(parameter))),
+            _rk_ast_dotted(:Normal, parameter.args...))
     elseif parameter.family === :elementwise
         # A declared vector: its element's scalar law, broadcast.
         law = last(_rk_ast_sampled(only(parameter.args)).args)
@@ -2611,9 +2618,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         response_index = findfirst(r -> r.threshold_coefs === vector_parameter.name, plan.responses)
         if response_index !== nothing
             response = plan.responses[response_index]
+            stages = _rk_threshold_extent(plan.vector_parameters, response.thresholds)
             push!(stmts, Expr(:call, :.~, Expr(:ref, vector_parameter.name,
                 Expr(:call, :(:), 1, length(response.threshold_columns)),
-                Expr(:call, :(:), 1, response.n_levels - 1)),
+                Expr(:call, :(:), 1, stages)),
                 _rk_ast_dotted(:Normal, vector_parameter.args...)))
             _rk_coordinate_record!(coordinates, (; kind=:threshold_coefficients,
                 declaration=vector_parameter.name, response=response.response,

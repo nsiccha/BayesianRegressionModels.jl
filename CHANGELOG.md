@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.343
+
+- RKBRMI uses one emitted and lowered program across category counts for
+  cumulative ordinal, stopping-ratio ordinal and ordered logistic responses.
+  The fitted count sizes the thresholds and any per-threshold coefficients.
+  **Breaking:** For these implicit-threshold models, re-export older
+  `BRMFittedState` objects from their training fits to replay the new program.
+
 ## 0.2.342
 
 - `brm_description` uses the prepared model's population coefficient labels

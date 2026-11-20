@@ -802,29 +802,34 @@ end
 # thresholds (`_brm_prepare_explicit_ordinal`), or a cell's
 # (`_rk_kernel_observation_distribution`); all carry `discrimination=`.
 function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
-        distribution, bindings, taken; coordinates=nothing, definitions=nothing)
+        distribution, bindings, taken, vectors; coordinates=nothing, definitions=nothing)
     length(distribution.args) == 4 ||
         return _rk_ast_value_call(Ordinal, distribution, bindings, taken)
     structure, link, eta, thresholds = distribution.args
     keys(distribution.kwargs) == (:discrimination,) || error(
         "RK backend: response `$(observation.name)` ordinal keywords " *
         "$(keys(distribution.kwargs)) are not a prepared ordinal record")
-    eta, effects = _rk_ast_value_threshold_effects!(statements, observation.name,
-        eta, bindings, taken; coordinates)
+    eta, effects = if eta isa _BRMPreparedExpr && eta.callable === _brm_threshold_eta
+        extent = _rk_threshold_extent(vectors, thresholds.name)
+        _rk_ast_value_threshold_effects!(statements, observation.name, eta, extent,
+            bindings, taken; coordinates)
+    else
+        eta, ()
+    end
     _rk_ast_dotted(:Ordinal, Expr(:call, nameof(typeof(structure))),
         Expr(:call, nameof(typeof(link))), _rk_value_expr!(bindings, eta, taken),
         Expr(:call, :Ref, _rk_value_expr!(bindings, thresholds, taken)),
         _rk_value_expr!(bindings, distribution.kwargs.discrimination, taken), effects...)
 end
 _rk_ast_value_distribution!(statements, callable, observation, distribution, bindings,
-    taken; coordinates=nothing, definitions=nothing) = _rk_ast_value_distribution(callable, distribution,
+    taken, vectors; coordinates=nothing, definitions=nothing) = _rk_ast_value_distribution(callable, distribution,
     bindings, taken)
 
 # Keep the native RKPPL mixture head. Each component uses the same constructor
 # lowering or density-source provider as a plain observation; RK composes the
 # resulting graphs and owns their scheduling and shared-work hoisting.
 function _rk_ast_value_distribution!(statements, ::Type{<:MixtureModel}, observation,
-        distribution, bindings, taken; coordinates=nothing, definitions)
+        distribution, bindings, taken, vectors; coordinates=nothing, definitions)
     _rk_ast_mixture_distribution(distribution, bindings, taken) do k, component
         entry = _rk_emit_density_source!(definitions, bindings, taken,
             Symbol(observation.name, "_component_", k), component)
@@ -834,21 +839,14 @@ function _rk_ast_value_distribution!(statements, ::Type{<:MixtureModel}, observa
     end
 end
 
-_rk_ast_value_threshold_effects!(statements, response, eta, bindings, taken;
-    coordinates=nothing) = (eta, ())
-_rk_ast_value_threshold_effects!(statements, response, eta::_BRMPreparedExpr,
-        bindings, taken; coordinates=nothing) = _rk_ast_value_threshold_effects!(
-    statements, response, eta.callable, eta, bindings, taken; coordinates)
-_rk_ast_value_threshold_effects!(statements, response, _callable, eta, bindings, taken;
-    coordinates=nothing) = (eta, ())
-function _rk_ast_value_threshold_effects!(statements, response,
-        ::typeof(_brm_threshold_eta), eta, bindings, taken; coordinates=nothing)
+function _rk_ast_value_threshold_effects!(statements, response, eta, extent,
+        bindings, taken; coordinates=nothing)
     location, columns, coefficients, n_cut = eta.args
     names = [_rk_value_expr!(bindings, column, taken) for column in columns]
     beta = _rk_value_expr!(bindings, coefficients, taken)
     # `_BRMThresholdPrior{false}`: independent standard normals, stage-major.
     push!(statements, Expr(:call, :.~, Expr(:ref, beta,
-            Expr(:call, :(:), 1, length(names)), Expr(:call, :(:), 1, n_cut)),
+            Expr(:call, :(:), 1, length(names)), Expr(:call, :(:), 1, extent)),
         _rk_ast_dotted(:Normal, 0.0, 1.0)))
     _rk_coordinate_record!(coordinates, (; kind=:threshold_coefficients,
         declaration=beta, response, terms=Tuple(names), stages=n_cut))
@@ -1074,25 +1072,6 @@ function _rk_value_response(entry)
     _rk_value_codes_levels(entry) ? entry.prepared.response : entry.raw
 end
 
-# Per-threshold coefficients form a terms × stages matrix that only their
-# threshold-effect design reads; the response emitter declares that matrix.
-_rk_threshold_coefficients(_) = Symbol[]
-_rk_threshold_coefficients(x::Tuple) =
-    reduce(vcat, map(_rk_threshold_coefficients, x); init=Symbol[])
-_rk_threshold_coefficients(x::ExprColumn) = [_rk_threshold_coefficients(getargs(x));
-    _rk_threshold_coefficients(Tuple(values(getkwargs(x))))]
-_rk_threshold_coefficients(x::ExprColumn{typeof(_brm_threshold_eta)}) =
-    [name(getargs(x)[3])]
-
-# `_BRMThresholdPrior{O}(n)` is n independent standard normals, increasing when
-# `O`: RKPPL's `Ordered(Normal(0, 1), n)` or `c[1:n] .~ Normal.(0, 1)`.
-_rk_threshold_vector(parameter::_BRMPreparedParameter) = _rk_threshold_vector(
-    parameter.name, parameter.prior.callable, only(parameter.prior.args))
-_rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{true}}, n::Int) =
-    _RKVectorParameter(name, :ordered_normal, (0.0, 1.0), n, name)
-_rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
-    _RKVectorParameter(name, :vector_normal, (0.0, 1.0), n, name)
-
 # `referenced` plus every `=` assignment no response reads whose whole
 # dependency closure is assignments, data and names already in `referenced`
 # (user decision `0kpugvc`: an unread authored value stays a named graph
@@ -1147,10 +1126,6 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     isempty(clashes) || error(
         "RK backend: implicit response parameter(s) " *
         "$(join(sort!(collect(clashes)), ", ")) collide with a model name; rename it")
-    coefficients = Set{Symbol}(name for entry in values(leveled)
-        for name in _rk_threshold_coefficients(entry.prepared.distribution))
-    threshold_vectors = [_rk_threshold_vector(p) for p in prepared.parameters
-        if p.name in implicit_names && !(p.name in coefficients)]
     roots = Set{Symbol}(observation.key for observation in observations)
     union!(roots, value_roots)
     routes = (kernels..., submodels...)
@@ -1181,8 +1156,8 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names)
-    vectors = [_rk_plan_vector_parameters!(prepared, context.data, consts,
-        Dict{Symbol,Symbol}(), parameter_names, assignment_names); threshold_vectors]
+    vectors = _rk_plan_vector_parameters!(prepared, context.data, consts,
+        Dict{Symbol,Symbol}(), parameter_names, assignment_names)
     predictor_order = Symbol[op.name for op in program.operations
         if op.role === :predictor && op.name in referenced &&
             !any(route -> route.name === op.name, routes)]
@@ -1190,6 +1165,15 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     derived = _RKDerivedSpec[]
     taken = union(Set(predictor_order), parameter_names, assignment_names,
         Set(v.name for v in vectors), implicit_names, Set(keys(context.data)))
+    # The first implicit parameter is the threshold vector. A per-threshold
+    # coefficient matrix is declared alongside its observation.
+    for (key, entry) in leveled
+        isempty(entry.prepared.parameters) && continue
+        name, prior = first(entry.prepared.parameters)
+        family = getf(prior) === _BRMThresholdPrior{true} ? :ordered_normal : :vector_normal
+        push!(vectors, _rk_threshold_vector!(derived, columns, taken, key, entry.raw,
+            name, family, only(getargs(prior)); ordered_logit=entry.head === OrderedLogistic))
+    end
     components = _rk_predictor_components(brmi, context, predictor_order,
         columns, derived, taken, parameters)
     append!(vectors, components.vectors)
@@ -1252,10 +1236,12 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         _rk_value_codes_levels(entry) || continue
         raw = _rk_ast_fresh_name(string(key, "_raw"), taken)
         value_columns[raw] = entry.raw
-        # `OrderedLogistic` codes against 1:K, not the labels' own levels.
-        levels = entry.head === OrderedLogistic ?
-            _rk_ast_level_values(entry.prepared.fit.levels) :
-            _rk_response_level_table!(derived, value_columns, taken, key, entry.raw)
+        if entry.head === OrderedLogistic
+            # The prepared response validated these as integer codes in 1:K.
+            push!(derived, _RKDerivedSpec(key, _rk_ast_dotted(:Int, raw), key))
+            continue
+        end
+        levels = _rk_response_level_table!(derived, value_columns, taken, key, entry.raw)
         upper = entry.upper
         push!(derived, _RKDerivedSpec(key, Expr(:_rk_data_preparation,
             upper === nothing ? :brm_prepared_indices : :brm_prepared_indices_below,
@@ -1509,7 +1495,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
         base = joint ? _rk_ast_value_call(distribution.callable, distribution,
             bindings, taken; joint=true) :
             _rk_ast_value_distribution!(stmts, distribution.callable, observation,
-                distribution, bindings, taken; coordinates, definitions=defs)
+                distribution, bindings, taken, plan.regression.vector_parameters;
+                coordinates, definitions=defs)
         if modifier !== nothing
             lower = modifier.lower === nothing ? -Inf :
                 _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)

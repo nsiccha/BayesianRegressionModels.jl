@@ -327,11 +327,6 @@ const MGDATA = merge(HDATA, (; g=mod1.(eachindex(HDATA.t), 4),
 # move of the test pin switches these without an edit.
 const RK_BINDS_VALUES = pkgversion(ReactiveKernelsPPL) >= v"0.1.106"
 const RK_BINDS_SIZES = pkgversion(ReactiveKernelsPPL) >= v"0.1.108"
-# A lone simplex's Dirichlet check reads a bound concentration's length from 0.1.121
-# (ReactiveKernels snag `rkppl-dirichlet-09d87c95`); before, it writes the count. The
-# fix was claimed as 0.1.117 and landed as 0.1.121 (RK d916b305): RKPPL 0.1.117 to
-# 0.1.120 are other landings that still write it.
-const RK_READS_DIRICHLET_LENGTH = pkgversion(ReactiveKernelsPPL) >= v"0.1.121"
 
 stan_program(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=RSM).model)
 stan_inputs(brmi) = BRM.stan_data(SBBRMI(brmi; mod=RSM))
@@ -990,34 +985,26 @@ end
     # densities are RK-against-Stan parity's (`rk_parity.jl`, `mo_shared_column.jl`).
     three = merge(LDATA, (; op=[1, 2, 3, 1, 2, 3], c=[1, 2, 3, 1, 2, 3], t=[0.0, 1, 0, 1, 0, 1]))
     four = merge(LDATA, (; op=[1, 2, 3, 4, 2, 3], c=[1, 2, 3, 4, 2, 3], t=[0.0, 1, 0, 1, 0, 1]))
-    # An ordinal response's threshold count is Stan data; RKPPL's ordinal lowering
-    # takes it as an input once ReactiveKernels snag `rkppl-threshold-932a2e27`
-    # lands, so RK still spells it (`ordinal = true`).
-    # `dirichlet`: the case's simplex is one vector with a Dirichlet prior; the
-    # joint case's is a matrix of columns.
-    cases = (("mo", RSM.monotonic(:mo), false, true), ("mo1", RSM.monotonic(:mo1), false, true),
-        ("mo over one column in two predictors", RSM.joint_monotonic(), false, false),
-        ("cumulative thresholds", RSM.cumulative(), true, false),
-        ("stopping-ratio thresholds and per-threshold effects", RSM.stopping(), true, false),
-        ("ordered logistic cutpoints", RSM.ordered_logit(), true, false))
-    for (label, build, ordinal, dirichlet) in cases
+    cases = (("mo", RSM.monotonic(:mo)), ("mo1", RSM.monotonic(:mo1)),
+        ("mo over one column in two predictors", RSM.joint_monotonic()),
+        ("cumulative thresholds", RSM.cumulative()),
+        ("stopping-ratio thresholds and per-threshold effects", RSM.stopping()),
+        ("ordered logistic cutpoints", RSM.ordered_logit()))
+    for (label, build) in cases
         @testset "$label" begin
             # One Stan program; the count is Stan data.
             @test stan_program(build(three)) == stan_program(build(four))
             small, large = RKBRMI(build(three)), RKBRMI(build(four))
-            # One emitted program; the layout follows the count.
-            @test (emitted_program(small) == emitted_program(large)) broken=ordinal
+            @test emitted_program(small) == emitted_program(large)
+            @test lowered_program(small) == lowered_program(large)
             @test small.model.layout.total < large.model.layout.total
-            # The lowered program follows the size until RK's extents
-            # (ReactiveKernels snag `rkppl-sized-vect-69604d32`), and a Dirichlet
-            # check's until `RK_READS_DIRICHLET_LENGTH`.
-            @test (lowered_program(small) == lowered_program(large)) broken=!RK_BINDS_SIZES ||
-                ordinal || (dirichlet && !RK_READS_DIRICHLET_LENGTH)
             # A frozen replay keeps the fitted levels: the same layout and density.
             u = rk_point(small)
             frozen = reprocess(small, three)
             @test frozen.model.layout.total == small.model.layout.total
             @test rk_density(frozen, u) == rk_density(small, u)
+            # A design missing the fourth level still uses the four-level fit.
+            @test reprocess(large, three).model.layout.total == large.model.layout.total
             # A fresh replay takes the new count.
             @test reprocess(small, four; freeze_constants=false).model.layout.total ==
                 large.model.layout.total
