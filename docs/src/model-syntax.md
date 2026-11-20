@@ -160,9 +160,9 @@ Bind one member per record when the channels in a measurement vary between
 datasets. An `if` on the record's settings selects which declarations enter
 the model. Here the calibrated channels each get their own shift.
 
-```@example record_components
-using BayesianRegressionModels
-
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:RecordComponentGuide), raw"""
 @brm function sensor(settings)
     if settings.calibrated
         shift ~ Normal(0, settings.scale)
@@ -184,6 +184,12 @@ sensors = [(id=:left, calibrated=true, offset=0.4, scale=0.7),
            (id=:right, calibrated=false, offset=1.2, scale=0.5)]
 data = (; sensors, y=[0.2, 1.0])
 model = signals(data)
+""", :model; title="Sensor shifts selected by record", require_stan=true)
+```
+
+```@example record_components
+using BayesianRegressionModels
+model = Main.BRMDocsComparisons.example_module(:RecordComponentGuide).model
 [call.path for call in brm_components(model)]
 ```
 
@@ -198,9 +204,9 @@ To give selected instruments their own smooth time effects, put the formula
 inside the guard. Each enabled instrument supplies its time grid and basis
 size. The fixed instrument below contributes its known mean.
 
-```@example smooth_components
-using BayesianRegressionModels
-
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:SmoothComponentGuide), raw"""
 @brm function drift(instrument)
     if instrument.smooth
         trend ~ 0 + hsgp(instrument.time; k=instrument.k, c=1.5)
@@ -222,6 +228,12 @@ instruments = [(id=:early, smooth=true, time=[0.1, 0.4, 0.7], k=3),
                (id=:fixed, smooth=false, offset=0.2),
                (id=:late, smooth=true, time=[1.0, 1.3, 1.8, 2.1], k=4)]
 model = survey((; instruments, reading=[0.5, 0.3, 0.7]))
+""", :model; title="Instruments with independent time smooths", require_stan=true)
+```
+
+```@example smooth_components
+using BayesianRegressionModels
+model = Main.BRMDocsComparisons.example_module(:SmoothComponentGuide).model
 [call.path for call in brm_components(model)]
 ```
 
@@ -241,9 +253,9 @@ parent plate. Here each sensor supplies its readings as one vector per
 subject, in the order of `input`. An empty vector represents a subject
 with no readings from that sensor.
 
-```@example observed_components
-using BayesianRegressionModels
-
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:ObservedComponentGuide), raw"""
 @brm function instrument(setting)
     bias ~ Normal(0, setting.scale)
     @observe s trajectory member begin
@@ -265,6 +277,12 @@ end
 instruments = [(id=:left, scale=0.5, y=[[1.2, 1.0], Float64[]]),
                (id=:right, scale=0.8, y=[[0.9], [1.7]])]
 model = experiment((; instruments, input=[2.0, 3.0]))
+""", :model; title="Sensors observing a shared subject trajectory", require_stan=true)
+```
+
+```@example observed_components
+using BayesianRegressionModels
+model = Main.BRMDocsComparisons.example_module(:ObservedComponentGuide).model
 [call.path for call in brm_components(model)]
 ```
 
