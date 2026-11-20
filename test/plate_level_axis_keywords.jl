@@ -17,6 +17,7 @@
 #
 # Set `BRM_PLATE_LEVEL_AXIS_RUNTIME=0` to skip the compiled-model sets.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

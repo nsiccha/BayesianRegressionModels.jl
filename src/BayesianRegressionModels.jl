@@ -27,13 +27,13 @@ using LogExpFunctions, InverseFunctions, Distributions, Libdl,
 using StaticArrays: SMatrix, SVector, MMatrix, MVector
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using Bessels: besselk, besselk0, besselk1
-import SparseArrays, SelectedInversion
+import SparseArrays
 import PowerScaling
 # Fitting-time packages (KLU, Krylov, KrylovKit, LimitedLDLFactorizations,
-# MCMCDiagnosticTools, MUMPS, SparseMatrixColorings) are weak dependencies: a
-# consumer that fits loads them, and BRM's extension for each.
+# MCMCDiagnosticTools, MUMPS, SelectedInversion, SparseMatrixColorings) are weak
+# dependencies: a consumer that fits loads them, and BRM's extension for each;
+# a `car` term needs SelectedInversion to build.
 include("fitting_extensions.jl")
-include("selected_inversion.jl")
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights

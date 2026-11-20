@@ -1,10 +1,11 @@
 # Packages only fitting reaches (the sparse Laplace's factorizations and
 # inertia, Krylov recurrences, the fixed preconditioner, Hessian colorings,
-# SVI's R-hat) are weak dependencies (snag `brm-fitting-solv-c9af5617`; user
-# pick on decision `0ilan3m`). A consumer that fits loads them, which loads
-# BRM's extension for each; a consumer that only builds models and simulates
-# never installs them. SelectedInversion is not one of them: every `car` term
-# needs it at preparation (src/selected_inversion.jl).
+# selected inversion, SVI's R-hat) are weak dependencies (snag
+# `brm-fitting-solv-c9af5617`; user picks on decisions `0ilan3m` and
+# `0mdvrl1`). A consumer that fits loads them, which loads BRM's extension for
+# each; a consumer that only builds models and simulates never installs them.
+# One of them is also needed to build: every `car` term computes its scaling
+# factor with SelectedInversion at preparation.
 #
 # The code that calls package `X` is the extension `BayesianRegressionModelsXExt`
 # (one trigger, `X`). BRM calls it through the functions declared below, and
@@ -19,6 +20,7 @@ const _BRM_FITTING_EXTENSIONS = (
     LimitedLDLFactorizations = :BayesianRegressionModelsLimitedLDLFactorizationsExt,
     MCMCDiagnosticTools = :BayesianRegressionModelsMCMCDiagnosticToolsExt,
     MUMPS = :BayesianRegressionModelsMUMPSExt,
+    SelectedInversion = :BayesianRegressionModelsSelectedInversionExt,
     SparseMatrixColorings = :BayesianRegressionModelsSparseMatrixColoringsExt,
 )
 
@@ -39,6 +41,11 @@ const _BRM_FITTING_FUNCTIONS = (
     MCMCDiagnosticTools = (:_brm_rank_ess_rhat,),
     # The augmented system's inertia and log-determinant.
     MUMPS = (:_brm_mumps_inertia,),
+    # Selected inverses of Cholesky and KLU factors, including every `car`
+    # term's scaling factor at preparation.
+    SelectedInversion = (:_brm_selinv_diag, :_brm_selinv_on_pattern,
+        :_brm_selinv_pattern!, :_brm_lu_selinv, :_brm_lu_selinv!,
+        :_brm_lu_selinv_available),
     # A star coloring of a symmetric Hessian pattern.
     SparseMatrixColorings = (:_brm_star_coloring_colors,),
 )
@@ -48,8 +55,9 @@ function _brm_missing_fitting_package(name::Symbol)
         if Base.get_extension(@__MODULE__, _BRM_FITTING_EXTENSIONS[n]) === nothing]
     error("BayesianRegressionModels: this needs `$name`, a weak dependency of BRM. " *
         "Add it to your environment and load it first (`import $name`). Fitting uses " *
-        "$(join(keys(_BRM_FITTING_EXTENSIONS), ", ")); to load every one this session " *
-        "lacks: `import $(join(missing_now, ", "))`.")
+        "$(join(keys(_BRM_FITTING_EXTENSIONS), ", ")), and building a `car` term uses " *
+        "SelectedInversion; to load every one this session lacks: " *
+        "`import $(join(missing_now, ", "))`.")
 end
 
 # A call that reaches the fallback with `name`'s extension loaded began before

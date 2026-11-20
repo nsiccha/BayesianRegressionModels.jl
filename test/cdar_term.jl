@@ -1,6 +1,7 @@
 # test/cdar_term.jl — semantic and executable contract for the grouped,
 # correlated, damped random-walk deviation term `cdar(step; by=group, cor=C)`.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

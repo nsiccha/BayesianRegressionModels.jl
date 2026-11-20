@@ -10,6 +10,7 @@
 # Records append to $SB_SWEEP_OUT (default: tempdir()/sb-sweep-s.jsonl).
 # Crash-resume: cases already in OUT are skipped, never duplicated.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "sb_sweep_common.jl"))
 
 using ReactiveKernelsPPLExamples: Rate2Example, Rate4Example, DugongsGrowthExample,

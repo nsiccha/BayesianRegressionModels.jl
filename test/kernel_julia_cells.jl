@@ -1,6 +1,7 @@
 # Julia-first kernel cells: one authored Julia body runs on RKBRMI as written,
 # and SBBRMI gives StanBlocks the Stan spellings of its Julia callables and
 # Distributions observation constructors.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LogExpFunctions
 using StatsFuns: normcdf, norminvcdf

@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.355
+
+- **Breaking:** SelectedInversion is a weak dependency too (decision
+  `0mdvrl1`). Building a model with a `car` term needs it, since every `car`
+  term computes its scaling factor with it at preparation, and so do the
+  sparse Laplace, GMRF and collapsed-SVI variances. Add it to the environment
+  and `import SelectedInversion` first, beside the seven fitting packages of
+  0.2.353; without it, preparation or a fit stops with an error that names it.
+  A consumer that builds no `car` model and does not fit installs none of the
+  eight.
+
 ## 0.2.354
 
 - `brm_laplace_problem(rk; integrate = (..., :coefficients))`, `brm_laplace_plan`

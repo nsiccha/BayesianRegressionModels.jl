@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.354"
+version = "0.2.355"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
@@ -20,7 +20,6 @@ PowerScaling = "ea5902b9-87b7-4ea4-9e46-f9c5bf9e0b31"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
-SelectedInversion = "043bf095-3f01-458a-9f1c-8cf4448fe908"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
@@ -37,6 +36,7 @@ KrylovKit = "0b1a1467-8014-51b9-945f-bf0ae24f4b77"
 LimitedLDLFactorizations = "f5a24dde-3ab7-510b-b81b-6a72c6098d3b"
 MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
 MUMPS = "55d2b088-9f4e-11e9-26c0-150b02ea6a46"
+SelectedInversion = "043bf095-3f01-458a-9f1c-8cf4448fe908"
 SparseMatrixColorings = "0a514795-09f3-496d-8182-132a7b665d35"
 HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
@@ -74,6 +74,7 @@ BayesianRegressionModelsKrylovKitExt = "KrylovKit"
 BayesianRegressionModelsLimitedLDLFactorizationsExt = "LimitedLDLFactorizations"
 BayesianRegressionModelsMCMCDiagnosticToolsExt = "MCMCDiagnosticTools"
 BayesianRegressionModelsMUMPSExt = "MUMPS"
+BayesianRegressionModelsSelectedInversionExt = "SelectedInversion"
 BayesianRegressionModelsSparseMatrixColoringsExt = "SparseMatrixColorings"
 
 [compat]

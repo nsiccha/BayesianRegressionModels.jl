@@ -9,6 +9,7 @@
 # wrapper does not build yet raise.
 #
 #     julia --project=test test/rk_adaptive_centering.jl [testset filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, Random, LinearAlgebra
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, LogDensityProblems, WarmupHMC
 using DifferentiationInterface: AutoEnzyme

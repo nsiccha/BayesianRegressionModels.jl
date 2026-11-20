@@ -529,8 +529,7 @@ end
 
 # The selected inverse of K on its own pattern, from KLU's factor F, into
 # `f.selected`; the workspace is reused while K's pattern is. BRM never operates
-# on F itself: KLU's extension (src/fitting_extensions.jl) and SelectedInversion
-# (src/selected_inversion.jl) do.
+# on F itself: KLU's and SelectedInversion's extensions do (src/fitting_extensions.jl).
 function _brm_spl_selected(f::_BRMAugmentedFactor)
     f.selected_ready && return f.selected
     f.workspace = _brm_lu_selinv!(f.selected, f.workspace, f.F, f.K)

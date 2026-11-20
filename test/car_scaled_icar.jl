@@ -10,6 +10,7 @@
 # from the dense pseudo-inverse of each hand-listed component's Laplacian.
 # Snag `brm-car-icar-has-d25d72ec`, design decision `0u7hmag`.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

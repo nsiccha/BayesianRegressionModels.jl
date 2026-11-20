@@ -11,6 +11,7 @@
 # ambiguity/missing-axis case): one numeric population coefficient, one
 # categorical contrast block, one HSGP term-internal carrier, one shared-|ID|
 # per-margin `tau`.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

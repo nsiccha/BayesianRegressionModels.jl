@@ -7,6 +7,7 @@
 # metadata resolution, the exact transform with its Jacobian, candidate
 # scoring, Enzyme gradients, BridgeStan density/gradient parity, and one short
 # online warmup.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using BridgeStan
