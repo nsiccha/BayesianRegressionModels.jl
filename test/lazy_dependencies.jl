@@ -101,7 +101,7 @@ const _NAMES = join(repr.(String.(collect(keys(EXTENSIONS)))), ", ")
             sprint(showerror, err)
         end
         println("NAMES ", occursin("needs `MCMCDiagnosticTools`", message) &&
-            occursin("`using ", message))
+            occursin("`import MCMCDiagnosticTools", message))
         """)
     @test lines["EAGER"] == ""
     @test lines["NAMES"] == "true"

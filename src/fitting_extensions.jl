@@ -46,10 +46,10 @@ const _BRM_FITTING_FUNCTIONS = (
 function _brm_missing_fitting_package(name::Symbol)
     missing_now = [String(n) for n in keys(_BRM_FITTING_EXTENSIONS)
         if Base.get_extension(@__MODULE__, _BRM_FITTING_EXTENSIONS[n]) === nothing]
-    error("BayesianRegressionModels: this needs `$name`, which BRM loads only as a " *
-        "weak dependency. Add it to your environment and load it first (`using $name`). " *
-        "Fitting uses $(join(keys(_BRM_FITTING_EXTENSIONS), ", ")); to load every one " *
-        "this session lacks: `using $(join(missing_now, ", "))`.")
+    error("BayesianRegressionModels: this needs `$name`, a weak dependency of BRM. " *
+        "Add it to your environment and load it first (`import $name`). Fitting uses " *
+        "$(join(keys(_BRM_FITTING_EXTENSIONS), ", ")); to load every one this session " *
+        "lacks: `import $(join(missing_now, ", "))`.")
 end
 
 # A call that reaches the fallback with `name`'s extension loaded began before
