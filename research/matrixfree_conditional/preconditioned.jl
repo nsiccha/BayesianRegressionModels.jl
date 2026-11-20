@@ -4,6 +4,7 @@
 # RUN: BRM_PRECONDITIONER_PROJECT=/path/to/isolated/env julia --project=test research/matrixfree_conditional/preconditioned.jl NX NY HOURS MEMORY [NODES]
 haskey(ENV,"BRM_PRECONDITIONER_PROJECT") && push!(LOAD_PATH,ENV["BRM_PRECONDITIONER_PROJECT"])
 using LimitedLDLFactorizations
+import Krylov
 using Statistics
 include(joinpath(@__DIR__,"scaling.jl"))
 
@@ -63,16 +64,16 @@ function fixed_logdet(A,R; derivative=nothing,nodes=0)
     options=MatrixFreeLaplace(; probes=size(R,2),solve_maxiter=2048)
     shifts,weights=quadrature(nodes)
     b=zeros(size(A,1)); hx=similar(b); z=similar(b)
-    workspace=BRM.Krylov.CgLanczosShiftWorkspace(A,b,shifts)
+    workspace=Krylov.CgLanczosShiftWorkspace(A,b,shifts)
     values=zeros(size(R,2)); trace_gradient=0.0; maxiter=0; maxres=0.0
     for (q,r) in enumerate(eachcol(R))
         b .= r
-        BRM.Krylov.cg_lanczos_shift!(workspace,A,b,shifts;
+        Krylov.cg_lanczos_shift!(workspace,A,b,shifts;
             check_curvature=true,atol=0.0,rtol=1e-11,itmax=options.solve_maxiter)
-        info=BRM.Krylov.statistics(workspace)
+        info=Krylov.statistics(workspace)
         @assert info.solved info.status
         maxiter=max(maxiter,info.niter)
-        for (j,x) in enumerate(BRM.Krylov.solution(workspace))
+        for (j,x) in enumerate(Krylov.solution(workspace))
             t=shifts[j]; weight=weights[j]
             mul!(hx,A,x)
             residual2=0.0; value=0.0
@@ -104,8 +105,8 @@ function measure_preconditioned(nx,ny,nt,memory,nodes=0)
         seconds=build.time,bytes=build.bytes,retained=Base.summarysize(A)))
     b=randn(Xoshiro(72),n); rhs=similar(b); result=similar(b)
     from_physical!(rhs,A,b)
-    BRM.Krylov.cg_lanczos(A,rhs;check_curvature=true,atol=0.0,rtol=1e-13,itmax=2048)
-    solve=@timed BRM.Krylov.cg_lanczos(A,rhs;check_curvature=true,atol=0.0,rtol=1e-13,itmax=2048)
+    Krylov.cg_lanczos(A,rhs;check_curvature=true,atol=0.0,rtol=1e-13,itmax=2048)
+    solve=@timed Krylov.cg_lanczos(A,rhs;check_curvature=true,atol=0.0,rtol=1e-13,itmax=2048)
     x,info=solve.value
     to_physical!(result,A,x)
     residual=norm(H*result-b)/norm(b)

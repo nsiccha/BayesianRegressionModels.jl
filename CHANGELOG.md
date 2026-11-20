@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.349
+
+- `using BayesianRegressionModels` no longer loads the packages only fitting
+  reaches: KLU, Krylov, KrylovKit, LimitedLDLFactorizations, MCMCDiagnosticTools,
+  MUMPS (and with it MPI), SelectedInversion and SparseMatrixColorings. Each
+  loads the first time BRM calls it, through BRM's extension for it: a sparse
+  or matrix-free Laplace, `brm_laplace_draws`, GaussianBlockLaplace, collapsed
+  SVI sites, SVI's stationarity check, or a `car` term's BYM2 scaling at
+  preparation (SelectedInversion). A consumer that builds models and simulates
+  without these never loads them. They stay hard dependencies, so nothing
+  changes in a consumer's code or `[deps]`; an environment resolved before this
+  version must be resolved again so its manifest records the new extensions.
+
 ## 0.2.348
 
 - A record-component member formula can carry its own terms beside a margin

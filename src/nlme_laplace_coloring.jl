@@ -28,8 +28,6 @@
 # read at (r, c), and the sum is Σ_c D³f[R_c, d_c, ·], each a polarization of
 # two symmetric contractions.
 
-import SparseMatrixColorings
-
 # Each color's packed coordinates (`directions`), and per unit every structural
 # entry of its block, both triangles, as (row position, column position, packed
 # row of the HVP it is read from, color). A coloring exists only where its
@@ -85,11 +83,7 @@ function _brm_laplace_coloring(view::BRMNLMEView)
     n = length(packed)
     pattern = blockdiag(_brm_nlme_eta_patterns(blocks, [[r] for r in reads])...) .|
         sparse(I, n, n)
-    result = SparseMatrixColorings.coloring(pattern,
-        SparseMatrixColorings.ColoringProblem(; structure=:symmetric, partition=:column),
-        SparseMatrixColorings.GreedyColoringAlgorithm(SparseMatrixColorings.LargestFirst();
-            decompression=:direct))
-    colors = SparseMatrixColorings.column_colors(result)
+    colors = _brm_lazy(:SparseMatrixColorings, _brm_star_coloring_colors, pattern)
     ncolors = maximum(colors)
     ncolors < width || return nothing
     # How many neighbours (the entry itself included) of each coordinate carry

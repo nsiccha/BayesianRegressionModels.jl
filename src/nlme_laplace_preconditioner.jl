@@ -11,18 +11,8 @@ struct _BRMFixedReference{L,U}
     diagonal_shift::Float64
 end
 
-function _brm_fixed_reference(H, memory; ridge=0.01)
-    # Do not expand reduction cliques B' W B. Its diagonal can still improve
-    # the reference; the complete reduction remains in every H action.
-    d = H.diagonal .+ H.shift
-    Q = H.D + spdiagm(0 => d .- diag(H.D) .+ ridge .* abs.(d))
-    F = LimitedLDLFactorizations.lldl(Q; memory)
-    all(isfinite, F.D) && all(!iszero, F.D) ||
-        throw(_BRMOperatorSolveFailure("nonfinite or singular fixed conditional preconditioner"))
-    L = UnitLowerTriangular(copy(F.L))
-    _BRMFixedReference(L, L', copy(F.P), 1 ./ sqrt.(abs.(F.D)),
-        sum(log, abs.(F.D)), SparseArrays.nnz(F.L), Float64(F.α))
-end
+_brm_fixed_reference(H, memory; ridge=0.01) =
+    _brm_lazy(:LimitedLDLFactorizations, _brm_lldl_fixed_reference, H, memory; ridge)
 
 # A component that is exactly native fields has its own reference: one field's
 # chains, or a star when shared rows couple several.
