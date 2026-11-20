@@ -16,6 +16,7 @@
 #         sections: comma-separated subset of delay,single,prior,forecast,patches (default: all)
 #   Then: julia --project=<env with AlgebraOfVega> research/epi_renewal/renewal_figures.jl
 
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, StanBlocks, Distributions
 using LinearAlgebra, Random, Statistics
 

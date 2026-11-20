@@ -11,6 +11,7 @@
 #     julia --project=test test/adaptive_centering_threads.jl
 #
 # Synthetic toy blocks only; no compiled Stan model is involved.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, WarmupHMC, Enzyme, LogDensityProblems, Random, LinearAlgebra
 using DifferentiationInterface: AutoEnzyme
 include("threaded_gradient_stress.jl")

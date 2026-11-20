@@ -14,6 +14,7 @@
 # online warmup.
 #
 #     julia --project=test test/adaptive_car_centering.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using BridgeStan

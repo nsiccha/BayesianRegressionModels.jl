@@ -1,5 +1,6 @@
 # Description language: `brm_description(d; texts=description_texts(:de))` writes
 # every BRM text in German and the Markdown follows the description's language.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions
 using BayesianRegressionModels: aweights
 

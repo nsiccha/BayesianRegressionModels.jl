@@ -1,6 +1,6 @@
 # test/lazy_dependencies.jl — BRM's fitting-time packages are weak dependencies
-# (src/fitting_extensions.jl; snag `brm-fitting-solv-c9af5617`, user pick on
-# decision `0ilan3m`).
+# (src/fitting_extensions.jl; snag `brm-fitting-solv-c9af5617`, user picks on
+# decisions `0ilan3m` and `0mdvrl1`).
 #
 # The rule: no BRM code outside package X's own extension names X. BRM does not
 # depend on X, so such code would compile and fail only when it runs; it calls

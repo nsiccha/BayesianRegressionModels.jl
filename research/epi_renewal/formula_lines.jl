@@ -15,6 +15,7 @@
 # Everything else (PMFs, simulation, the Stan functions, the fit + recovery helpers) comes from wren16.jl.
 #   Run: julia --project=test research/epi_renewal/formula_lines.jl [n_draws]
 
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include(joinpath(@__DIR__, "wren16.jl"))   # main guarded
 
 # ── the six-patch observation family on the long (day, patch) frame ───────────

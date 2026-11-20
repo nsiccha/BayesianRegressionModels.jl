@@ -18,6 +18,7 @@
 #   the derived value. With the Jacobian, the twin's log density minus the
 #   derived model's is the prior's log density at the value plus the log
 #   Jacobian of the parameter's transform there, at every point.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, LinearAlgebra
 using Distributions: Exponential, Normal, LogNormal, Beta, logpdf

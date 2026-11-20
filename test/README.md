@@ -17,15 +17,17 @@ that groups by its input names the caller's columns for its fit-role inputs.
 Run it with
 `julia --startup-file=no --project=test test/rk_descriptor.jl`.
 
-`lazy_dependencies.jl` checks the rule BRM's first-use loading of its
-fitting-time packages needs (`src/lazy_dependencies.jl`): no code in `src/` or
-`ext/` outside package X's own extension names X (KLU, Krylov, KrylovKit,
-LimitedLDLFactorizations, MCMCDiagnosticTools, MUMPS, SelectedInversion,
-SparseMatrixColorings), read from the parsed source so comments and strings do
-not count. It also checks each package's extension entry in `Project.toml`,
-and, in a fresh process, that `using BayesianRegressionModels` loads none of
-them while a first `_brm_lazy` call loads one and returns its result. Run it
-with `julia --startup-file=no --project=test test/lazy_dependencies.jl`.
+`lazy_dependencies.jl` checks BRM's fitting-time weak dependencies
+(`src/fitting_extensions.jl`: KLU, Krylov, KrylovKit, LimitedLDLFactorizations,
+MCMCDiagnosticTools, MUMPS, SelectedInversion, SparseMatrixColorings). No code
+in `src/` or `ext/` outside package X's own extension names X, read from the
+parsed source so comments and strings do not count; each is a weak dependency
+whose one-trigger extension defines every function BRM calls; and, in fresh
+processes, `using BayesianRegressionModels` loads none of them, a call before
+its package is loaded names it, and a call works once it is, also when it loads
+during the call. A test that fits, or builds a `car` term, includes
+`fitting_packages.jl`, which imports them. Run it with
+`julia --startup-file=no --project=test test/lazy_dependencies.jl`.
 
 `hsgp_basis_js.jl` checks `StatisticalPreparation.hsgp_basis`:
 - **Exactness.** It equals bit for bit an independent oracle, SB's per-axis

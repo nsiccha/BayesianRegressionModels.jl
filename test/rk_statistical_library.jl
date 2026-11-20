@@ -1,4 +1,5 @@
 # Public synthetic acceptance for statistical implementations adopted by BRM.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using Distributions, LinearAlgebra, Statistics, Enzyme, LogDensityProblems
 using DifferentiationInterface: AutoEnzyme

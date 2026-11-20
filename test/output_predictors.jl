@@ -14,6 +14,7 @@
 # Run: julia --project=test test/output_predictors.jl
 # (set BRM_OUTPUT_PREDICTORS_RUNTIME=0 to run only the declaration half.)
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

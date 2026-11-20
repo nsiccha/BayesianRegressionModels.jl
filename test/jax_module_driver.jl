@@ -14,6 +14,7 @@
 # `RK_JAX_PYTHON` names a Python with `jax`. Without it the Python checks are
 # `@test_skip`, unless `BRM_JAX_REQUIRE=1`, which makes a missing Python a
 # failure: a skipped Python check is never evidence that a module runs.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using JSON
 
 const BRM_JAX_PYTHON = get(ENV, "RK_JAX_PYTHON", "")

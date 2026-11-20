@@ -10,6 +10,7 @@
 # with the known parameter sampled under an explicit prior, evaluated at the
 # known value: the two log densities (no Jacobian) must differ by exactly that
 # prior's density of the value, at every point.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, LinearAlgebra
 using Distributions: Exponential, Normal, LogNormal, Beta, Dirac, logpdf, truncated

@@ -16,6 +16,7 @@
 #
 # RUN: julia --project=test test/rw_second_order.jl [testset-filter...]
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics, StanBlocks
 include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
