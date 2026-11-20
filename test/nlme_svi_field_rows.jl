@@ -34,10 +34,18 @@ function check_field_row(stations; parents=12)
             reader.coefficients(hyper - h, k, false)) / 2e-5
         @test central ≈ J[:, j+1] rtol=2e-6 atol=2e-7
     end
+    # A row read only for its scale takes that entry's derivatives alone and
+    # marks the others as not taken.
+    S = reader.coefficients(hyper, k, true; scale_only=true)
+    @test S[:, 1] == J[:, 1]
+    @test S[end, :] == J[end, :]
+    @test all(isnan, S[1:end-1, 2:end])
     forward = [@timed(reader.coefficients(hyper, k, false)) for _ in 1:10]
     jacobian = [@timed(reader.coefficients(hyper, k, true)) for _ in 1:10]
+    scale = [@timed(reader.coefficients(hyper, k, true; scale_only=true)) for _ in 1:10]
     cost = (; stations, states=length(width), packed=length(base), parents,
         value_bytes=Int(median(r.bytes for r in forward)),
+        scale_bytes=Int(median(r.bytes for r in scale)),
         jacobian_bytes=Int(median(r.bytes for r in jacobian)),
         jacobian_microseconds=round(median(r.time for r in jacobian) * 1e6; digits=1))
     @info "One coefficient row of the field law" cost...

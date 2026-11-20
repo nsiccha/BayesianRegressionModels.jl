@@ -970,7 +970,7 @@ function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions,
                 values
             end
         end
-        return (; layout, coefficients=(hyper, k, derivatives) -> rows[k])
+        return (; layout, coefficients=(hyper, k, derivatives; scale_only=false) -> rows[k])
     end
 
     built, plan = rk.model, _rk_translated(rk)
@@ -986,7 +986,10 @@ function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions,
     # another worker. The prepared query and its differentiation storage belong
     # to one caller at a time, so a whole read holds the lock.
     guard = ReentrantLock()
-    function coefficients(hyper, k, derivatives)
+    # `scale_only` takes the conditional SD's derivatives alone, in one
+    # pullback. The coefficients' derivatives are then NaN, so a caller that
+    # read them could not mistake them for zeros.
+    function coefficients(hyper, k, derivatives; scale_only=false)
         lock(guard) do
             values = row(hyper, k)
             n = length(values)
@@ -994,8 +997,9 @@ function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions,
             J[:, 1] .= values
             scale = J[n, 1]
             if derivatives
+                scale_only && (J[1:n-1, 2:end] .= NaN)
                 bar = zeros(n)
-                for j in 1:n
+                for j in (scale_only ? n : 1):n
                     bar[j] = 1.0
                     J[j, 2:end] .= ad_pullback(pullback, bar, hyper, k)
                     bar[j] = 0.0

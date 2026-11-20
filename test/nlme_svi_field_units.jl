@@ -49,6 +49,18 @@ states = findall(n -> occursin(".field.", n), names)
     check_centered_field(m, rk)
 end
 
+@testset "a batch takes only the derivatives its terms read" begin
+    # Enough stations that a unit reads some rows only as a parent's scale and
+    # its neighbors read rows it does not: the oracle compares the term on the
+    # rows a batch prepares with the term on every row, with all derivatives.
+    wide = station_data(; stations=12, times=collect(0.0:5.0), reads=3, seed=11)
+    rkw = RKBRMI(field_model(wide))
+    mw = brm_nlme_model(rkw; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
+    counts = check_centered_field(mw, rkw)
+    @test counts.parent_rows > 0
+    @test counts.value_rows > 0
+end
+
 @testset "the coupling baseline is independent of neighboring field draws" begin
     m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
     t = BRM._brm_svi_target(m; field_states=:units, separator=:none)

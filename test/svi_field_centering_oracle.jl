@@ -49,10 +49,27 @@ function check_centered_field(m, rk)
     value += first(BRM._brm_svi_sweep_term!(gg, Float64[], plan, frame, t, q, 0,
         g, Float64[], t.plan))
     gradient = zero(point)
+    parent_rows = value_rows = 0
     for (i, block) in enumerate(t.units)
         gi, gu = zero(g), zero(point[block])
         v, gc, adj = BRM._brm_svi_centered_unit_term!(gi, gu, plan, frame, t, q, i, g, point[block])
         @test all(iszero, gi[setdiff(eachindex(g), t.touched[i])])
+        # A batch prepares rows for this owner and the owners it visits only. It
+        # takes every derivative of the owner's output rows, the scale's alone of
+        # a row the owner reads as a parent, and none of a row only others read.
+        visited = [visit.o for visit in BRM._brm_svi_sweep_visits(s, i)]
+        prepared = map(f -> BRM._brm_svi_sweep_draw(f, q, g, visited; focus=(i,)), s.fields)
+        for (k, row) in only(prepared)
+            size(row.J, 2) == 1 && (value_rows += 1)
+            size(row.J, 2) > 1 && any(isnan, row.J) && (parent_rows += 1)
+        end
+        gp, up = zero(gi), zero(gu)
+        vp, cp, _ = BRM._brm_svi_sweep_term!(gp, up, plan, frame, t, q, i, g, point[block],
+            t.plan; draw=prepared)
+        @test vp ≈ v rtol=1e-13
+        @test gp ≈ gi atol=1e-12 rtol=1e-12
+        @test up ≈ gu atol=1e-12 rtol=1e-12
+        @test cp ≈ gc atol=1e-12 rtol=1e-12
         # A Newton proposal for this owner can also change its neighbors'
         # likelihoods and priors. Its acceptance uses that whole increment.
         function objective(z)
@@ -128,6 +145,7 @@ function check_centered_field(m, rk)
         h[j] = 1e-5
         @test gradient[j] ≈ (reference(point+h)-reference(point-h))/2e-5 atol=2e-6 rtol=2e-6
     end
+    (; parent_rows, value_rows)
 end
 
 function check_field_window(first_fit, new_fit)

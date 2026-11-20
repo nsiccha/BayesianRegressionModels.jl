@@ -260,7 +260,7 @@ function _brm_svi_collapsed_term!(gg, gz, t, q, i, g, z, plan, work, centering, 
         s = t.field_sweep
         draw = if any(f -> p in f.places, s.fields)
             owners = [v.o for v in _brm_svi_sweep_visits(s, i)]
-            map(f -> _brm_svi_sweep_draw(f, q, g, owners), s.fields)
+            map(f -> _brm_svi_sweep_draw(f, q, g, owners; focus=(i,)), s.fields)
         else
             s.draw[]
         end

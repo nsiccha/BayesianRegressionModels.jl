@@ -161,13 +161,24 @@ end
 
 # Only patterns touched by these terms are solved. Shared rows use c=1,
 # giving y=u even when their conditional mean depends on unit-owned states.
-function _brm_svi_sweep_draw(f, q, g, owners; derivatives=true)
+# Only a `focus` owner's term pulls back to the hyperparameters: through the
+# whole row of each of its outputs, and through the scale alone of a state it
+# reads as a parent. Every other row is read for its values.
+function _brm_svi_sweep_draw(f, q, g, owners; derivatives=true, focus=owners)
     needed = sort!(unique!(reduce(vcat, (f.inputs[o+1] for o in owners); init=Int[])))
+    key(k) = (f.layout.pattern[k], f.layout.channel[k])
+    whole, scaled = Set{Tuple{Int,Int}}(), Set{Tuple{Int,Int}}()
+    if derivatives
+        for o in focus
+            union!(whole, (key(k) for k in f.outputs[o+1]))
+            union!(scaled, (key(k) for k in f.inputs[o+1]))
+        end
+    end
     hyper = g[f.places]
     matrices = Dict{Tuple{Int,Int},Matrix{Float64}}()
     Dict(k => begin
-        J = get!(matrices, (f.layout.pattern[k], f.layout.channel[k])) do
-            f.reader.coefficients(hyper, k, derivatives)
+        J = get!(matrices, key(k)) do
+            f.reader.coefficients(hyper, k, key(k) in scaled; scale_only=!(key(k) in whole))
         end
         c = if f.cell[k] > 0
             _brm_svi_control(q.centering.x[f.owner[k]][f.cell[k]])
@@ -267,7 +278,8 @@ function _brm_svi_sweep_prepare!(rng, t, q, g, batch, noise, η)
         s.others[t.units[i]] .= _brm_svi_coupled_mean(coupling, q, i, ζ) .+
             _brm_svi_unit_offset(q, i, _brm_svi_unit_noise(rng, q.U[i]))
     end
-    s.draw[] = map(f -> _brm_svi_sweep_draw(f, q, g, owners), s.fields)
+    focus = s.authored ? [0; batch] : batch
+    s.draw[] = map(f -> _brm_svi_sweep_draw(f, q, g, owners; focus), s.fields)
     nothing
 end
 
