@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.341
+
+- The batched SAEM population gradient of a `brm_nlme_model` now uses plain
+  updates for its private gradient buffers when its reverse-mode Enzyme backend
+  leaves the choice open. Previously Enzyme used atomic updates in a process
+  with multiple threads. On builds that fuse derivative arithmetic, this could
+  change the last bits of the gradient and the result of a seeded SAEM fit.
+  For models evaluated through dynamic dispatch, the setting reaches the
+  model body with Enzyme dogfood `157b971e` or a later build carrying
+  `Enzyme.has_dogfood_repair(:atomic_add_dynamic_callees)`.
+  Explicit backend settings still take precedence.
+
 ## 0.2.340
 
 - `prune_responses` skips an `optional(...)` prior when its address is
