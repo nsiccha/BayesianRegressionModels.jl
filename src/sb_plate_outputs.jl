@@ -33,7 +33,57 @@ StanBlocks.@deffun begin
     # Several selected vector cells remain a collection at helper boundaries.
     @inline brm_plate_cell(x::matrix[k, n], idx::int[m]) = EachCol(x[:, idx])
     @inline brm_plate_cell(x::RaggedVector, i) = x[i]
+
+    # Preserve the member axis when concatenating declaration variants.
+    # A fixed-width collection stores columns, a ragged one stores flat
+    # memory and cumulative ends. Different variants may have either shape.
+    brm_column_ends(k::int, n::int)::int[n] = begin
+        ends = rep_array(0, n)
+        for i in 1:n
+            ends[i] = i*k
+        end
+        ends
+    end
+    brm_shifted_ends(x::int[n], shift::int)::int[n] = begin
+        ends = rep_array(0, n)
+        for i in 1:n
+            ends[i] = x[i] + shift
+        end
+        ends
+    end
+    @inline brm_member_vectors(x::matrix[k, n]) =
+        RaggedVector(to_vector(x), brm_column_ends(k, n))
+    @inline brm_member_vectors(x::RaggedVector) = x
+    @inline brm_concat_members(a::vector[n], b::vector[m]) = append_row(a, b)
+    @inline brm_concat_members(a::int[n], b::int[m]) = append_array(a, b)
+    @inline brm_concat_members(a::RaggedVector, b::RaggedVector) =
+        RaggedVector(append_row(a.mem, b.mem),
+            append_array(a.ends, brm_shifted_ends(b.ends, num_elements(a.mem))))
+    @inline brm_concat_members(a::matrix[k,n], b::matrix[j,m]) =
+        brm_concat_members(brm_member_vectors(a), brm_member_vectors(b))
+    @inline brm_concat_members(a::matrix[k,n], b::RaggedVector) =
+        brm_concat_members(brm_member_vectors(a), b)
+    @inline brm_concat_members(a::RaggedVector, b::matrix[k,n]) =
+        brm_concat_members(a, brm_member_vectors(b))
+    brm_plate_row_pairs(x::matrix[k, n], members::int[m], rows::int[m])::vector[m] = begin
+        rv = rep_vector(0.0, m)
+        for i in 1:m
+            rv[i] = x[rows[i], members[i]]
+        end
+        rv
+    end
+    brm_plate_row_pairs(x::RaggedVector, members::int[m], rows::int[m])::vector[m] = begin
+        rv = rep_vector(0.0, m)
+        for i in 1:m
+            rv[i] = x[members[i]][rows[i]]
+        end
+        rv
+    end
 end
+
+_sb_julia_stan_call(::typeof(_brm_concat_members), args) = Expr(:call, brm_concat_members, args...)
+_sb_julia_stan_call(::typeof(_brm_observed_member_rows), args) =
+    Expr(:call, brm_plate_row_pairs, args...)
 
 # A plate output: a cell's collected one, or one of its other indexed outputs
 # the model reads (`_brm_kernel_output_reads`; its Stan name is set afterwards).

@@ -382,14 +382,15 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     for (target, margins) in bucket.slices
         if haskey(member_inputs, target)
             source = member_inputs[target]
-            row = _rk_ast_fresh_name("member_row", taken)
             group_index = indices[_rk_target_group(grouping, target)]
-            margin = add_extent(offsets[target], Expr(:ref, source, row))
             effect = effects[(target, bucket.group, bucket.id)]
-            cell = Expr(:(=), Expr(:ref, effect, row),
-                Expr(:ref, gathered, Expr(:ref, group_index, row), margin))
-            push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-                Expr(:for, Expr(:(=), row, Expr(:call, :eachindex, source)), Expr(:block, cell))))
+            # Matrix rows are levels and columns are margins. Pair their
+            # indices per observation, including repeated levels and margins.
+            column = offsets[target] == 0 ? source : Expr(:call, :.+, source, offsets[target])
+            nlevels = Expr(:call, :length, Expr(:call, :brm_fit_levels, levels_of))
+            selection = Expr(:call, :.+, group_index,
+                Expr(:call, :.*, nlevels, Expr(:call, :.-, column, 1)))
+            push!(stmts, Expr(:(=), effect, Expr(:ref, gathered, selection)))
             continue
         end
         summands = Any[]

@@ -3,13 +3,17 @@
 # are bound data, including when some members have no observations.
 struct _BRMMemberCodes <: AbstractVector{Int}
     rows::Vector{Int}
-    count::Int
     extent::Symbol
+    collection::Symbol
+    keys::Vector{Union{Int,Symbol}}
+    logical::Symbol
+    predictor::Symbol
+    id::Symbol
 end
 Base.size(c::_BRMMemberCodes) = size(c.rows)
 Base.getindex(c::_BRMMemberCodes, i::Int) = c.rows[i]
 Base.IndexStyle(::Type{_BRMMemberCodes}) = IndexLinear()
-_brm_fit_levels(c::_BRMMemberCodes) = collect(1:c.count)
+_brm_fit_levels(c::_BRMMemberCodes) = collect(eachindex(c.keys))
 
 function _brm_parent_block(term)
     isxcall(term, :|) && length(term.args) == 3 || return nothing
@@ -23,7 +27,7 @@ function _brm_parent_block(term)
     (; id=marker.args[2].value, group)
 end
 
-function _brm_parent_margins!(out, columns, occupied, loop, records, positions, variant,
+function _brm_parent_margins!(out, columns, occupied, loop, records, positions, keys, variant,
         selected, index, df)
     declarations, ports, arguments = Any[], Symbol[], Any[]
     record = loop.component.inputs[loop.record]
@@ -63,7 +67,7 @@ function _brm_parent_margins!(out, columns, occupied, loop, records, positions, 
             group, margin, rows, effect, port = fresh(:group), fresh(:margin), fresh(:rows), fresh(:effect), fresh(:input)
             columns[group] = reduce(vcat, slices)
             columns[margin] = _BRMMemberCodes(reduce(vcat, [fill(i, length(x)) for (i,x) in enumerate(slices)]),
-                length(slices), fresh(:members))
+                fresh(:members), loop.target, keys[positions], target, effect, spec.id)
             ends = cumsum(length.(slices))
             columns[rows] = [collect(stop-length(x)+1:stop) for (stop,x) in zip(ends,slices)]
             push!(out, :($effect ~ 0 + (0 + $margin | $(spec.id) | $group)))

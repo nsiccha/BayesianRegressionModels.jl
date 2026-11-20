@@ -64,6 +64,7 @@ end
 
 module CollectionSmoothsTest
 using Test, BayesianRegressionModels, StanBlocks
+import BridgeStan
 
 @brm function trend(config)
     if config.smooth
@@ -94,6 +95,57 @@ const model = @brm begin
     y ~ Normal(curves, 1)
 end
 
+const population_reference = @brm begin
+    curve ~ 0 + hsgp(time; k=k, c=1.5)
+    y ~ Normal(sum(curve), 1)
+end
+const periodic_reference = @brm begin
+    curve ~ 0 + hsgp(time; k=k, c=1.5)
+    seasonal ~ 0 + hsgp(time; k=kp, cov=:periodic, period=period)
+    y ~ Normal(sum(curve + seasonal), 1)
+end
+
+@testset "Each configured time smooth matches a model on its own clock" begin
+    a = (; id=:a, smooth=true, periodic=false, individual=false, time=[.3,.7,1.1], k=3)
+    b = (; id=:b, smooth=false, offset=.24)
+    c = (; a..., id=:c, k=4, time=[-.2,.15,.9,1.7])
+    d = (; a..., id=:d, periodic=true, time=[2.,2.7,3.1], period_modes=2, period=2.1)
+    ys = [.8,-.1,.18,.42]
+    function compiled(source, label)
+        fit = SBBRMI(source; mod=@__MODULE__, total_groups=())
+        path = joinpath(mkpath(joinpath(tempdir(), "brm-rk-consumer")), label * ".stan")
+        stan = BayesianRegressionModels.stan_instantiate(fit; path).model
+        (; desc=brm_descriptor(fit), stan, names=BridgeStan.param_unc_names(stan))
+    end
+    combined = compiled(model((; records=[d,a,b,c], y=ys)), "independent-clocks")
+    refs = [compiled(population_reference((; a.time, a.k, y=ys[2:2])), "clock-population"),
+            compiled(population_reference((; c.time, c.k, y=ys[4:4])), "clock-population"),
+            compiled(periodic_reference((; d.time, d.k, kp=d.period_modes, d.period, y=ys[1:1])), "clock-periodic")]
+    mappings = map((a,c,d), refs) do record, ref
+        mapping = zeros(Int, length(ref.names))
+        terms = record.periodic ? ((:population,:curve), (:seasonal,:seasonal)) : ((:population,:curve),)
+        for (joint, single) in terms, parameter in (:length_scale,:sd,:basis_weights)
+            src = brm_term_coordinates(ref.desc, single, ref.names; parameter)
+            dst = brm_term_coordinates(combined.desc, joint, combined.names;
+                parameter, submodel=(:curves, record.id))
+            mapping[src.coordinates] = dst.coordinates
+        end
+        mapping
+    end
+    n = length(combined.names)
+    @test sort(reduce(vcat, mappings)) == 1:n
+    for u in (zeros(n), collect(range(-.35,.4; length=n)), [0.23sin(i) for i in 1:n])
+        value, grad = BridgeStan.log_density_gradient(combined.stan, u; propto=false)
+        expected = -0.5*(ys[3] - b.offset)^2 - 0.5*log(2pi)
+        for (ref, coords) in zip(refs, mappings)
+            part, part_grad = BridgeStan.log_density_gradient(ref.stan, u[coords]; propto=false)
+            expected += part
+            @test grad[coords] ≈ part_grad
+        end
+        @test value ≈ expected
+    end
+end
+
 @testset "Repeat and replay individually configured time smooths" begin
     a = (; id=:a, smooth=true, periodic=false, individual=false,
         time=[0.2, 0.5, 0.7], k=3)
@@ -113,6 +165,9 @@ end
         weights = only(filter(o -> endswith(string(o.name), "_beta_raw"), brm_outputs(desc; submodel=(:curves,id))))
         names = [string(weights.name, ".", i) for i in 1:7]
         @test brm_output_coordinates(weights, names) == expected
+        result = brm_term_coordinates(desc, :population, reverse(names);
+            parameter=:basis_weights, submodel=(:curves,id))
+        @test result.coordinates == 8 .- expected
     end
     replay = reprocess(sb, design([periodic,c,b,a]))
     @test stan_code(replay) == stan_code(sb)

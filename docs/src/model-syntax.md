@@ -194,6 +194,59 @@ For example, `brm_outputs(brm_descriptor(SBBRMI(model)); submodel=(:channels,
 `channels[item]` uses positions as keys. For a fit with a different selection
 of members or declaration flags, call the builder on the new records.
 
+An observation clause lets each member use a trajectory computed in a
+parent plate. Here each sensor supplies its readings as one vector per
+subject, in the order of `input`. An empty vector represents a subject
+with no readings from that sensor.
+
+```@example observed_components
+using BayesianRegressionModels
+
+@brm function instrument(setting)
+    bias ~ Normal(0, setting.scale)
+    @observe s trajectory member begin
+        setting.y[s] ~ Normal(trajectory .+ member, 1)
+    end
+    return bias
+end
+
+experiment = @brm begin
+    for setting in instruments
+        meters[setting.id] ~ instrument(setting)
+    end
+    @plate for s in eachindex(input)
+        trajectory[s] = 0.5 * input[s]
+        observe(meters, s, trajectory[s])
+    end
+end
+
+instruments = [(id=:left, scale=0.5, y=[[1.2, 1.0], Float64[]]),
+               (id=:right, scale=0.8, y=[[0.9], [1.7]])]
+model = experiment((; instruments, input=[2.0, 3.0]))
+[call.path for call in brm_components(model)]
+```
+
+`member` receives the component's return value for each observed row.
+If the component returns a vector on its own time grid,
+`member[setting.read_index[s]]` selects one grid position per reading.
+For a named return such as `(; curve, scale)`, use
+`member.curve[setting.read_index[s]]` and `member.scale`.
+The clause can sit inside a declaration guard, so different members can
+use different likelihoods in the same subject plate. A grouped intercept
+`(1 | p | setting.site)` belongs to that member. Use
+`(1 | parentblock(:p) | setting.site)` to put its margin in the parent's
+`p` correlation block. The site labels match rows across members and the
+parent, including when their rows have different orders or lengths.
+
+Query a member's observation draws with
+`brm_output_coordinates(descriptor, :y, names; role=:posterior_predictive,
+submodel=(:meters, :left))`. For a member with a formula predictor, use
+`brm_term_coordinates` with the same `submodel` address to select its
+term parameters, such as `parameter=:basis_weights` on a time smooth.
+For a shared intercept margin, `brm_ranef_sd_coordinates(descriptor,
+:shift, names; id=:p, submodel=(:meters, :left))` selects the fitted
+between-site standard deviation for the member's `shift` predictor.
+
 Use `merge(structure_a, structure_b, priors_a, priors_b)` for fragments that
 share one namespace. Put structure first and priors last within each scope;
 moving a cell-local prior outside the plate changes the model. A retained

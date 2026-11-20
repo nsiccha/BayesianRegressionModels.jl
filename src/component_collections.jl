@@ -79,6 +79,8 @@ _brm_record_field(record, key) = getproperty(record, key)
 _brm_record_field(record::AbstractDict, key::Symbol) =
     haskey(record, key) ? record[key] : record[String(key)]
 
+_brm_concat_members(left, right) = vcat(left, right)
+
 # A numeric cell axis is also the provenance for rebuilding columns from a new
 # table of records. It is an ordinary integer vector to the two emitters.
 struct _BRMCollectionAxis <: AbstractVector{Int}
@@ -143,7 +145,7 @@ function _brm_collection_variant!(out, frame, observers, builder, occupied, loop
     declarations = filter(st -> !_brm_is_observer(st), selected)
     index = fresh("brm_entry")
     declarations, ports, shared = _brm_parent_margins!(out, frame, occupied, loop,
-        records, positions, variant, declarations, index, df)
+        records, positions, keys, variant, declarations, index, df)
     component, fields = _brm_variant_component(loop, declarations, value, ports)
     args = Any[arg for (i, arg) in enumerate(loop.arguments) if i != loop.record]
     append!(args, shared)
@@ -228,7 +230,7 @@ function _brm_lower_collection!(out, frame, observers, fields, builder, occupied
     frame[permutation] = invperm(order)
     for (i, name) in enumerate(public_names)
         parts = isnothing(returned) ? results : [r[i] for r in results]
-        joined = length(parts) == 1 ? only(parts) : Expr(:call, :vcat, parts...)
+        joined = foldl((a, b) -> Expr(:call, GlobalRef(@__MODULE__, :_brm_concat_members), a, b), parts)
         push!(out, Expr(:(=), name, Expr(:ref, joined, permutation)))
     end
 end
@@ -255,7 +257,12 @@ function _brm_collection_design(builder, df)
             push!(statements, st)
         end
     end
-    statements = map(st -> _brm_expand_observers(st, observers, columns, occupied), statements)
+    expanded = Any[]
+    for st in statements
+        plate = _brm_expand_observers(st, observers, columns, occupied, expanded)
+        push!(expanded, plate)
+    end
+    statements = expanded
     isempty(fields) || (statements = map(st -> _brm_read_collection_fields(st, fields), statements))
     Expr(:block, statements...), columns
 end

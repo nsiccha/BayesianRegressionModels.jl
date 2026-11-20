@@ -873,10 +873,35 @@ function _brm_submodels(plan, outputs)
     _brm_collection_submodels(native, _brm_collection_paths(brmi), plan.preproc, outputs)
 end
 
+function _brm_member_predictions(preproc, outputs)
+    carriers = Dict(o.logical => o for o in outputs if o.role === :posterior_predictive)
+    predictions = Dict{Tuple,Vector{BRMOutput}}()
+    for recipe in values(preproc)
+        recipe.kind === :collection_observation || continue
+        layout = recipe.const_
+        carrier = get(carriers, layout.source, nothing)
+        isnothing(carrier) && continue
+        rows = [Int[] for _ in layout.keys]
+        for (position, member) in enumerate(layout.members)
+            push!(rows[member], position)
+        end
+        for (key, indices) in zip(layout.keys, rows)
+            member_outputs = get!(Vector{BRMOutput}, predictions, (layout.collection, key))
+            push!(member_outputs, BRMOutput(carrier.name, carrier.kind, carrier.type,
+                carrier.size, carrier.constraints, carrier.generative, carrier.source,
+                carrier.role, carrier.declaration, layout.response, carrier.labels,
+                carrier.segments, carrier.component, carrier.dims, carrier.predictors,
+                carrier.term, indices))
+        end
+    end
+    predictions
+end
+
 function _brm_collection_submodels(native, axes, preproc, all_outputs)
     isempty(axes) && return native
     entries = BRMSubmodel[]
     indices = Dict{Tuple,Int}()
+    predictions = _brm_member_predictions(preproc, all_outputs)
     for (i, entry) in enumerate(native)
         path = entry.native_path
         axis = length(path) < 2 ? nothing : get(axes, path[1:2], nothing)
@@ -890,25 +915,12 @@ function _brm_collection_submodels(native, axes, preproc, all_outputs)
             for (j, key) in enumerate(axis.keys)
                 address = (axis.collection, key, path[3:end]...)
                 parent = isnothing(entry.parent) ? nothing : indices[(entry.parent, key)]
-                outputs = BRMOutput[let
+                outputs = BRMOutput[
                     BRMOutput(o.name, o.kind, o.type, o.size, o.constraints, o.generative,
                         o.source, o.role, o.declaration, o.logical, o.labels, o.segments,
                         o.component, o.dims, o.predictors, o.term, j)
-                end for o in entry.outputs]
-                if length(path) == 2
-                    for recipe in values(preproc)
-                        recipe.kind === :collection_observation || continue
-                        layout = recipe.const_
-                        layout.collection === axis.collection && layout.keys == axis.keys || continue
-                        rows = findall(==(j), layout.members)
-                        for o in all_outputs
-                            o.logical === layout.source && o.role === :posterior_predictive || continue
-                            push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
-                                o.generative, o.source, o.role, o.declaration, layout.response,
-                                o.labels, o.segments, o.component, o.dims, o.predictors, o.term, rows))
-                        end
-                    end
-                end
+                    for o in entry.outputs]
+                append!(outputs, get(predictions, address, ()))
                 push!(entries, BRMSubmodel(entry.name, entry.model, last(address), Base.front(address),
                     parent, entry.trigger, entry.declaration, entry.inputs, entry.declarations,
                     Tuple(outputs), entry.source, path))
@@ -2922,6 +2934,12 @@ brm_term_coordinates(d, :log_F, constrained_names;
                      term=:hsgp_op_log_dose, parameter=:value)
 ```
 
+For a repeated component, pass its logical address, for example
+`brm_term_coordinates(d, :population, names; submodel=(:curves, :left),
+parameter=:basis_weights)`. The result includes only that member's basis
+weights in basis order. When the predictor has several addressable terms,
+`term` selects among their labels.
+
 Resolution follows the formula term to its logical term output, then selects a
 parameter owned by that declaration. Consumers never construct or parse the
 compiler-owned carrier name. Missing or duplicate predictors/terms/owners,
@@ -2948,13 +2966,37 @@ an ordinary fit; a sampled carrier is preferred when both exist.
 """
 function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
                               constrained_names;
-                              term::Symbol, parameter::Symbol)
-    entry = _brm_term_entry(d, logical, e -> e.term === term, "term `$term`")
-    output = _brm_term_parameter_output(d, logical, entry, parameter)
+                              term::Union{Nothing,Symbol}=nothing, parameter::Symbol,
+                              submodel=nothing)
+    inner = d
+    call = nothing
+    if !isnothing(submodel)
+        call = _brm_submodel_entry(d, submodel)
+        axis = get(_brm_collection_paths(d.plan.parent), call.native_path, nothing)
+        isnothing(axis) && throw(ArgumentError("brm_term_coordinates: `$submodel` is not a repeated formula component"))
+        recipes = [e for e in values(d.plan.preproc) if e.kind === :collection_cells && e.raw_ref === first(axis.path)]
+        isempty(recipes) && throw(ArgumentError("brm_term_coordinates: member `$submodel` has no fitted formula terms"))
+        pos = findfirst(==(call.target), axis.keys)
+        inner = brm_descriptor(only(recipes).const_.fits[pos])
+    end
+    entry = _brm_term_entry(inner, logical, e -> isnothing(term) || e.term === term,
+        isnothing(term) ? "formula term" : "term `$term`")
+    term = entry.term
+    inner_output = _brm_term_parameter_output(inner, logical, entry, parameter)
+    output = if isnothing(call)
+        inner_output
+    else
+        emitted = Symbol(join((call.native_path..., inner_output.name), "_"))
+        only(o for o in call.outputs if o.name === emitted)
+    end
 
     coordinates = _brm_element_coordinates(output, constrained_names)
+    if !isnothing(call)
+        selected = _brm_emitted_coordinates(output, constrained_names)
+        filter!(in(Set(selected)), coordinates)
+    end
     expected_count = _brm_term_coordinate_count(
-        getf(entry.value), entry.value, Val(parameter), output)
+        getf(entry.value), entry.value, Val(parameter), inner_output)
     if isnothing(expected_count)
         isempty(coordinates) && error(
             "brm_descriptor: term `$term` parameter role `$parameter` resolves " *
@@ -3773,8 +3815,25 @@ quantities needs `constrained_names` that include them.
 """
 function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
                                   constrained_names;
-                                  id::Symbol, coefficient::Symbol=:Intercept)
+                                  id::Symbol, coefficient::Symbol=:Intercept, submodel=nothing)
     brmi = d.plan.parent
+    if !isnothing(submodel)
+        call = _brm_submodel_entry(d, submodel)
+        address = _brm_submodel_address(call)
+        for column in _brm_operation_values(brmi)
+            column isa NamedColumn && parent(column) isa DataColumn || continue
+            codes = parent(parent(column))
+            codes isa _BRMMemberCodes && codes.id === id && codes.logical === logical &&
+                coefficient === :Intercept && length(address) == 2 && first(address) === codes.collection || continue
+            pos = findfirst(==(last(address)), codes.keys)
+            isnothing(pos) && continue
+            margins = filter(m -> m.predictor === codes.predictor, ranefcoefnames(brmi, id))
+            fit = brm_ranef_sd_coordinates(d, codes.predictor, constrained_names;
+                id, coefficient=margins[pos].coefficient)
+            return (; fit..., logical, coefficient, submodel=address)
+        end
+        throw(ArgumentError("brm_ranef_sd_coordinates: member `$submodel` has no `$logical` margin in parent block `$id`"))
+    end
 
     # 1. The shared block for this `|ID|` bucket.
     all_blocks = ranef_blocks(d)

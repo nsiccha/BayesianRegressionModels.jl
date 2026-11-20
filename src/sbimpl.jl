@@ -5579,6 +5579,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
     pop!(data, _SB_COMPONENT_NAMES_KEY)
+    pop!(data, :__brm_collection_buckets__, nothing)
     pop!(data, _SB_CELL_FORMULA_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
@@ -9089,6 +9090,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
             plate_inputs...)
+    if isempty(plate_inputs) && nsub_sym !== nothing
+        # A count-only plate binds its index even when the member's priors
+        # have no data arguments and the body never reads that index.
+        occupied = _rk_source_symbols!(Set{Symbol}(keys(data)), plate_body)
+        push!(kept_params, _rk_ast_fresh_name("brm_cell_index", occupied))
+    end
     plate_do = Expr(:do, plate_call,
         Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))
@@ -14463,6 +14470,9 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         cursor = 0
         per_target_ranges = Pair{Symbol,UnitRange{Int}}[]
         for (brmi_key, terms) in _sb_bucket_target_terms(bucket)
+            if any(t -> t isa _SBCellMeansTerm && _sb_cat_levels(t.term) isa _BRMMemberCodes, terms)
+                push!(get!(Set{Symbol}, data, :__brm_collection_buckets__), bucket_name)
+            end
             ncols = sum(_sb_ranef_term_ncols(t, data) for t in terms; init=0)
             ncols > 0 || error("sbimpl: `|$id_sym|` bucket sees empty term list for target `$brmi_key`")
             push!(per_target_ranges, brmi_key => (cursor+1):(cursor+ncols))
@@ -15420,6 +15430,12 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
         error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
     if length(cols) == 1
         col_idx = first(cols)
+        if bucket_name in get(data, :__brm_collection_buckets__, ())
+            index = Symbol(:col_idx_, target, :_, suffix)
+            data[index] = col_idx
+            _sb_record_static!(data, index)
+            col_idx = index
+        end
         if length(gterms) == 1 && gterms[1] === 1
             # Intercept fast path: Z is all-ones, skip the elementwise multiply.
             push!(stmts, :($r_name = $bucket_name[$idx_name, $col_idx]))

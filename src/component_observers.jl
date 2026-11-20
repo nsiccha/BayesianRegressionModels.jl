@@ -13,6 +13,11 @@ Base.getindex(r::_BRMObservedMemberRows, i::Int) = r.rows[i]
 Base.IndexStyle(::Type{<:_BRMObservedMemberRows}) = IndexLinear()
 _brm_data_vec(::Symbol, r::_BRMObservedMemberRows) = r.rows
 
+# One row of each selected member's vector. The subject may read several rows
+# of one member and none of another. The indices are ordinary data.
+_brm_observed_member_rows(values, members, rows) =
+    [values[members[i]][rows[i]] for i in eachindex(members, rows)]
+
 function _brm_strip_observers(st)
     _brm_is_observer(st) && return Expr(:block)
     if Meta.isexpr(st, (:if, :elseif, :block))
@@ -45,7 +50,7 @@ end
 # Each record supplies its own observation rows per subject. Concatenate the
 # observations of the records with this declaration, keeping a member index
 # on every row. Empty row sets have zero likelihood contributions.
-function _brm_observe_variant!(spec, subject, walk, columns, occupied)
+function _brm_observe_variant!(spec, subject, walk, columns, occupied, before_plate)
     (; loop, records, positions, result, variant, observer) = spec
     length(observer.args) == 6 || throw(ArgumentError(
         "@brm: write `@observe subject trajectory member begin ... end` in a component"))
@@ -67,15 +72,16 @@ function _brm_observe_variant!(spec, subject, walk, columns, occupied)
     fresh(part) = _rk_ast_fresh_name(string(loop.target, "_", variant, "_", part), occupied)
     index = fresh(:observation_member)
     columns[index] = [reduce(vcat, (fill(i, width(y[j])) for (i,y) in enumerate(rows))) for j in 1:n]
-    ports = Dict{Symbol,Symbol}()
-    function sliced(field)
-        name = get!(ports, field) do
+    ports = Dict{Tuple{Symbol,Bool},Symbol}()
+    function sliced(field; by_subject=true)
+        name = get!(ports, (field, by_subject)) do
             name = fresh(field)
             inputs = [_brm_record_field(records[i], field) for i in positions]
-            all(x -> length(x) == n, inputs) || throw(DimensionMismatch("observation field `$field` has a different subject axis"))
+            !by_subject || all(x -> length(x) == n, inputs) ||
+                throw(DimensionMismatch("observation field `$field` has a different subject axis"))
             columns[name] = map(1:n) do j
                 reduce(vcat, map(eachindex(inputs)) do i
-                    cell = inputs[i][j]
+                    cell = by_subject ? inputs[i][j] : inputs[i]
                     size = width(rows[i][j])
                     cell isa AbstractVector || return fill(cell, size)
                     length(cell) == size || throw(DimensionMismatch("observation field `$field` has a different row count from `$response`"))
@@ -88,6 +94,33 @@ function _brm_observe_variant!(spec, subject, walk, columns, occupied)
     end
     locals = Dict(st.args[1] => fresh(st.args[1]) for st in statements
         if Meta.isexpr(st, :(=), 2) && st.args[1] isa Symbol)
+    vector_reads = Dict{Tuple{Symbol,Any},Expr}()
+    function read_vector(returned, selection)
+        get!(vector_reads, (returned, selection)) do
+            # Read the collected vectors in model scope, before either
+            # backend flattens the producer for a row-aligned likelihood.
+            picks = if selection isa Integer
+                [fill(selection, length(ids)) for ids in columns[index]]
+            elseif Meta.isexpr(selection, :ref, 2) && selection.args[2] === subject &&
+                    haskey(columns, first(selection.args))
+                columns[first(selection.args)]
+            else
+                throw(ArgumentError("@brm: index the returned curve with one data row per observation, such as `member[setting.pick[s]]`"))
+            end
+            all(row -> all(i -> i isa Integer && i > 0, row), picks) ||
+                throw(ArgumentError("@brm: member curve row indices must be positive integers"))
+            members, indices, segments, values = fresh(:member_ids), fresh(:curve_rows),
+                fresh(:subject_rows), fresh(:read_values)
+            columns[members] = reduce(vcat, columns[index]; init=Int[])
+            columns[indices] = reduce(vcat, picks; init=Int[])
+            ends = cumsum(length.(picks))
+            columns[segments] = [collect(stop-length(pick)+1:stop) for (stop,pick) in zip(ends,picks)]
+            call = Expr(:call, GlobalRef(@__MODULE__, :_brm_observed_member_rows),
+                returned, members, indices)
+            push!(before_plate, Expr(:(=), values, call))
+            Expr(:ref, values, Expr(:ref, segments, subject))
+        end
+    end
     function rewrite(ex)
         ex === w && return walk
         if ex === member
@@ -96,6 +129,15 @@ function _brm_observe_variant!(spec, subject, walk, columns, occupied)
         end
         ex isa Symbol && return get(locals, ex, ex)
         ex isa Expr || return ex
+        if Meta.isexpr(ex, :ref, 2)
+            object, selection = ex.args
+            field = _brm_observer_field(object, member)
+            if object === member || (!isnothing(field) && result isa NamedTuple)
+                returned = object === member ? result : result[field]
+                returned isa Symbol || throw(ArgumentError("@brm: index one returned member field"))
+                return read_vector(returned, rewrite(selection))
+            end
+        end
         field = _brm_observer_field(ex, member)
         if !isnothing(field) && result isa NamedTuple
             haskey(result, field) || throw(ArgumentError("@brm: unknown returned member field `$field`"))
@@ -105,17 +147,19 @@ function _brm_observe_variant!(spec, subject, walk, columns, occupied)
             field = _brm_observer_field(first(ex.args), record)
             isnothing(field) || return sliced(field)
         end
+        setting = _brm_observer_field(ex, record)
+        isnothing(setting) || return sliced(setting; by_subject=false)
         Expr(ex.head, map(rewrite, ex.args)...)
     end
     result_statements = map(rewrite, statements)
-    source = ports[response]
+    source = ports[(response, true)]
     layout = (; collection=loop.target, spec.keys, response, source,
         members=reduce(vcat, columns[index]; init=Int[]))
     columns[source] = _BRMObservedMemberRows(columns[source], layout)
     result_statements
 end
 
-function _brm_expand_observers(st, observers, columns, occupied)
+function _brm_expand_observers(st, observers, columns, occupied, before_plate)
     Meta.isexpr(st, :macrocall) && first(st.args) === Symbol("@plate") || return st
     loop = last(st.args)
     subject, _, body = _brm_plate_loop(st)
@@ -127,7 +171,7 @@ function _brm_expand_observers(st, observers, columns, occupied)
             _, collection, index, walk = stmt.args
             index === subject || throw(ArgumentError("@brm: observe uses the enclosing subject index `$subject`"))
             for spec in observers[collection]
-                append!(rewritten, _brm_observe_variant!(spec, subject, walk, columns, occupied))
+                append!(rewritten, _brm_observe_variant!(spec, subject, walk, columns, occupied, before_plate))
             end
         else
             push!(rewritten, stmt)
