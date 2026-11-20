@@ -1,6 +1,7 @@
 # Structural refusals and a bounded independent Gaussian marginal oracle.
 include("nlme_svi_laplace_plan.jl")
 using Enzyme, DifferentiationInterface, LinearAlgebra, Random, LogDensityProblems
+import KrylovKit
 
 function laplace_test_conditional(full,u,latent)
     length(u)<=32 || error("test-only dense Gaussian oracle cap")
@@ -40,11 +41,11 @@ end
         v->Diagonal([.5,2.,3.])*v,ones(3);spectral_lower=1.)
     # An unconverged step reads the same two rules as the textbook construction.
     r=ones(17);a=.2;mass=sum(abs2,r)
-    it=BRM.KrylovKit.LanczosIterator(v->H*v,r,BRM.KrylovKit.ModifiedGramSchmidt2())
-    fact=BRM.KrylovKit.initialize(it)
+    it=KrylovKit.LanczosIterator(v->H*v,r,KrylovKit.ModifiedGramSchmidt2())
+    fact=KrylovKit.initialize(it)
     for k in 1:5
-        k>1 && BRM.KrylovKit.expand!(it,fact)
-        T=BRM.KrylovKit.rayleighquotient(fact);beta=BRM.KrylovKit.normres(fact)
+        k>1 && KrylovKit.expand!(it,fact)
+        T=KrylovKit.rayleighquotient(fact);beta=KrylovKit.normres(fact)
         shifted=SymTridiagonal(T.dv.-a,copy(T.ev));rhs=zeros(k);rhs[end]=1.
         radau=SymTridiagonal(vcat(T.dv,a+beta^2*(shifted\rhs)[end]),vcat(T.ev,beta))
         E,R=eigen(T),eigen(radau)

@@ -2933,6 +2933,7 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                                 obs_name::Union{Nothing,Symbol};
                                 required::Bool=false,
                                 row_source::Union{Nothing,Symbol}=nothing,
+                                fallback_row_source=nothing,
                                 implicit_intercept::Bool=false,
                                 population_columns=_brm_population_columns)
     raw_columns = Any[]
@@ -2975,13 +2976,20 @@ function _brm_population_design(target::Symbol, terms::Tuple,
     elseif isempty(concrete)
         if !isempty(row_sources)
             first(row_sources)
-        elseif isnothing(obs_name)
-            required && error(
-                "BRM backend lowering: intercept-only predictor `$target` has no " *
-                "observed response from which to determine its row axis")
-            return nothing
-        else
+        elseif !isnothing(obs_name)
             obs_name
+        else
+            # A coefficient-free summand on declared rows, such as an offset
+            # of a row-aligned model value, sizes a predictor nothing else
+            # does. The caller resolves it only when it is needed.
+            fallback = isnothing(fallback_row_source) ? nothing : fallback_row_source()
+            if isnothing(fallback)
+                required && error(
+                    "BRM backend lowering: intercept-only predictor `$target` has no " *
+                    "observed response from which to determine its row axis")
+                return nothing
+            end
+            fallback
         end
     else
         first(concrete).source

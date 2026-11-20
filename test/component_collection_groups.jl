@@ -153,4 +153,181 @@ end
         @test sort(gradient) ≈ sort(ref_gradient)
     end
 end
+
+# A member formula can carry its own terms beside the margin it puts in the
+# parent's block. The member keeps its authored predictor, so its `effect`
+# priors address it, as in a model that writes each member out.
+@brm function centred_panel(settings)
+    shift ~ 1 + (1 | parentblock(:p) | settings.site)
+    effect(shift, Intercept) ~ Normal(settings.center, 0.7)
+    return sum(shift)
+end
+
+const centred_panels = @brm begin
+    root ~ 0 + (1 | p | site)
+    for entry in records
+        readings[entry.id] ~ centred_panel(entry)
+    end
+    primary ~ Normal(root, 1)
+    y ~ Normal(readings, 1)
+end
+
+const centred_explicit = @brm begin
+    root ~ 0 + (1 | p | site)
+    a ~ 1 + (1 | p | a_site)
+    effect(a, Intercept) ~ Normal(0.3, 0.7)
+    b ~ 1 + (1 | p | b_site)
+    effect(b, Intercept) ~ Normal(-0.4, 0.7)
+    primary ~ Normal(root, 1)
+    ya ~ Normal(sum(a), 1)
+    yb ~ Normal(sum(b), 1)
+end
+
+@brm function dosed_panel(settings)
+    shift ~ 1 + settings.dose + (1 | parentblock(:p) | settings.site)
+    effect(shift, Intercept) ~ Normal(settings.center, 0.7)
+    return sum(shift)
+end
+
+const dosed_panels = @brm begin
+    root ~ 0 + (1 | p | site)
+    for entry in records
+        readings[entry.id] ~ dosed_panel(entry)
+    end
+    primary ~ Normal(root, 1)
+    y ~ Normal(readings, 1)
+end
+
+const dosed_explicit = @brm begin
+    root ~ 0 + (1 | p | site)
+    a ~ 1 + a_dose + (1 | p | a_site)
+    effect(a, Intercept) ~ Normal(0.3, 0.7)
+    b ~ 1 + b_dose + (1 | p | b_site)
+    effect(b, Intercept) ~ Normal(-0.4, 0.7)
+    primary ~ Normal(root, 1)
+    ya ~ Normal(sum(a), 1)
+    yb ~ Normal(sum(b), 1)
+end
+
+# The shared block's coordinates have the same names and positions in a
+# collection and in the model that writes each member out.
+function check_shared_block(names, twin_names, shared)
+    @test length(names) == length(twin_names)
+    block = findall(startswith("b_p_site"), names)
+    @test length(block) == shared
+    @test block == findall(startswith("b_p_site"), twin_names)
+    @test names[block] == twin_names[block]
+end
+
+# The two lowerings of one model at the same unconstrained point. Members are
+# fitted in key order, which is the order the explicit model declares them in,
+# so the two parameter vectors line up once the shared block's names agree.
+function check_member_twin(m, twin, name; shared)
+    stan = consumer_stan(m, "collection-" * name; mod=@__MODULE__).model
+    ref = consumer_stan(twin, "explicit-" * name; mod=@__MODULE__).model
+    names = BridgeStan.param_unc_names(stan)
+    n = length(names)
+    check_shared_block(names, BridgeStan.param_unc_names(ref), shared)
+    rk, problem = consumer_problem(m)
+    rk_twin, twin_problem = consumer_problem(twin)
+    @test rk.model.layout.total == n
+    check_shared_block(string.(coordinate_names(rk.model.layout)),
+        string.(coordinate_names(rk_twin.model.layout)), shared)
+    for u in (zeros(n), collect(range(-0.32, 0.41; length=n)), [0.3sin(i) for i in 1:n])
+        value, grad = BridgeStan.log_density_gradient(stan, u; propto=false)
+        expected, ref_grad = BridgeStan.log_density_gradient(ref, u; propto=false)
+        @test value ≈ expected
+        @test grad ≈ ref_grad
+        value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
+        expected, ref_grad = LogDensityProblems.logdensity_and_gradient(twin_problem, u)
+        @test value ≈ expected
+        @test grad ≈ ref_grad
+    end
+    (; rk, stan)
+end
+
+@stestset "A member keeps its intercept beside its parent-block margin" begin
+    site = ["x","y"]
+    records = [(id=:b, center=-0.4, site=["y","y","x"]),
+               (id=:a, center=0.3, site=["x","y"])]
+    input = (; records, site, primary=[0.1,-0.1], y=[0.4,0.2])
+    m = centred_panels(input)
+    twin = centred_explicit((; site, input.primary, a_site=records[2].site,
+        b_site=records[1].site, ya=[input.y[2]], yb=[input.y[1]]))
+    (; rk, stan) = check_member_twin(m, twin, "parent-block-intercept"; shared=12)
+    sb = SBBRMI(m; mod=@__MODULE__, total_groups=())
+    @test only(ranef_blocks(sb)).n_terms == 3
+    d = brm_descriptor(sb)
+    cnames = BridgeStan.param_names(stan)
+    scales = [only(brm_ranef_sd_coordinates(d, :shift, cnames; id=:p,
+        submodel=(:readings, key)).coordinates) for key in (:a,:b)]
+    @test scales == [findfirst(==("b_p_site_tau.$i"), cnames) for i in (2,3)]
+    @test all(key -> length(brm_outputs(d; submodel=(:readings, key), logical=:shift)) == 1, (:a,:b))
+    more = vcat(records, [(; records[1]..., id=:c)])
+    larger = centred_panels((; input..., records=more, y=[input.y; 0.3]))
+    @test stan_code(SBBRMI(larger; mod=@__MODULE__, total_groups=())) == stan_code(sb)
+    small_program = BRM._rk_emit_ast(rk.plan)
+    large_program = BRM._rk_emit_ast(RKBRMI(larger).plan)
+    @test small_program.defs == large_program.defs
+    @test small_program.main == large_program.main
+    reordered = (; input..., records=reverse(records), y=reverse(input.y))
+    @test stan_code(reprocess(sb, reordered)) == stan_code(sb)
+    @test reprocess(rk, reordered) isa RKBRMI
+end
+
+@stestset "A member covariate and intercept sit beside its parent-block margin" begin
+    site = ["x","y"]
+    records = [(id=:b, center=-0.4, dose=[0.2,0.9,0.4], site=["y","y","x"]),
+               (id=:a, center=0.3, dose=[0.7,0.1], site=["x","y"])]
+    input = (; records, site, primary=[0.1,-0.1], y=[0.4,0.2])
+    twin = dosed_explicit((; site, input.primary, a_site=records[2].site, a_dose=records[2].dose,
+        b_site=records[1].site, b_dose=records[1].dose, ya=[input.y[2]], yb=[input.y[1]]))
+    check_member_twin(dosed_panels(input), twin, "parent-block-covariate"; shared=12)
+end
+
+# One member written two ways: its intercept as a coefficient of the formula
+# that also holds its parent-block margin, and as a scalar beside an
+# intercept-free margin. Both return one value per site to the clause.
+@brm function centred_reading(entry)
+    base ~ 1 + (1 | parentblock(:p) | entry.site)
+    effect(base, Intercept) ~ Normal(entry.center, 0.7)
+    @observe s trajectory member begin
+        entry.y[s] ~ Normal(member[entry.rows[s]] .+ trajectory, 0.5)
+    end
+    return base
+end
+
+@brm function shifted_reading(entry)
+    centre ~ Normal(entry.center, 0.7)
+    margin ~ 0 + (1 | parentblock(:p) | entry.site)
+    base = centre .+ margin
+    @observe s trajectory member begin
+        entry.y[s] ~ Normal(member[entry.rows[s]] .+ trajectory, 0.5)
+    end
+    return base
+end
+
+observed_readings(component) = brm(quote
+    level ~ 1 + (1 | p | site)
+    effect(level, Intercept) ~ Normal(0.0, 1.0)
+    for entry in records
+        channels[entry.id] ~ $component(entry)
+    end
+    primary ~ Normal(level, 1)
+    @plate for i in eachindex(level)
+        trajectory[i] = 0.5 * level[i]
+        observe(channels, i, trajectory[i])
+    end
+end; mod=@__MODULE__)
+
+@stestset "An observation clause reads a member's intercept and parent-block margin" begin
+    site = ["s1","s2","s3"]
+    reading(id, center, counts, shift) = (; id, center, site,
+        rows=[fill(i, n) for (i, n) in enumerate(counts)],
+        y=[shift .+ 0.1 .* collect(1:n) for n in counts])
+    records = [reading(:late, -0.4, [2,0,1], 0.3), reading(:early, 0.3, [1,2,2], -0.2)]
+    input = (; site, records, primary=[0.1,-0.2,0.4])
+    check_member_twin(observed_readings(:centred_reading)(input),
+        observed_readings(:shifted_reading)(input), "parent-block-observed"; shared=15)
+end
 end

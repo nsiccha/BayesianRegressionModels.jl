@@ -53,57 +53,9 @@ function _brm_svi_laplace_gauss_rule(pivots, offdiagonal)
        largest=first(singular)^2, smallest=last(singular)^2)
 end
 
-function _brm_svi_laplace_logquadratic(H, r; spectral_lower, atol=1e-9, rtol=1e-9,
-        maxdim=64)
-    isfinite(spectral_lower) && spectral_lower > 0 ||
-        throw(ArgumentError("a positive spectral lower bound is required"))
-    maxdim >= 1 || throw(ArgumentError("maxdim must be positive"))
-    atol >= 0 && rtol >= 0 || throw(ArgumentError("negative quadrature tolerance"))
-    mass = sum(abs2, r)
-    iszero(mass) && return (; value=0.0, lower=0.0, upper=0.0,
-        iterations=0, converged=true, roundoff=0.0)
-    it = KrylovKit.LanczosIterator(H, r, KrylovKit.ModifiedGramSchmidt2())
-    fact = KrylovKit.initialize(it)
-    limit = min(length(r), maxdim)
-    result = nothing
-    # A strictly smaller valid bound keeps T-aI nonsingular even when the true
-    # spectrum contains spectral_lower exactly.
-    a = spectral_lower / 2
-    for k in 1:limit
-        T = KrylovKit.rayleighquotient(fact)
-        factors = _brm_svi_laplace_pivots(T, a)
-        gauss = _brm_svi_laplace_gauss_rule(factors.pivots, T.ev)
-        scale = max(gauss.largest, spectral_lower)
-        slack = 128eps(Float64)*scale
-        gauss.smallest >= spectral_lower - slack ||
-            throw(ArgumentError("GaussianBlockLaplace curvature contradicts its spectral lower bound"))
-        upper = mass * gauss.value
-        residual = KrylovKit.normres(fact)
-        # At invariant-subspace termination the Gaussian rule is exact up to
-        # floating-point error. Do not invert the singular shifted projection.
-        terminated = residual <= 64eps(Float64)*scale
-        if terminated
-            lower = upper
-        else
-            # The added diagonal alpha=a+beta^2 e_k'(T-aI)^-1 e_k gives the
-            # augmented Jacobi matrix the prescribed eigenvalue a, and its pivot
-            # alpha-beta^2/pivots[k] is this sum, positive by construction.
-            pivot = a + residual^2 * factors.gap / (factors.pivots[k] * factors.shifted)
-            lower = mass * _brm_svi_laplace_gauss_rule(
-                vcat(factors.pivots, pivot), vcat(T.ev, residual)).value
-        end
-        roundoff = 256eps(Float64) * max(mass, abs(lower), abs(upper))
-        lower <= upper + roundoff || error("inconsistent quadrature bounds")
-        # Report a crossed interval inside the roundoff allowance as a point.
-        lower = min(lower, upper)
-        value = (lower+upper)/2
-        converged = upper-lower <= 2*(atol+rtol*abs(value)) + roundoff
-        result = (; value, lower, upper, iterations=k, converged, roundoff)
-        converged && return result
-        k < limit && KrylovKit.expand!(it, fact)
-    end
-    result # A caller must explicitly handle an exhausted numerical budget.
-end
+_brm_svi_laplace_logquadratic(H, r; spectral_lower, atol=1e-9, rtol=1e-9, maxdim=64) =
+    _brm_lazy(:KrylovKit, _brm_krylovkit_logquadratic, H, r;
+        spectral_lower, atol, rtol, maxdim)
 
 # Fixed independent Rademacher probes. Quadrature uncertainty and sampling
 # variability are separate: mc_se is a diagnostic, NOT a confidence guarantee.

@@ -1373,8 +1373,8 @@ function _brm_spl_inverse_blocks(p::BRMSparseLaplaceProblem, state, sets)
     on_pattern(i, j) = any(k -> rowvals(p.pattern)[k] == i, nzrange(p.pattern, j))
     selected = [all(on_pattern(i, j) for i in set, j in set) for set in sets]
     pairs = [(i, j) for (set, ok) in zip(sets, selected) if ok for i in set for j in set]
-    Zs = isempty(pairs) ? nothing : selinv_extract(selinv(state.F; depermute=true).Z,
-        sparse(first.(pairs), last.(pairs), 1.0, length(p.integrated),
+    Zs = isempty(pairs) ? nothing : _brm_lazy(:SelectedInversion, _brm_selinv_on_pattern,
+        state.F, sparse(first.(pairs), last.(pairs), 1.0, length(p.integrated),
             length(p.integrated)))
     map(zip(sets, selected)) do (set, ok)
         ok && return [Zs[i, j] for i in set, j in set]
