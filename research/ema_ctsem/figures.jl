@@ -4,7 +4,8 @@
 #   julia --project=research/adaptive_centering/plots research/ema_ctsem/figures.jl [outdir]
 # `outdir` defaults to research/ema_ctsem/results/figures.
 
-using AlgebraOfVega, CairoMakie
+using AlgebraOfVega
+using CairoMakie: Figure, Label, save
 import AlgebraOfGraphics
 
 results(name) = joinpath(@__DIR__, "results", name)

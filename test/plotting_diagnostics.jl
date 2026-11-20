@@ -11,13 +11,26 @@ function objects(value)
     end
 end
 
+# Inline data tables: `values` holding row objects, outside AoV's `_aov*`
+# runtime records (a summarised figure keeps a copy of its rows in
+# `_aovSummary`). AoV also writes `values` on an axis that lists its ticks
+# (every log axis since AoV 0.2.40), so a bare `haskey(d, "values")` can find a
+# tick list beside the table.
+spec_objects(value) = value isa AbstractDict ?
+    vcat([value], reduce(vcat, (spec_objects(v) for (k, v) in value
+                                if !startswith(string(k), "_aov")); init=Any[])) :
+    value isa AbstractVector ? reduce(vcat, (spec_objects(v) for v in value); init=Any[]) :
+    Any[]
+datatables(spec) = filter(d -> get(d, "values", nothing) isa AbstractVector &&
+    all(r -> r isa AbstractDict, d["values"]), spec_objects(spec))
+
 @testset "optional AoV diagnostic specifications" begin
     @test !isnothing(Base.get_extension(BayesianRegressionModels,
                                        :BayesianRegressionModelsAlgebraOfVegaExt))
     draws = reshape(collect(1.0:15.0), 5, 3)
     posterior = to_vegalite(brm_posteriorplot(draws; x=[2, 4, 6], probs=[0.9, 0.8, 0.5]);
                             interactive=false)
-    tables = filter(d -> haskey(d, "values"), objects(posterior))
+    tables = datatables(posterior)
     @test !isempty(tables)
     @test all(d -> !haskey(d, "params"), objects(posterior))
     @test_throws DimensionMismatch brm_posteriorplot(draws; x=[1, 2])
@@ -33,8 +46,8 @@ end
     larger_observed = to_vegalite(brm_posteriorplot(draws; x=observations.x,
         observations, observation_markersize=10); interactive=false)
     @test any(d -> get(d, "size", nothing) == 50, objects(larger_observed))
-    @test filter(d -> haskey(d, "values"), objects(observed)) ==
-          filter(d -> haskey(d, "values"), objects(larger_observed))
+    @test datatables(observed) ==
+          datatables(larger_observed)
 
     rows = [(; coordinate=Float64(i), gradient=-2.0i,
                configuration=c, basis_label="Basis 01")
@@ -58,15 +71,15 @@ end
                                interactive=false)
     @test any(d -> get(d, "size", nothing) == 72, objects(larger_pair))
     @test any(d -> get(d, "opacity", nothing) == 0.2, objects(larger_pair))
-    @test only(filter(d -> haskey(d, "values"), objects(larger_pair)))["values"] ==
-          only(filter(d -> haskey(d, "values"), objects(pair)))["values"]
+    @test only(datatables(larger_pair))["values"] ==
+          only(datatables(pair))["values"]
     gp = (; coordinates=reshape(collect(1.0:10), 5, 2), marginal_sd=ones(5),
              length_scales=fill(0.5, 5, 1))
     gp_pair = to_vegalite(brm_pairplot(gp; bases=[2], markersize=12, opacity=0.2);
                           interactive=false)
     @test any(d -> get(d, "size", nothing) == 72, objects(gp_pair))
     @test all(r -> r["basis_label"] == "Basis 02",
-        only(filter(d -> haskey(d, "values"), objects(gp_pair)))["values"])
+        only(datatables(gp_pair))["values"])
 
     centering = [(; basis=b, predictor=p, centeredness=0.1b,
                     configuration=c) for b in 1:3 for p in ("Mean", "Log-SD")
@@ -76,7 +89,7 @@ end
     school_selection = to_vegalite(brm_centerednessplot(centering;
         compare=true, xlabel="School"); interactive=false)
     @test any(d -> get(d, "title", nothing) == "School", objects(school_selection))
-    selected_values = only(filter(d -> haskey(d, "values"), objects(selected)))["values"]
+    selected_values = only(datatables(selected))["values"]
     # The line and point layers may each carry a copy of the input table.
     @test Set((r["basis"], r["predictor"], r["centeredness"], r["configuration"])
               for r in selected_values) == Set(Tuple(r) for r in centering)
@@ -89,8 +102,8 @@ end
     bounded_loss = to_vegalite(brm_centering_lossplot(losses; ylimits=(-1, 0));
                                interactive=false)
     @test any(d -> get(d, "domain", nothing) == [-1, 0], objects(bounded_loss))
-    @test only(filter(d -> haskey(d, "values"), objects(bounded_loss)))["values"] ==
-          only(filter(d -> haskey(d, "values"), objects(loss_spec)))["values"]
+    @test only(datatables(bounded_loss))["values"] ==
+          only(datatables(loss_spec))["values"]
 
     loss_rows = Base.get_extension(BayesianRegressionModels,
         :BayesianRegressionModelsAlgebraOfVegaExt).loss_plot_rows
@@ -120,7 +133,7 @@ end
               target=:mean, logical=:mu, response=:y, scale=:response,
               focal=:x)
     pred = to_vegalite(brm_predictionsplot(cond); interactive=false)
-    tables = filter(d -> haskey(d, "values"), objects(pred))
+    tables = datatables(pred)
     @test !isempty(tables)
     @test all(d -> !haskey(d, "params"), objects(pred))
     @test any(d -> length(d["values"]) == 4, tables)
@@ -145,7 +158,7 @@ end
     comp = to_vegalite(brm_comparisonsplot(contrast; x_by=:x); interactive=false)
     @test all(d -> !haskey(d, "params"), objects(comp))
     @test any(d -> get(d, "field", nothing) == "pair", objects(comp))
-    comp_tables = filter(d -> haskey(d, "values"), objects(comp))
+    comp_tables = datatables(comp)
     # AoV merges the ribbon and null-reference layers into one table with
     # `__src` provenance: 6 ribbon rows plus 6 reference rows here.
     rows = only(comp_tables)["values"]
@@ -159,8 +172,7 @@ end
     ratio = merge(contrast, (; how=:ratio))
     ratio_spec = to_vegalite(brm_comparisonsplot(ratio; x_by=:x);
                              interactive=false)
-    ratio_rows = only(filter(d -> haskey(d, "values"),
-                             objects(ratio_spec)))["values"]
+    ratio_rows = only(datatables(ratio_spec))["values"]
     @test all(r -> r["y"] == 1.0, filter(r -> haskey(r, "y"), ratio_rows))
     @test_throws ErrorException brm_comparisonsplot(contrast; x_by=:nope)
     @test_throws ErrorException brm_comparisonsplot((; draws=contrast.draws);

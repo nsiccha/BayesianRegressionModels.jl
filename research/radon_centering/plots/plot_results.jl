@@ -1,4 +1,5 @@
-using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, CairoMakie, JSON, SHA, TOML
+using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, SHA, TOML
+using CairoMakie: Figure, Label, save
 import Pkg
 import AlgebraOfGraphics
 

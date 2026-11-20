@@ -3,7 +3,6 @@ uuid = "cd55decf-6be8-4ea5-907a-b2dc35e4cc14"
 version = "0.1.0"
 
 [deps]
-AlgebraOfGraphics = "cbdf2221-f076-402e-a563-3d30da359d67"
 AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
 BayesianRegressionModels = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 BridgeStan = "c88b6f0a-829e-4b0b-94b7-f06ab5908f5a"
@@ -29,6 +28,7 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [compat]
+AlgebraOfVega = "0.2.76"
 BayesianRegressionModels = "0.2.179"
 HTMXObjects = "0.1.65"
 BridgeStan = "2.9"

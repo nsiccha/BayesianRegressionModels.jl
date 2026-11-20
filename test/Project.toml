@@ -54,7 +54,7 @@ ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 [compat]
 ReparametrizableDistributions = "0.3"
 TreeArrays = "0.2.0"
-AlgebraOfVega = "0.2.14"
+AlgebraOfVega = "0.2.76"
 Distributions = "0.25.133"
 BridgeStan = "2.9"
 Enzyme = "0.13"
@@ -105,7 +105,7 @@ rev = "c4e04937549881e7591bb1425fa5fe58c8ef1a02"
 
 [sources.AlgebraOfVega]
 url = "https://github.com/nsiccha/AlgebraOfVega.jl"
-rev = "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"
+rev = "4c3390492d4973423e9a25f7616393e686de2259"
 
 [sources.Distributions]
 url = "https://github.com/nsiccha/Distributions.jl.git"
