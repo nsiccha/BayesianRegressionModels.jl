@@ -2060,7 +2060,7 @@ end
 
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
-        lone_intercepts=Dict{Symbol,Any}(), documentation=())
+        lone_intercepts=Dict{Symbol,Any}(), documentation=(), collection_cell=false)
     taken = union(Set(keys(plan.columns)), Set(keys(_rk_input_bindings(plan))),
         Set(keys(_rk_generated_inputs(plan))),
         Set(p.name for p in plan.parameters),
@@ -2194,13 +2194,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing && continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; level_indices, level_sources,
+            ranef_effects, taken, bindings; level_indices, level_sources, collection_cell,
             predictors=plan.predictors, population_priors=joint_priors, coordinates))
     end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing || continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; level_indices, level_sources, coordinates,
+            ranef_effects, taken, bindings; level_indices, level_sources, coordinates, collection_cell,
             columns=plan.columns))
     end
     vector_priors = Dict(v.name => v for v in plan.vector_parameters)
@@ -2465,7 +2465,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
-            hsgp_stmts, locals, fit = _rk_ast_value_hsgp(defs, term, taken, bindings)
+            hsgp_stmts, locals, fit = _rk_ast_value_hsgp(defs, term, taken, bindings; collection_cell)
             append!(stmts, hsgp_stmts)
             # An HSGP component owns its hyperparameters and basis weights
             # under its id. A grouped or hyper-predicted term (`grouped`) also

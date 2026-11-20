@@ -231,6 +231,11 @@ seasonal term with `cov=:periodic, period=instrument.period`, or deviations
 by subject with `by=instrument.subject, anchor=0.0`. Each term reads the
 same instrument's time grid.
 
+For prediction on new time grids, keep the data-bound backend and call
+`reprocess` with the same member keys. The RK fitted-state export currently
+requires fitted summaries at model scope, so these per-member smooths need
+the original fitted backend for replay.
+
 An observation clause lets each member use a trajectory computed in a
 parent plate. Here each sensor supplies its readings as one vector per
 subject, in the order of `input`. An empty vector represents a subject

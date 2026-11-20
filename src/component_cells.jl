@@ -87,13 +87,10 @@ _rk_is_cell_component(statement) = Meta.isexpr(statement, :(=), 2) &&
 function _rk_collection_smooth_inputs!(plan)
     taken = Set{Symbol}(keys(plan.columns))
     for predictor in plan.regression.predictors, (i, term) in pairs(predictor.terms)
-        term.kind === :hsgp || continue
-        options = merge(term.options, (; collection_cell=true))
-        if haskey(options, :group_index)
-            levels = _rk_ast_fresh_name(string(options.id, "_fitted_levels"), taken)
-            plan.columns[levels] = options.group_levels
-            options = merge(options, (; collection_levels=levels))
-        end
+        term.kind === :hsgp && haskey(term.options, :group_index) || continue
+        levels = _rk_ast_fresh_name(string(term.options.id, "_fitted_levels"), taken)
+        plan.columns[levels] = term.options.group_levels
+        options = merge(term.options, (; collection_levels=levels))
         predictor.terms[i] = _RKTermSpec(term.kind, term.columns, options, term.addressee, term.label)
     end
 end

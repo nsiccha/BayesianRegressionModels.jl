@@ -347,7 +347,7 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     cell === nothing || _rk_collection_smooth_inputs!(plan)
     cells = Dict{Symbol,Symbol}()
     coordinates = Any[]
-    emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates,
+    emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates, collection_cell=cell !== nothing,
         documentation=brm_documentation(instance))
     _rk_strip_adaptive_records!(coordinates)
     cell_output = _brm_component_cell_output(component, instance)
