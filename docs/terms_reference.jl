@@ -50,6 +50,7 @@ const EXAMPLES = Dict(
         "Random walk" => "mu ~ 1 + rw(t); y ~ Normal(mu, 1); sd(mu, rw(t)) ~ Exponential(0.2)",
         "Stationary grouped AR(1)" => "mu ~ 1 + cdar(t; by=g, cor=C); y ~ Normal(mu, 1)",
         "Areal BYM2" => "mu ~ 1 + car(g; edges=(from, to), type=:bym2); y ~ Normal(mu, 1); mixing(mu, car(g)) ~ Beta(2, 2)",
+        "Areal scaled ICAR" => "mu ~ 1 + car(g; edges=(from, to), type=:icar, scaled=true); y ~ Normal(mu, 1); sd(mu, car(g)) ~ Exponential(1)",
     ],
     :groups => [
         "Correlated margins" => "mu ~ 1 + x + (1 + x | p | g); y ~ Normal(mu, 1); sd(:, p) ~ Exponential(0.5); cor(:, p) ~ LKJCholesky(2, 2)",

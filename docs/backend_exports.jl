@@ -9,6 +9,7 @@ const BRM_DOCS_BACKEND_EXPORTS = Set(Symbol[
     Symbol("_sb_ar1"),
     Symbol("_sb_car_bym2"),
     Symbol("_sb_car_icar"),
+    Symbol("_sb_car_icar_scaled"),
     Symbol("_sb_cat"),
     Symbol("_sb_cat_cells"),
     Symbol("_sb_cat_cells_normal"),
