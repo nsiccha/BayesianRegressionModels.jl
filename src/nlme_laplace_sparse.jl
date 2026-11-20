@@ -39,9 +39,11 @@ function _rk_slap_values_and_tangents end
 # An integrated block: its draws' indices in the integrated vector z (levels ×
 # margins), the `omega` entries (scales, correlations, persistence) that move
 # how its draws enter the rows, and its prior precision: the identity
-# (standardized draws) or, for an areal field's draws (one margin), the graph
-# Laplacian of its `edges` (level pairs) plus λ 11ᵀ over each soft-sum
-# component's levels.
+# (standardized draws) or, for a field's draws (one margin), the weighted graph
+# Laplacian of its `edges` (level pairs, `weights[e]` each) plus λ 11ᵀ over each
+# soft-sum component's levels. An areal field's edges weigh 1; a sum-to-zero
+# walk's are the pairs of its difference precision `DᵀD`, whose rows sum to zero,
+# so `xᵀDᵀDx = Σ_e w_e (x_i - x_j)²` with `w_e = -(DᵀD)_ij` (some negative).
 struct _BRMSlapBlock
     declaration::Symbol
     group::Symbol
@@ -53,9 +55,13 @@ struct _BRMSlapBlock
     λ::Vector{Float64}
     # `:gmrf` for a native field, whose structured prior `p.gmrf` holds
     prior::Symbol
+    weights::Vector{Float64}
 end
 _BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ) =
     _BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ, :standard)
+_BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ, prior) =
+    _BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ, prior,
+        ones(size(edges, 2)))
 _brm_spl_identity(b::_BRMSlapBlock) = b.prior === :standard && isempty(b.sums) &&
     size(b.edges, 2) == 0
 
@@ -219,14 +225,16 @@ function _brm_slap_zero_integrated!(u, p::BRMSparseLaplaceProblem)
 end
 
 # The grouping column a latent block is integrated by: a random-effect block's
-# and a `cdar` walk's group, a `car` field's area column.
-_brm_spl_record_group(r) = r.kind === :car ? r.area :
+# and a `cdar` walk's group, a `car` field's area column, an `rw` walk's time
+# column.
+_brm_spl_record_group(r) = r.kind === :car ? r.area : r.kind === :rw ? r.time :
     r.kind === :population ? :coefficients :
     r.kind in (:vector, :gmrf, :cell_gmrf) ? r.declaration : r.group
 _brm_spl_record_declaration(r) =
     r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) :
     r.kind === :population ? _brm_spl_coefficient_name(r) : r.declaration
-const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector, :gmrf, :cell_gmrf)
+const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :rw, :vector, :gmrf,
+    :cell_gmrf)
 
 # A formula coefficient's packed coordinate: its declaration, then its index
 # (a scalar coefficient, such as a lone intercept, has no index).
@@ -258,7 +266,7 @@ function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
             "here is also a grouping or declaration of the model's latent terms; rename it")
     for g in integrate
         g in available || _brm_nlme_error("brm_laplace_problem: integrate names " *
-            "`$g`, which groups no random-effect block, `cdar` walk or `car` field " *
+            "`$g`, which groups no random-effect block, `cdar` or `rw` walk or `car` field " *
             "and names no declared vector of the model; its groupings and declarations are " *
             "$(isempty(available) ? "none" : join(repr.(available), ", "))" *
             (g === :coefficients ? "; the model has no population coefficient with its " *
@@ -305,6 +313,21 @@ function _brm_spl_car_graph(backend::RKBRMI, r)
     (; S=sum(length, sums; init=0), edges, sums, λ=[1 / (0.001 * length(c))^2 for c in sums])
 end
 
+# A sum-to-zero walk's prior over its `n` standardized values: its `order`-th
+# differences `D` are standard normal, so its precision `DᵀD` (rows summing to
+# zero) is the weighted pair form `Σ_e w_e (x_i - x_j)²`, `w_e = -(DᵀD)_ij`:
+# order 1 weighs neighbours 1 (`car`'s path graph); order 2 neighbours by its
+# second-difference stencil and steps two apart by -1.
+function _brm_spl_walk_graph(n::Int, order::Int)
+    D = order == 1 ?
+        spdiagm(n - 1, n, 0 => fill(-1.0, n - 1), 1 => ones(n - 1)) :
+        spdiagm(n - 2, n, 0 => ones(n - 2), 1 => fill(-2.0, n - 2), 2 => ones(n - 2))
+    Q = D' * D
+    pairs = [(i, j) for j in 1:n for i in rowvals(Q)[nzrange(Q, j)] if i < j && Q[i, j] != 0]
+    (; edges=isempty(pairs) ? zeros(Int, 2, 0) : reduce(hcat, collect.(pairs)),
+       weights=[-Q[i, j] for (i, j) in pairs])
+end
+
 # Packed latent layout only; safe before any derivative preparation.
 function _brm_spl_layout(backend, integrate; declarations=nothing)
     records = _brm_spl_records(backend, integrate; declarations)
@@ -327,7 +350,7 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         z
     end
     function block!(declaration, group, z, hyper; edges=zeros(Int, 2, 0),
-            sums=Vector{Int}[], λ=Float64[], prior=:standard)
+            sums=Vector{Int}[], λ=Float64[], prior=:standard, weights=ones(size(edges, 2)))
         js = Int[]
         for d in hyper
             # Known scales/correlations have no sampled coordinate declaration.
@@ -339,7 +362,7 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
             end
         end
         push!(blocks, _BRMSlapBlock(declaration, group, size(z, 2), z, unique(js), edges,
-            sums, λ, prior))
+            sums, λ, prior, weights))
     end
     for r in records
         if r.kind === :ranef
@@ -376,6 +399,26 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
                 block!(r.declaration, r.declaration,
                     draws!(reshape([Symbol(prefix, ".", j) for j in 1:n], :, 1)),
                     (haskey(position, s) ? s : nothing,); prior=:gmrf)
+            end
+        elseif r.kind === :rw
+            # A zero-start walk: its standardized innovations, one level of
+            # `n - 1` margins, each row reading the ones up to its step. A
+            # sum-to-zero walk: its standardized values, one per step, under its
+            # difference precision as weighted edges plus `car`'s soft sum.
+            sigma = Symbol(r.declaration, ".", r.locals.sigma)
+            n = length(r.steps)
+            if r.sum_to_zero
+                phi = Symbol(r.declaration, ".", r.locals.phi)
+                walk = _brm_spl_walk_graph(n, r.order)
+                block!(r.declaration, r.time,
+                    draws!(reshape([Symbol(phi, ".", t) for t in 1:n], :, 1)), (sigma,);
+                    walk.edges, walk.weights, sums=[collect(1:n)],
+                    λ=[1 / (0.001 * n)^2])
+            elseif n > 1
+                # (a walk over one step has no innovation to integrate)
+                z = Symbol(r.declaration, ".", r.locals.z)
+                block!(r.declaration, r.time,
+                    draws!(reshape([Symbol(z, ".", k) for k in 1:(n - 1)], 1, :)), (sigma,))
             end
         elseif r.kind === :cdar
             # standardized innovations, groups × steps; scale and persistence
@@ -672,7 +715,7 @@ function _brm_spl_prior_quad(p::BRMSparseLaplaceProblem, z)
             continue
         end
         for e in axes(b.edges, 2)
-            q += (z[b.z[b.edges[1, e], 1]] - z[b.z[b.edges[2, e], 1]])^2
+            q += b.weights[e] * (z[b.z[b.edges[1, e], 1]] - z[b.z[b.edges[2, e], 1]])^2
         end
         for (c, levels) in enumerate(b.sums)
             q += b.λ[c] * sum(l -> z[b.z[l, 1]], levels)^2
@@ -962,6 +1005,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
             for c in group.cells for reduction in c.terms for term in reduction)))
     edges = [(b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]) for b in p.blocks
         for e in axes(b.edges, 2)]
+    edge_weights = [b.weights[e] for b in p.blocks for e in axes(b.edges, 2)]
     # A native field's prior couples its draws through Q's pattern.
     couplings = p.gmrf === nothing ? edges : vcat(edges, _brm_gmrf_pattern_pairs(p.gmrf))
     built = _brm_spl_pattern(footprints, n, couplings)
@@ -977,7 +1021,8 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
             prior[index(i, i)] = get(prior, index(i, i), 0.0) + 1.0
         end
     end
-    for (i, j) in edges, (a, c, v) in ((i, i, 1.0), (j, j, 1.0), (i, j, -1.0), (j, i, -1.0))
+    for ((i, j), w) in zip(edges, edge_weights),
+            (a, c, v) in ((i, i, w), (j, j, w), (i, j, -w), (j, i, -w))
         prior[index(a, c)] = get(prior, index(a, c), 0.0) + v
     end
     p.prior_nz = collect(keys(prior))
@@ -1286,15 +1331,16 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
         end
         for e in axes(b.edges, 2)
             i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
+            w = b.weights[e]
             d = z[i] - z[j]
-            _brm_spl_add_value!(fc, correction, p.component[i], -d^2 / 2)
+            _brm_spl_add_value!(fc, correction, p.component[i], -w * d^2 / 2)
             if fb !== nothing
-                fb[p.sblock[i]] -= d^2 / 2
-                p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= d^2 / 2)
+                fb[p.sblock[i]] -= w * d^2 / 2
+                p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= w * d^2 / 2)
             end
             if g !== nothing
-                g[i] -= d
-                g[j] += d
+                g[i] -= w * d
+                g[j] += w * d
             end
         end
         for (c, levels) in enumerate(b.sums)

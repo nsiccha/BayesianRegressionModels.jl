@@ -291,7 +291,7 @@ _RKLikelihoodSpec(fields::Vararg{Any,27}) = _RKLikelihoodSpec(fields..., false)
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
                 # :ranef_gather | :spline | :gp | :hsgp | :ar |
-                # :monotonic | :monotonic_summand | :dar | :me | :car | :cdar
+                # :monotonic | :monotonic_summand | :dar | :me | :car | :cdar | :rw
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -5354,6 +5354,34 @@ function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
         value, value)
 end
 
+# ---- single-path random walks (rw; mirrors `_sb_rw1`, `_sb_rw2`, `_sb_rw_sum`) ----
+#
+# An `:rw` term carries the fit-role input of its time column, whose sorted
+# levels the program computes (`brm_fit_levels`) and looks each row's step up in,
+# so the number of steps is an input (user principle `0ikeidi`). `order` and
+# `sum_to_zero` select the law, as on SB; the scale keeps SB's `lower=0` kernel
+# (`restricted(Normal(0, s), 0, Inf)`). A replay is refused (`_rk_check_replay_terms`).
+function _rk_plan_rw_term!(prepared::_BRMPreparedTerm{typeof(rw)},
+        target::Symbol, data::AbstractDict, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}; derived::Vector{_RKDerivedSpec})
+    state = prepared.state
+    source = prepared.source
+    columns[source] = get(columns, source, data[source])
+    value = _rk_mint_generated!(taken, columns, "rw_$(target)_$(source)")
+    sigma_param = _rk_term_parameter(state.sd_prior) do prior
+        family, args, support = _rk_gp_hyper_prior(prior, "innovation scale", target,
+            source; term="rw")
+        support === :positive && (support = (:restricted, 0.0, Inf))
+        _RKSampledParameter(:sigma, family, args, support, :sigma)
+    end
+    _RKTermSpec(:rw, Symbol[],
+        (; value, source, steps=state.steps, n_steps=state.n_steps, order=state.order,
+         sum_to_zero=state.sum_to_zero,
+         step_fit=_rk_fit_twin!(derived, columns, taken, data, source),
+         inputs=(), sigma_param),
+        value, value)
+end
+
 function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
         target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
@@ -6570,6 +6598,9 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === cdar
             push!(terms, _rk_plan_cdar_term!(prepared, target, context.data, columns, taken;
+                derived))
+        elseif prepared.callable === rw
+            push!(terms, _rk_plan_rw_term!(prepared, target, context.data, columns, taken;
                 derived))
         elseif prepared.callable === gmrf
             push!(terms, _rk_plan_gmrf_term!(prepared, target, context.data, columns, taken; derived))

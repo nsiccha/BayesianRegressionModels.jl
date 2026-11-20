@@ -497,6 +497,9 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :cdar
             # Each row's walk deviation, returned by the term's walk block.
             push!(summands, refref[index])
+        elseif term.kind === :rw
+            # Each row's walk value, returned by the term's walk block.
+            push!(summands, refref[index])
         elseif term.kind === :offset
             push!(summands, colref[index])
         elseif term.kind === :structured
@@ -2007,9 +2010,127 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows,
     call, (; sigma, rho, eta)
 end
 
+# A single-path random walk, as StanBlocks' `_sb_rw1` / `_sb_rw2` / `_sb_rw_sum`.
+# Its `n` steps are the fitted levels of the time column, an input, so every
+# grid of one declaration is one program (user principle `0ikeidi`); each row
+# reads the walk at its step (`step_rows`, positions in the fitted levels).
+# A zero-start walk draws its `n - 1` standardized innovations `z` and integrates
+# them once (order 1) or twice (order 2) from 0. A sum-to-zero walk draws its
+# standardized values `phi` flat and states their law as factors: the
+# `order`-th differences standard normal, `car`'s soft sum-to-zero on their sum,
+# and for order 2 the flat linear trend's Jacobian `log(sigma)`, so that the trend
+# is flat in the walk's own units (R-INLA's `rw2`); `Exponential(1 / sigma)` has
+# exactly that log density at 0.
+function _rk_ast_rw_block!(definitions, taken, term, step_rows, step_levels;
+        bindings=Pair{Symbol,Any}[])
+    options = term.options
+    order, sum_to_zero = options.order, options.sum_to_zero
+    sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
+    block = _rk_block_body(sigma_prior)
+    sigma_prior, = _rk_block_derived_inputs!(block, sigma_prior)
+    step_position = _rk_block_argument!(block, :step, step_rows)
+    steps = _rk_block_argument!(block, :steps, step_levels)
+    n, sigma = _rk_block_local!(block, :n), _rk_block_local!(block, :sigma)
+    path, value = _rk_block_local!(block, :path), _rk_block_local!(block, :value)
+    push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior),
+        Expr(:(=), n, Expr(:call, :length, steps)))
+    if sum_to_zero
+        phi, d = _rk_block_local!(block, :phi), _rk_block_local!(block, :d)
+        total = _rk_block_local!(block, :total)
+        slice(lo, hi) = Expr(:ref, phi, Expr(:call, :(:), lo,
+            hi == 0 ? n : Expr(:call, :-, n, hi)))
+        differences = order == 1 ? Expr(:call, :.-, slice(2, 0), slice(1, 1)) :
+            Expr(:call, :.+, Expr(:call, :.-, slice(3, 0),
+                Expr(:call, :.*, 2.0, slice(2, 1))), slice(1, 2))
+        push!(block.statements,
+            Expr(:call, :.~, Expr(:ref, phi, Expr(:call, :(:), 1, n)), _rk_ast_dotted(:Flat)),
+            Expr(:(=), d, differences),
+            Expr(:call, :.~, d, _rk_ast_dotted(:Normal, 0, 1)),
+            Expr(:(=), total, Expr(:call, :sum, phi)),
+            Expr(:call, :~, total, Expr(:call, :Normal, 0.0, Expr(:call, :*, 0.001, n))))
+        if order == 2
+            trend = _rk_block_local!(block, :trend)
+            push!(block.statements,
+                Expr(:(=), trend, Expr(:call, :*, 0.0, sigma)),
+                Expr(:call, :~, trend, Expr(:call, :Exponential, Expr(:call, :/, 1.0, sigma))))
+        end
+        push!(block.statements, Expr(:(=), path, Expr(:call, :.*, sigma, phi)),
+            Expr(:(=), value, Expr(:ref, path, step_position)))
+        locals = (; sigma, phi)
+        law = order == 1 ? "first differences" :
+            "second differences `$phi[t+1] - 2$phi[t] + $phi[t-1]`"
+        doc = @_rk_definition_doc """
+            An intrinsic random walk of order $order with a soft sum-to-zero (`rw(...; order = $order, sum_to_zero = true)`).
+
+            Draws the innovation scale `$sigma` and the standardized values `$phi`, one per
+            fitted step `$steps`, flat; their $law are `Normal(0, 1)` and their sum is
+            `Normal(0, 0.001 n)`$(order == 2 ? ", and `$trend ~ Exponential(1 / $sigma)` at 0 adds the flat linear trend's Jacobian `log($sigma)`" : "").
+            Returns each row's value `$sigma * $phi` at its step `$step_position`."""
+    else
+        # The path is a recurrence: a shared RK kernel runs it as `cdar`'s walk
+        # does, one group here, `brm_walk_rows(1, n - 1)`, so a cell (a row the
+        # sparse Laplace evaluates) computes it inside an authored plate, which
+        # has a row form; `cumsum` has none. RKPPL refuses a `scan` `do` block
+        # in a submodel body. The scan includes its zero start.
+        z, rows = _rk_block_local!(block, :z), _rk_block_local!(block, :rows)
+        scans = order == 1 ? Base.remove_linenums!(quote
+            path = ReactiveKernels.scan(e; init = 0.0, include_init = true) do level, x
+                next = level + sigma * x
+                return (next, next)
+            end
+        end) : Base.remove_linenums!(quote
+            increments = ReactiveKernels.scan(e; init = 0.0) do d, x
+                next = d + sigma * x
+                return (next, next)
+            end
+            path = ReactiveKernels.scan(increments; init = 0.0, include_init = true) do level, d
+                next = level + d
+                return (next, next)
+            end
+        end)
+        walk_body = Base.remove_linenums!(quote
+            flat = vec(innovations)
+            walk = $(_rk_ast_graph_plate([:rows], [:r], Expr(:block,
+                :(e = flat[r]), scans.args..., :path)))
+            values = $(_rk_ast_graph_plate([:step], [:s], :(walk[1][s])))
+            return values
+        end)
+        walk_doc = @_rk_definition_doc """
+            A zero-start random walk of order $order (`rw`), as one group of a walk.
+
+            `innovations` holds the walk's standardized innovations, `rows[1]` their
+            positions. The walk is 0 at the first step, then $(order == 1 ?
+                "adds `sigma * innovations[t]` per step" :
+                "its increments, `sigma * innovations[1]` first, each add `sigma * innovations[t]`"),
+            in O(steps). Returns each row's value at its step position `step`."""
+        walker = _rk_ast_shared_definition!(definitions, taken,
+            order == 1 ? :brm_rw_walk : :brm_rw2_walk,
+            [:innovations, :sigma, :rows, :step], walk_body; kernel=true, doc=walk_doc)
+        W = Expr(:call, :-, n, 1)
+        push!(block.statements,
+            Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, W)),
+                _rk_ast_dotted(:Normal, 0, 1)),
+            Expr(:(=), rows, Expr(:call, :brm_walk_rows, 1, W)),
+            Expr(:(=), value, Expr(:call, walker, z, sigma, rows, step_position)))
+        locals = (; sigma, z)
+        doc = @_rk_definition_doc """
+            A zero-start random walk of order $order (`rw(...$(order == 2 ? "; order = 2" : ""))`).
+
+            Draws the innovation scale `$sigma` and standardized innovations
+            `$z[1:n-1] ~ Normal(0, 1)` over the fitted steps `$steps`. The walk is 0 at the
+            first step and $(order == 1 ? "adds `$sigma * $z[t]` per step" :
+                "its increments, starting with `$sigma * $z[1]`, add `$sigma * $z[t]` per step").
+            Returns each row's value at its step `$step_position`."""
+    end
+    call = _rk_ast_block_call!(definitions, taken, sum_to_zero ? "brm_rw_sum" : "brm_rw",
+        block, value; doc)
+    call, locals
+end
+
+# The values of the walk terms (`cdar`, `rw`), reserved program names.
 function _rk_ast_cdar_names(plan::_RKStructuralPlan)
     Set{Symbol}(term.options.value for predictor in plan.predictors
-        for term in predictor.terms if term.kind === :cdar)
+        for term in predictor.terms if term.kind === :cdar || term.kind === :rw)
 end
 
 function _rk_ast_dar_names(plan::_RKStructuralPlan)
@@ -2397,6 +2518,23 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     cor_factor=term.options.L, locals))
                 _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
                     (; sigma=locals.sigma, ar=locals.rho))
+            elseif kind === :rw
+                # The walk's steps are the fitted values of a fit-role input;
+                # rows find their positions in them by binary search.
+                steps = _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
+                    Expr(:call, :brm_fit_levels, term.options.step_fit))
+                rows = _rk_ast_fresh_name(string(term.label, "_", term.options.source), taken)
+                push!(stmts, Expr(:(=), rows, _rk_ast_statistical_call!(defs, taken,
+                    :brm_walk_positions, term.options.source, steps; kernel=true)))
+                call, locals = _rk_ast_rw_block!(defs, taken, term, rows, steps; bindings)
+                refactual[index] = term.options.value
+                push!(stmts, Expr(:call, :~, term.options.value, call))
+                _rk_coordinate_record!(coordinates, (; kind=:rw,
+                    declaration=term.options.value, predictor=predictor.name,
+                    time=term.options.source, steps=term.options.steps,
+                    order=term.options.order, sum_to_zero=term.options.sum_to_zero, locals))
+                _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
+                    (; sigma=locals.sigma))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]
@@ -2405,6 +2543,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 kind === :spline || kind === :hsgp ||
                 kind === :structured || kind === :gmrf ||
                 kind === :gp || kind === :dar || kind === :car || kind === :cdar ||
+                kind === :rw ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
                 nothing)

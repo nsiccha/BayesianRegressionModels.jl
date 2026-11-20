@@ -2769,8 +2769,11 @@ function _brm_term_parameter_bindings(::typeof(hsgp), t)
 end
 _brm_term_parameter_bindings(::typeof(dar), _t) =
     (; ar=:beta, sd=:sigma, innovations=:z)
-_brm_term_parameter_bindings(::typeof(rw), _t) =
-    (; sd=:sigma, innovations=:z)
+# A zero-start walk samples its innovations; a sum-to-zero walk its standardized
+# values `phi`, which (as `car`'s ICAR field) are `:structured`.
+_brm_term_parameter_bindings(::typeof(rw), t) =
+    _brm_rw_options(getkwargs(t)).sum_to_zero ? (; sd=:sigma, structured=:phi) :
+        (; sd=:sigma, innovations=:z)
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
 _brm_term_parameter_bindings(::typeof(gmrf), t) = _brm_gmrf_parameter_bindings(t)
@@ -2906,7 +2909,8 @@ not term labels. Supported parameter roles are:
 | grouped `hsgp(...; by=...)` | `:length_scale`, `:sd`, `:value` |
 | `hsgp(...)` with hyper-predictor(s) | `:length_scale_intercept`, `:length_scale_ranef_sd`, `:length_scale_ranef_z`, `:sd_intercept`, `:sd_ranef_sd`, `:sd_ranef_z` — only the planned pieces — and `:value` |
 | `dar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
-| `rw(...)` | `:sd`, `:innovations`, `:value` |
+| `rw(...)`, `rw(...; order = 2)` | `:sd`, `:innovations`, `:value` |
+| `rw(...; sum_to_zero = true)` | `:sd`, `:structured`, `:value` |
 | `cdar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
 | `car(...; type=:bym2)` | `:sd`, `:mixing`, `:structured`, `:unstructured`, `:effects`, `:value` |
 | `car(...; type=:icar, scaled=true)` | `:sd`, `:structured`, `:unstructured`, `:effects`, `:value` |
@@ -2918,7 +2922,8 @@ included) and, like `:value`, a transformed parameter; `:structured` is the
 standardized ICAR field over the areas with neighbours, grouped by connected
 component. `:unstructured` is BYM2's standard-normal noise per area, and a scaled
 ICAR field's per island (one per island in sorted label order; empty when the
-graph has none).
+graph has none). A sum-to-zero `rw` term's `:structured` is its
+standardized values `x / sigma`, one per fitted time in sorted order.
 
 `:value` is the term's own collected contribution: the per-row vector this
 predictor's occurrence of the term adds to the linear predictor. It is a

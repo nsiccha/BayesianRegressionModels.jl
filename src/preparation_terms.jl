@@ -246,24 +246,29 @@ _brm_prepare_term(term::ExprColumn{typeof(ar)}, target::Symbol, context) =
     _brm_prepare_ar_term(term, target, context, false)
 _brm_prepare_term(term::ExprColumn{typeof(dar)}, target::Symbol, context) =
     _brm_prepare_ar_term(term, target, context, true)
-# `rw(time)`: a zero-started random walk over the SORTED DISTINCT values of `time`;
-# each row reads the point of its own time value, so rows may share times (a long
-# frame with several groups per day gets one shared walk). Unique increasing times
-# reduce to the plain path.
+# `rw(time; order, sum_to_zero)`: a random walk over the SORTED DISTINCT values of
+# `time`; each row reads the point of its own time value, so rows may share times (a
+# long frame with several groups per day gets one shared walk). Unique increasing
+# times reduce to the plain path. `order` and `sum_to_zero` select the law
+# (`rw`'s docstring); a sum-to-zero walk needs a difference to constrain.
 function _brm_prepare_term(term::ExprColumn{typeof(rw)}, target::Symbol, context)
     args, kw = getargs(term), getkwargs(term)
     length(args) == 1 || error("BRM term preparation: `rw(time)` needs one time axis")
-    isempty(kw) || error("BRM term preparation: `rw(time)` takes no keyword arguments")
+    (; order, sum_to_zero) = _brm_rw_options(kw)
     source, raw = _brm_term_data(:rw, only(args), context)
     time = collect(Float64, raw)
     isempty(time) && error("BRM term preparation: `rw` time axis cannot be empty")
     all(isfinite, time) || error("BRM term preparation: `rw` time axis must be finite")
     steps = _brm_cdar_levels(time)
+    sum_to_zero && length(steps) <= order && error(
+        "BRM term preparation: `rw($source; order = $order, sum_to_zero = true)` needs " *
+        "at least $(order + 1) distinct `$source` values, got $(length(steps)): with " *
+        "fewer, no $(order == 1 ? "first" : "second") difference constrains the walk")
     time_idx = [searchsortedfirst(steps, v) for v in time]
     sd_prior = _brm_term_prior_expression(term, target, context, :term_sd;
                                           default=ExprColumn(Normal, 0.0, 0.2))
-    _BRMPreparedTerm(rw, source, (; target, time, steps, n_steps=length(steps), time_idx, sd_prior),
-                     (source,))
+    _BRMPreparedTerm(rw, source, (; target, time, steps, n_steps=length(steps), time_idx,
+                     sd_prior, order, sum_to_zero), (source,))
 end
 function _brm_replay_rw(training, raw)
     time = collect(Float64, raw)

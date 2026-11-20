@@ -309,8 +309,9 @@ _rk_replay_responses(_plan) = ()
 # values at its locations, an AR/DAR path over its time steps, measurement-
 # error latents, structured group fields) have no meaning at other rows, and
 # a replay with the same number of rows would silently reinterpret them.
-const _RK_ROW_LATENT_TERMS = (gp="an exact `gp(...)`", ar="an `ar(...)`/`rw(...)` path",
-    dar="a `dar(...)` path", cdar="a `cdar(...)` walk", me="a measurement-error `me(...)`",
+const _RK_ROW_LATENT_TERMS = (gp="an exact `gp(...)`", ar="an `ar(...)` path",
+    dar="a `dar(...)` path", cdar="a `cdar(...)` walk", rw="an `rw(...)` walk",
+    me="a measurement-error `me(...)`",
     structured="a structured group field")
 function _rk_check_replay_terms(plan; prefix)
     for predictor in _rk_replay_predictors(plan), term in predictor.terms

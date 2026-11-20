@@ -32,7 +32,7 @@ Base.deepcopy_internal(p::_BRMLaplacePreparation, ::IdDict) = p
 
 Which latent terms of a model [`brm_laplace_problem`](@ref) integrates, from
 [`brm_laplace_plan`](@ref). `plan.terms` holds one entry per latent term
-(random-effect block, `cdar` walk, `car` field or declared vector): its `declaration`, `grouping`,
+(random-effect block, `cdar` or `rw` walk, `car` field or declared vector): its `declaration`, `grouping`,
 `kind`, `class` (`:integrated`, `:gated`, `:sampled` or `:never`), `reason`,
 whether it is `admitted` (integrated by the problem), and for a gated term its
 `importance_ess` (`(; min, median, below, blocks, draws)`) or `nothing`.
@@ -222,7 +222,7 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT ||
         (coefficients && r.kind === :population)]
     isempty(records) && _brm_nlme_error("brm_laplace_plan: the model has no random-effect " *
-        "block, `cdar` walk, `car` field or declared vector to integrate")
+        "block, `cdar` or `rw` walk, `car` field or declared vector to integrate")
     terms = map(records) do r
         (; declaration=_brm_spl_record_declaration(r), grouping=_brm_spl_record_group(r),
             kind=r.kind === :stratified_ranef ? :ranef : r.kind,
@@ -571,7 +571,7 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
     end
     for e in unique(e for i in I for e in cache.edges_by_effect[i])
         i, j = cache.edges[e]
-        total -= (z[i] - z[j])^2 / 2
+        total -= cache.edge_weights[e] * (z[i] - z[j])^2 / 2
     end
     # A native GMRF field's −½ zᵀQz, as far as it depends on z[I]: a pair
     # inside I once each way, a pair leaving I twice.
@@ -703,7 +703,7 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
     p.population = setdiff(eachindex(p.u), p.integrated)
     p.names = _rk_layout_coordinate_names(p.backend)[p.population]
     p.blocks = [_BRMSlapBlock(b.declaration, b.group, b.K, zmap[b.z], b.omega,
-        b.edges, b.sums, b.λ, b.prior) for b in p.blocks[keep]]
+        b.edges, b.sums, b.λ, b.prior, b.weights) for b in p.blocks[keep]]
     p.integrate = unique(b.group for b in p.blocks)
     old = (; p.rptr, p.rblock, p.rlevel, p.rentry)
     p.rptr = [1]; p.rblock = Int[]; p.rlevel = Int[]; p.rentry = Int[]; p.coff = Int[]

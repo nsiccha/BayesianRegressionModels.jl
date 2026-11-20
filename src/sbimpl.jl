@@ -3123,6 +3123,91 @@ _sb_rw1 = StanBlocks.@slic begin
     return random_walk_rows(sigma, append_row(z, z_new), time_idx)
 end
 
+# `rw(time; order = 2)`: the zero-start second-order walk, `dar`'s path at
+# persistence 1. The first increment is itself an innovation (`x[2] = sigma z[1]`)
+# and every later one adds one (`x[t+1] - 2x[t] + x[t-1] = sigma z[t]`).
+StanBlocks.@deffun begin
+    random_walk2_rows(sigma::real, z::vector[n], idx::int[N])::vector[N] = begin
+        x = differenced_ar1_path(1., sigma, z)
+        out::vector[N]
+        for i in 1:N
+            out[i] = x[idx[i]]
+        end
+        out
+    end
+end
+
+_sb_rw2 = StanBlocks.@slic begin
+    sigma ~ normal(0., 0.2; lower=0.)
+    z ~ std_normal(; n=n_steps - 1)
+    z_new ~ std_normal(; n=n_new_steps)
+    return random_walk2_rows(sigma, append_row(z, z_new), time_idx)
+end
+
+# `rw(time; order, sum_to_zero = true)`: the intrinsic walk of order 1 or 2 over
+# its `n` points, standardized as `phi = x / sigma` (the scale stays outside the
+# prior, as `car`'s). Its `order`-th differences are standard normal and `phi`'s
+# sum carries `car`'s soft sum-to-zero, `Normal(0, 0.001 n)`. An order-2 walk's
+# linear trend has no density at all; for it to be flat in the walk's own units
+# (R-INLA's `rw2`, values' normalizer `sigma^-(n-2)`), not in `phi`'s, the density
+# carries that direction's Jacobian, `log(sigma)`. Order 1 has no such direction.
+# The `_rng` draws an order-1 walk exactly (a centred path is the hard-constrained
+# law); an order-2 walk's prior is improper in its trend, so it has no prior draw.
+StanBlocks.@deffun begin
+    @lpxf brm_rw_sum_lpdf(phi::vector[n], sigma::real, order::int)::real = begin
+        lp = normal_lpdf(sum(phi), 0., 0.001 * n)
+        if order == 1
+            lp += std_normal_lpdf(phi[2:n] - phi[1:(n - 1)])
+        else
+            lp += std_normal_lpdf(phi[3:n] - 2. * phi[2:(n - 1)] + phi[1:(n - 2)]) +
+                log(sigma)
+        end
+        lp
+    end
+    # A joint law has no per-point decomposition: the whole density rides on
+    # the first entry so the entries still sum to it.
+    brm_rw_sum_lpdfs(phi::vector[n], sigma::real, order::int)::vector[n] = begin
+        out = rep_vector(0., n)
+        out[1] = brm_rw_sum_lpdf(phi, sigma, order)
+        out
+    end
+    brm_rw_sum_rng(vector[n], sigma::real, order::int)::vector[n] = begin
+        if order != 1
+            reject("brm_rw_sum_rng: rw(time; order = 2, sum_to_zero = true) has an improper prior (a flat linear trend), so it has no prior draw")
+        end
+        path = rep_vector(0., n)
+        for t in 2:n
+            path[t] = path[t - 1] + normal_rng(0., 1.)
+        end
+        path - mean(path)
+    end
+    # Each row reads its point of `sigma * phi`; a forecast's appended points
+    # continue the walk's recurrence from its last fitted ones with `z_new`.
+    brm_rw_sum_rows(sigma::real, phi::vector[n], z_new::vector[m], order::int,
+                    idx::int[N])::vector[N] = begin
+        x = append_row(sigma * phi, rep_vector(0., m))
+        for j in 1:m
+            if order == 1
+                x[n + j] = x[n + j - 1] + sigma * z_new[j]
+            else
+                x[n + j] = 2. * x[n + j - 1] - x[n + j - 2] + sigma * z_new[j]
+            end
+        end
+        out::vector[N]
+        for i in 1:N
+            out[i] = x[idx[i]]
+        end
+        out
+    end
+end
+
+_sb_rw_sum = StanBlocks.@slic begin
+    sigma ~ normal(0., 0.2; lower=0.)
+    phi::vector[n_steps] ~ brm_rw_sum(sigma, order)
+    z_new ~ std_normal(; n=n_new_steps)
+    return brm_rw_sum_rows(sigma, phi, z_new, order, time_idx)
+end
+
 # Grouped correlated damped walk: per-group deviations over W steps whose
 # innovations are correlated across the P groups by the Cholesky factor `L`
 # (data, from the term's `cor=`), damped by `rho` with the stationary scaling
@@ -12102,10 +12187,15 @@ function _sb_dar_submodel_expr(term_overrides, t)
     _sb_configured_term_submodel(_sb_dar1, (:beta, beta_cfg), (:sigma, sigma_cfg))
 end
 
+# The law follows `rw`'s keywords: the zero-start walk of order 1 or 2, or the
+# intrinsic sum-to-zero walk of either order (`_sb_rw_sum`, `order` as data).
 function _sb_rw_submodel_expr(term_overrides, t)
+    (; order, sum_to_zero) = _brm_rw_options(getkwargs(t))
+    name, submodel = sum_to_zero ? (:_sb_rw_sum, _sb_rw_sum) :
+        order == 1 ? (:_sb_rw1, _sb_rw1) : (:_sb_rw2, _sb_rw2)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
-    isnothing(sigma_cfg) && return :_sb_rw1
-    _sb_configured_term_submodel(_sb_rw1, (:sigma, sigma_cfg))
+    isnothing(sigma_cfg) && return name
+    _sb_configured_term_submodel(submodel, (:sigma, sigma_cfg))
 end
 
 function _sb_car_submodel_expr(term_overrides, t, type::Symbol, scaled::Bool=type === :bym2)
@@ -16791,8 +16881,10 @@ _sb_predictor_term!(stmts, data, ::typeof(dar), t;
     col_name
 end
 # `rw(time)` is the pure random-walk trajectory: `dar` without a persistence
-# coefficient. It owns its innovation scale and innovations; the formula
-# intercept is the initial level.
+# coefficient. It owns its innovation scale and its innovations (zero start) or
+# standardized values (sum to zero); a zero-start walk's formula intercept is the
+# initial level, a sum-to-zero walk's its mean level. A sum-to-zero walk also
+# binds its `order`.
 _sb_predictor_term!(stmts, data, ::typeof(rw), t;
                     target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     xname, raw = _sb_inner_data(:rw, only(getargs(t)))
@@ -16801,13 +16893,15 @@ _sb_predictor_term!(stmts, data, ::typeof(rw), t;
     st = prepared.state
     col_name = Symbol(:rw_, target, :_, xname)
     keys_ = (; n_steps=Symbol(col_name, :_n_steps), n_new_steps=Symbol(col_name, :_n_new_steps),
-               time_idx=Symbol(col_name, :_time_idx))
+               time_idx=Symbol(col_name, :_time_idx),
+               (st.sum_to_zero ? (; order=Symbol(col_name, :_order)) : (;))...)
     for key in values(keys_)
         haskey(data, key) && error("sbimpl: `rw` reserves data key `$key`, but that name is already used")
     end
     data[keys_.n_steps] = st.n_steps
     data[keys_.n_new_steps] = 0
     data[keys_.time_idx] = st.time_idx
+    st.sum_to_zero && (data[keys_.order] = st.order)
     # replay: a forecast appends steps past the fitted grid; recorded on the index key
     _sb_record_preproc!(data, keys_.time_idx, PreprocEntry(:rw, (; steps=st.steps, keys=keys_), xname, true))
     submodel = _sb_rw_submodel_expr(term_overrides, t)

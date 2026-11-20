@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.352
+
+- `rw(time; order = 2)` is a second-order random walk, and
+  `rw(time; order = 1 | 2, sum_to_zero = true)` the intrinsic walk of either
+  order identified by a soft sum-to-zero (R-INLA's `rw1` / `rw2` with
+  `constr = TRUE`): its values have log density
+  `-(n - order) log(sigma) - sum(d.^2) / (2 sigma^2)` over their `order`-th
+  differences `d`, with `sum(x) ~ Normal(0, 0.001 n sigma)`, and a
+  second-order walk's linear trend has a flat prior. `rw(time)` is unchanged
+  (`order = 1`, zero start). `sd(lp, rw(time))` addresses every law's scale.
+  A sum-to-zero walk samples its standardized values (descriptor component
+  `:structured`); SBBRMI forecasts of every law continue its recurrence.
+- RKBRMI lowers `rw(time; ...)` (before, it refused `rw` entirely), with
+  SBBRMI's law at the same coordinates (`brm_coordinate_transport`).
+- `brm_laplace_problem(rk; integrate = (:time,))` integrates an `rw` walk whole
+  by its time column: a sum-to-zero walk as one sparse block whose precision is
+  its difference precision plus the soft sum, at any length; a zero-start walk
+  by its innovations, one dense block like a `cdar` walk's. The sparse
+  Laplace's field blocks take weighted edges for this.
+
 ## 0.2.351
 
 - `brm_population_effect_coordinates(d, logical, names; coefficient, submodel)`

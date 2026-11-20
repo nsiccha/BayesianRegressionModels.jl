@@ -1348,6 +1348,10 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             # An areal field couples its areas through its edges, so the
             # whole field is shared by the subjects, whatever its area column.
             claim_declaration!(record.declaration, :shared_latent)
+        elseif kind === :rw
+            # A single-path walk couples all its steps, so the whole walk is
+            # shared by the subjects, whatever its time column.
+            claim_declaration!(record.declaration, :shared_latent)
         elseif kind === :car
             # A field lowered by its unit border separator
             # (`RKBRMI(brmi; car_units)`): each unit's interior draws, and each
@@ -1415,7 +1419,7 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         "$(join(string.(unclaimed), ", ")). The view reads population " *
         "coefficients, scalars and vectors, random-effect blocks on a plain " *
         "`(... | group)` or stratified `gr(group, by=stratum)` grouping, HSGP " *
-        "terms, `cdar` walks, `car(...)` fields, missing-value completions, " *
+        "terms, `cdar` and `rw` walks, `car(...)` fields, missing-value completions, " *
         "submodels and `@plate` cell latents; other terms, such as `mm(...)` " *
         "blocks, file no coordinate record.")
     labels = map(_brm_transport_level, backend.plan.columns[group])

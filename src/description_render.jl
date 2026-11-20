@@ -822,9 +822,23 @@ _brmd_spatial_gmrf(c)=haskey(c.keywords,:multiresolution) ? BRMDescriptionFragme
         "f_i=\\sigma\\sum_{v\\in\\triangle_i}w_{iv}u_v,\\quad\\sum_v w_{iv}=1"),
     covers=(c.id,))
 # Temporal terms require their recurrence, rather than just a term caption.
-_brmd_builtin_call(::typeof(rw),c) = BRMDescriptionFragment(
-    prose=(_brmd_text(c,:random_walk),),
-    equations=("f_1=0,\\quad f_{t+1}=f_t+\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
+# `rw`'s law follows its `order` and `sum_to_zero` keywords (literal values).
+function _brmd_builtin_call(::typeof(rw),c)
+    (; order, sum_to_zero) = _brm_rw_options(c.keywords)
+    sum_to_zero ? BRMDescriptionFragment(
+        prose=(_brmd_text(c,:random_walk_sum_to_zero),),
+        equations=(order==1 ?
+            "\\log p(f)=-(n-1)\\log\\sigma-\\frac{1}{2\\sigma^2}\\sum_{t=2}^{n}(f_t-f_{t-1})^2+\\log\\mathcal N\\!\\left(\\textstyle\\sum_t f_t\\mid 0,\\,0.001\\,n\\,\\sigma\\right)" :
+            "\\log p(f)=-(n-2)\\log\\sigma-\\frac{1}{2\\sigma^2}\\sum_{t=2}^{n-1}(f_{t+1}-2f_t+f_{t-1})^2+\\log\\mathcal N\\!\\left(\\textstyle\\sum_t f_t\\mid 0,\\,0.001\\,n\\,\\sigma\\right)",),
+        covers=(c.id,)) :
+    order==1 ? BRMDescriptionFragment(
+        prose=(_brmd_text(c,:random_walk),),
+        equations=("f_1=0,\\quad f_{t+1}=f_t+\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,)) :
+    BRMDescriptionFragment(
+        prose=(_brmd_text(c,:random_walk_second_order),),
+        equations=("f_1=0,\\quad f_2=\\sigma z_1,\\quad f_{t+1}-2f_t+f_{t-1}=\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),
+        covers=(c.id,))
+end
 # The areal field's law depends on `type=`; the keyword rides on the call.
 function _brmd_builtin_call(::typeof(car),c)
     type=get(c.keywords,:type,nothing)

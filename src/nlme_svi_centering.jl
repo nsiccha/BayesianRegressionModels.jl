@@ -655,13 +655,13 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
             end
         end
     end
-    # Shared field weights are global coordinates. A gmrf/car/cdar field's scales
+    # Shared field weights are global coordinates. A gmrf/car/cdar/rw field's scales
     # are computed inside its kernel; an HSGP's are a graph value, but its shared
     # weights are globals, and a grouped HSGP whose levels are the units is a
     # family above.
     globals = Set(t.globals)
     for record in _brm_nlme_records(m.backend.plan)
-        record.kind in (:hsgp, :gmrf_footprint, :car, :cdar) || continue
+        record.kind in (:hsgp, :gmrf_footprint, :car, :cdar, :rw) || continue
         if record.kind === :hsgp
             weights = Symbol(record.declaration, ".",
                 record.grouped ? record.locals.weights : :beta_raw)

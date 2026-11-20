@@ -102,6 +102,7 @@ function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
     n = length(p.integrated)
     identity = falses(n)
     edges = Tuple{Int,Int}[]
+    edge_weights = Float64[]
     edges_by_effect = [Int[] for _ in 1:n]
     for b in p.blocks
         if _brm_spl_identity(b)
@@ -110,6 +111,7 @@ function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
             for e in axes(b.edges, 2)
                 i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
                 push!(edges, (i,j))
+                push!(edge_weights, b.weights[e])
                 push!(edges_by_effect[i], length(edges))
                 push!(edges_by_effect[j], length(edges))
             end
@@ -119,7 +121,7 @@ function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
     for (c, cols) in enumerate(p.wcols), i in cols
         push!(soft_by_effect[i], c)
     end
-    (; cells, sums, contexts, identity, edges, edges_by_effect, soft_by_effect,
+    (; cells, sums, contexts, identity, edges, edge_weights, edges_by_effect, soft_by_effect,
         gmrf=_brm_spl_gmrf_sparse(p, n),
         soft_members=Set.(p.wcols), soft_values=[sum(state.z[cols]) for cols in p.wcols],
         mmax=maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0))
