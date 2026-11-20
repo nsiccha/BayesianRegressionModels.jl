@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.348
+
+- A record-component member formula can carry its own terms beside a margin
+  in the parent's correlated block, for example
+  `shift ~ 1 + (1 | parentblock(:p) | setting.site)`. The member keeps its
+  predictor, so `effect(shift, Intercept) ~ Normal(0, 1)` sets that member's
+  intercept prior. Earlier such a model built, but neither backend lowered it
+  when the member had only an intercept or stated an `effect` prior.
+  **Breaking:** A member formula that combined a covariate or a smooth with a
+  `parentblock` margin already lowered. Its parameters were named after a
+  generated `..._local` predictor and are now named after the authored one.
+  The density is unchanged; refit such a model to read its draws by name.
+- RKBRMI accepts an offset that gathers a model value at data rows, such as
+  `offset(level[pick])`, as SBBRMI does. A predictor with no data column,
+  group or response of its own takes its rows from that offset.
+
 ## 0.2.347
 
 - `car(area; edges=(from, to), type=:icar, scaled=true)` is the variance-scaled

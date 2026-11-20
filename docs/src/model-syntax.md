@@ -296,7 +296,11 @@ use different likelihoods in the same subject plate. A grouped intercept
 `(1 | p | setting.site)` belongs to that member. Use
 `(1 | parentblock(:p) | setting.site)` to put its margin in the parent's
 `p` correlation block. The site labels match rows across members and the
-parent, including when their rows have different orders or lengths.
+parent, including when their rows have different orders or lengths. The
+member's formula can carry its own terms beside that margin, as in
+`shift ~ 1 + (1 | parentblock(:p) | setting.site)`, and
+`effect(shift, Intercept) ~ Normal(0, 1)` then sets that member's intercept
+prior.
 
 Query a member's observation draws with
 `brm_output_coordinates(descriptor, :y, names; role=:posterior_predictive,
