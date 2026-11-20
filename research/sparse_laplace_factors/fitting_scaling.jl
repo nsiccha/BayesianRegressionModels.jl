@@ -1,6 +1,7 @@
 # End-to-end cost, including mode finding, pivoted factorization and selected
 # inversion. Run under the repository test environment and a compute token.
 empty!(ARGS); push!(ARGS, "pivoted augmented")
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include(joinpath(@__DIR__, "../../test/nlme_laplace_sums.jl"))
 
 function measure_sum_fit(n; overlapping=false, mixed=false)

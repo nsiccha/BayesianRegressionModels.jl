@@ -8,6 +8,7 @@
 #
 # Set `BRM_LEVEL_CORRELATION_RUNTIME=0` to skip the compiled-model sets.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

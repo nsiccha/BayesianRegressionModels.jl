@@ -7,6 +7,7 @@
 # native density, gradient and printed-source acceptance lives in rk_plain.jl
 # and rk_statistical_library.jl.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 include(joinpath(@__DIR__, "testset_filter.jl"))
 using BayesianRegressionModels

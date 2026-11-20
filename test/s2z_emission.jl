@@ -1,6 +1,7 @@
 # S2Z SBBRMI emission: planner selection, stanc validity, fail-closed scope,
 # and the BridgeStan joint = collapsed x recovery identity against the
 # ordinary parameterization. Run with `julia --project=test test/s2z_emission.jl`.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra, Statistics, Distributions
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 const BRM = BayesianRegressionModels

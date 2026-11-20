@@ -1,4 +1,5 @@
 # RUN: julia --project=test test/laplace_declared_gaussian.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, SparseArrays, LogDensityProblems, Random
 

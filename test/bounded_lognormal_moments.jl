@@ -1,5 +1,6 @@
 # Ordinary distribution statistics in a plate, including the separate
 # probability of the event X >= lower. No application-specific density.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Statistics, SpecialFunctions, LinearAlgebra
 

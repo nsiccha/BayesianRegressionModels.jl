@@ -5,6 +5,7 @@
 # rounding noise and a basis scaled by 1/sqrt(L) (about 3e7). A frozen replay
 # keeps the fitted interval, and an explicit `domain=` fixes one, so both still
 # evaluate a constant axis.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, HTMXObjects
 using ReactiveKernels, ReactiveKernelsPPL
 include("model_view_plain_text_checks.jl")

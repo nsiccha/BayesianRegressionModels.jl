@@ -1,5 +1,6 @@
 # Frozen shared coordinate fields across changing windows. Public synthetic
 # data; a dense tensor-feature oracle checks values, density and native AD.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LinearAlgebra, Serialization
 

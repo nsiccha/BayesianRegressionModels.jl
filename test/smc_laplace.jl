@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Statistics, Treebars
 include("smc_laplace_fixture.jl")
 include("testset_filter.jl")

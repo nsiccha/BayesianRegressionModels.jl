@@ -14,6 +14,7 @@
 # against the thin layer lives in the parity corpus
 # (test/rk_parity.jl carries the ranef slice), not here.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical

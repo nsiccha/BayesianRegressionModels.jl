@@ -1,5 +1,6 @@
 # Public implementation, fixed numerical limits, predeclared extreme cases.
 # Run each case in a fresh process; no dense reference or posterior claim.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL,
     Enzyme, DifferentiationInterface, Random, LinearAlgebra, Statistics,
     Serialization, SHA, Test, Treebars, Distributions

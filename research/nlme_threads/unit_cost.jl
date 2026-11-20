@@ -23,6 +23,7 @@
 #
 # RUN: julia --project=<NLMEEstimation scratch env, test/README.md> \
 #          research/nlme_threads/unit_cost.jl [units=24] [pk_rows=10] [qt_rows=8] [pk|joint|both]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using NLMEEstimation, LinearAlgebra, Printf, Random

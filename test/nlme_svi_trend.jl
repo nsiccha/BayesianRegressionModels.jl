@@ -8,6 +8,7 @@
 # windows (default `4 patience + 1`) not to exceed twice its standard error.
 #
 # RUN: julia --project=test test/nlme_svi_trend.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 using LinearAlgebra, Random, Statistics

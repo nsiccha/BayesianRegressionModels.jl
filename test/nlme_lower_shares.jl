@@ -1,4 +1,5 @@
 # Run in the NLMEEstimation environment documented in test/README.md.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_shares_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_unit_checks.jl"))

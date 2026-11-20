@@ -1,5 +1,6 @@
 # Scaling harness for the literal Gaussian fixture, not a general eligibility
 # detector. Large cases never instantiate the bounded dense reference oracle.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("fixed_rate_fit.jl")
 
 function scaling_native_fixture(;groups,rows,temporal,spatial=2)

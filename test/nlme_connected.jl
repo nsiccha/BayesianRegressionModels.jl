@@ -1,4 +1,5 @@
 # Run: julia --project=test test/nlme_connected.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_connected_fixture.jl"))
 using LinearAlgebra, LogDensityProblems, Random

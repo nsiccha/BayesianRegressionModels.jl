@@ -6,6 +6,7 @@
 # algebra only.
 #
 # RUN: julia --project=test test/nlme_svi_centering_algebra.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, LinearAlgebra, Random, BayesianRegressionModels
 const BRM = BayesianRegressionModels
 using ReparametrizableDistributions: PartiallyCentered, reparam

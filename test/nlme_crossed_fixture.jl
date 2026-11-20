@@ -3,6 +3,7 @@
 # edges cross them, shared by test/nlme_crossed.jl and
 # test/nlme_crossed_fit.jl. Include it after nlme_fixtures.jl.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Random
 
 const CR_RNG = Xoshiro(20261028)

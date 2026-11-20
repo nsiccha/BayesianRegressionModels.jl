@@ -1,4 +1,5 @@
 # Preparation-only scaling receipt on actual BRM/RK structural supports.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Statistics
 include(joinpath(@__DIR__, "nlme_connected_fixture.jl"))
 

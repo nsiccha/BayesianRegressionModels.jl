@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, LinearAlgebra, SparseArrays, Random
 const BRM = BayesianRegressionModels
 

@@ -1,6 +1,7 @@
 # Synthetic models shared by the minibatch SVI tests (test/nlme_svi.jl,
 # test/nlme_svi_optimizer.jl and its fresh-process script,
 # test/nlme_svi_threads.jl).
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Random
 using LinearAlgebra: cholesky
 

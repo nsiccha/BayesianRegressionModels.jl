@@ -4,6 +4,7 @@
 # 0ggll1f, from ReactiveKernels snag js-source-all-pr-b15faf4f).
 #
 #     julia --project=test test/hsgp_basis_js.jl [filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, Random
 include(joinpath(@__DIR__, "testset_filter.jl"))
 const BRM = BayesianRegressionModels

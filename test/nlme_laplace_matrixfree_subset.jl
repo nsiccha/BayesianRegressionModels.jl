@@ -1,4 +1,5 @@
 # RUN: julia --project=test test/nlme_laplace_matrixfree_subset.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, LinearAlgebra
 

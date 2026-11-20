@@ -3,6 +3,7 @@
 # from the reporter's toy_events.jl, SHA256 05f376543fbc89a2e0058445374384c94107dbea00016b67066d6f51ae4234d3.
 # Both policies get the same data, fit seed, batch size and total iteration cap.
 # RUN: julia --project=test test/nlme_svi_coupling_events.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Treebars
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 import Random, Statistics

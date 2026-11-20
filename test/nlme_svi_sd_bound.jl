@@ -10,6 +10,7 @@
 # at it, and `sd_bound=nothing` turns it off.
 #
 # RUN: julia --project=test test/nlme_svi_sd_bound.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, Random, Statistics
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))

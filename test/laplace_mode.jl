@@ -5,6 +5,7 @@
 # is a complete packed point whose population part is a stationary maximum
 # (gradient near zero, no higher value nearby), the same from another start.
 # RUN: julia --project=test test/laplace_mode.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using WarmupHMC
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random

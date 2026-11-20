@@ -10,6 +10,7 @@
 #
 # Run: julia --startup-file=no --project=test test/fitted_constants.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Serialization: serialize, deserialize
 using Statistics: mean, std, var

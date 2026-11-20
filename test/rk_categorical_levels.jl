@@ -25,6 +25,7 @@
 #
 # Run: julia --startup-file=no --project=test test/rk_categorical_levels.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, StanBlocks
 using Enzyme, LogDensityProblems
 # Qualified: RKPPL also exports `LogitLink`, which the `Ordinal` model names.

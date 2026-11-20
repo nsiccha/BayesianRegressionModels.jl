@@ -7,6 +7,7 @@
 # cells require explicit opt-in; a plan passed to
 # brm_laplace_problem is taken as given.
 # RUN: julia --project=test test/laplace_plan.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random
 

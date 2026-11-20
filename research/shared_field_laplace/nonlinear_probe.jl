@@ -1,5 +1,6 @@
 # Non-Gaussian control exercising the field mode's implicit derivative.
 # Run under one token: julia --project=test research/shared_field_laplace/nonlinear_probe.jl
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("trace_probe.jl")
 
 # Deterministic Newton-CG for this log-concave-in-field Poisson fixture.

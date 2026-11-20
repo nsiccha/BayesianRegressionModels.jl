@@ -1,6 +1,6 @@
 # The Lanczos recurrences of the sparse Laplace's covariance root, the
 # matrix-free Laplace's log-determinant probes and GaussianBlockLaplace's
-# quadrature and solves, loaded on first use (src/lazy_dependencies.jl). A
+# quadrature and solves, loaded with that package (src/fitting_extensions.jl). A
 # KrylovKit state never leaves this module except as an opaque value passed
 # back into it; `_brm_lanczos_probe` hands BRM the basis as plain vectors.
 module BayesianRegressionModelsKrylovKitExt

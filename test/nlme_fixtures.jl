@@ -1,4 +1,5 @@
 # Shared fixtures for the NLME tests (test/nlme_view.jl, test/nlme_estimation_ext.jl).
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme

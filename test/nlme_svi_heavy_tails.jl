@@ -8,6 +8,7 @@
 # converged. Its window's mean and variance decide the stopping test.
 #
 # RUN: julia --project=test test/nlme_svi_heavy_tails.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, Random, Statistics
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))

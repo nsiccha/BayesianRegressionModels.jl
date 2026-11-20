@@ -3,6 +3,7 @@
 # python3 research/streaming_svi/panel_oracle.py OUTPUT_DIR
 # Both commands need the usual compute-token wrapper. The checked small-run
 # results are retained in results/; the Python control requires NumPy only.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 include(joinpath(@__DIR__, "..", "..", "test", "nlme_svi_streaming_fixture.jl"))
 output_dir = abspath(only(ARGS))

@@ -1,5 +1,6 @@
 # A complete point of the same model -> checked NLMEEstimation starting values.
 # RUN: julia --project=<env with NLMEEstimation> test/nlme_start.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BridgeStan, NLMEEstimation, Random, LinearAlgebra
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 

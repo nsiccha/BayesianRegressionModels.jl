@@ -1,4 +1,5 @@
 # Run: julia --startup-file=no --project=test test/rk_incell_censored.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 # Interleaved rows and row-specific limits exercise the original subject plate,

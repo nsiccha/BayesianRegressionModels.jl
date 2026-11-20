@@ -18,6 +18,7 @@
 #
 # Run: julia --startup-file=no --project=test test/rk_precompile_workload.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Pkg, TOML
 const BRM = BayesianRegressionModels
 

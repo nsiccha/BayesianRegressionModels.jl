@@ -1,4 +1,5 @@
 # Structural refusals and a bounded independent Gaussian marginal oracle.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include("nlme_svi_laplace_plan.jl")
 using Enzyme, DifferentiationInterface, LinearAlgebra, Random, LogDensityProblems
 import KrylovKit

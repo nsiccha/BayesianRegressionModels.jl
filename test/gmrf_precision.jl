@@ -1,5 +1,6 @@
 # Independent dense oracles are deliberately tiny. The implementation stores
 # spatial sparse geometry and applies the full precision without forming it.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, LinearAlgebra, SparseArrays, Random
 
 module GMRFPrecisionFixture

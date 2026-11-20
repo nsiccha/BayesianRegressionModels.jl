@@ -19,6 +19,7 @@
 # (needs BridgeStan reachable through StanBlocks; set BRM_PRED_RUNTIME=0 to run
 # only the declaration-level half.)
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

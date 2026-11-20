@@ -10,6 +10,7 @@
 # region's random effects through two blocks. A count over rows of its own
 # reads no random effect at all.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Random
 
 # `span = true` hides one more municipality-year in a district-year of the

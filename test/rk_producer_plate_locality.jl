@@ -1,6 +1,7 @@
 # Run: julia --project=test test/rk_producer_plate_locality.jl
 # A reader selects rows of an array produced by another plate. Shared
 # correlated effects exercise the view/reshape/product chain in BRM emission.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using Distributions, LinearAlgebra, LogDensityProblems, Enzyme
 using DifferentiationInterface: AutoEnzyme

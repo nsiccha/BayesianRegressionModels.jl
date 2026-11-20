@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_combine_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))

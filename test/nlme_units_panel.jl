@@ -11,6 +11,7 @@
 #
 # Run: julia --project=test test/nlme_units_panel.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, LinearAlgebra, Random
 

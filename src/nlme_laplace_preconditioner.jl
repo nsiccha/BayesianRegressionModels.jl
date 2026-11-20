@@ -12,7 +12,7 @@ struct _BRMFixedReference{L,U}
 end
 
 _brm_fixed_reference(H, memory; ridge=0.01) =
-    _brm_lazy(:LimitedLDLFactorizations, _brm_lldl_fixed_reference, H, memory; ridge)
+    _brm_lldl_fixed_reference(H, memory; ridge)
 
 # A component that is exactly native fields has its own reference: one field's
 # chains, or a star when shared rows couple several.

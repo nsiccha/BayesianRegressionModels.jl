@@ -12,6 +12,7 @@
 # models get by default) and the whole-model one (`structured=false`).
 #
 # RUN: julia --project=test test/nlme_laplace.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 using LogExpFunctions: logit

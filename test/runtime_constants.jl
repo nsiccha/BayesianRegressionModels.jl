@@ -1,5 +1,6 @@
 # Runtime fit inputs must execute constant expressions without interpreter dispatch.
 # Run: julia --project=test test/runtime_constants.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Statistics
 const BRM = BayesianRegressionModels
 include("rk_source_roundtrip.jl")

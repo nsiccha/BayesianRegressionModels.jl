@@ -1,6 +1,7 @@
 # A seeded fit's exact trace, draws and factors, to compare two trees byte for byte.
 #
 #     julia --project=test research/svi_field_units/identity.jl
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, Random, SHA, Serialization
 include(joinpath(@__DIR__, "..", "..", "test", "nlme_svi_owned_fixture.jl"))

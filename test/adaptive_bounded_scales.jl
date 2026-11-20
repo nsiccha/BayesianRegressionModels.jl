@@ -22,6 +22,7 @@
 # physical value every cell reads against BridgeStan's own `param_constrain`,
 # then checks the usual identities.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using BridgeStan

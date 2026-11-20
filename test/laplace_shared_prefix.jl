@@ -1,5 +1,6 @@
 # Shared helpers stay in the authored graph. Local curvature is conditional
 # on their values; the marginal gradient must still differentiate those values.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random
 

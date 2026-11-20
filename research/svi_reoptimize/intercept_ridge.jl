@@ -6,6 +6,7 @@
 # `unit_reoptimize = k`.
 #
 #     julia --project=test research/svi_reoptimize/intercept_ridge.jl [G] [iterations] [k...]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, Random, Statistics, LinearAlgebra
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
 const BRM = BayesianRegressionModels

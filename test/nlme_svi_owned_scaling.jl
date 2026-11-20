@@ -1,5 +1,6 @@
 # Bounded selected-unit work control; timings are observations, not a
 # hardware-independent performance threshold.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface
 include("nlme_svi_owned_fixture.jl")

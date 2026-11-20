@@ -11,6 +11,7 @@
 #
 #     julia --project=<scratch-env> test/nlme_grouped_hsgp_fit.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_grouped_hsgp_fixture.jl"))
 using NLMEEstimation, LinearAlgebra, Random

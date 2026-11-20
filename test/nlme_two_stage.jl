@@ -8,6 +8,7 @@
 #
 #     julia --project=<scratch-env> test/nlme_two_stage.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using NLMEEstimation, LogDensityProblems, LinearAlgebra, Random, Statistics
 import WarmupHMC

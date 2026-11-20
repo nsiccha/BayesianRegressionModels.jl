@@ -63,7 +63,9 @@ end
 ## Fit the model on minibatches
 
 `brm_svi_fit` takes the model on the ReactiveKernels backend, `RKBRMI(brmi)`, with
-Enzyme loaded for the gradients. Its units are those identified by `brm_nlme_view`:
+Enzyme loaded for the gradients and BRM's fitting-time weak dependencies loaded
+(KLU, Krylov, KrylovKit, LimitedLDLFactorizations, MCMCDiagnosticTools, MUMPS and
+SparseMatrixColorings). Its units are those identified by `brm_nlme_view`:
 here one site with its visits. In this model, every observation belongs to exactly one unit,
 which is what makes a batch of units an unbiased estimate of the whole likelihood.
 

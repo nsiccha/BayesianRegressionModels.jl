@@ -3,6 +3,7 @@
 # truth is a Matérn ν = 1 field at the sites with known hyperparameters.
 #
 #     julia --project=test research/svi_field_units/readpair_path.jl sites rows iterations [more groups of three]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, LinearAlgebra, Random, Statistics, Printf
 using SpecialFunctions: besselk

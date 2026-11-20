@@ -1,6 +1,6 @@
 # The sparse Laplace's augmented-system factor (`_BRMAugmentedFactor.F`,
 # src/nlme_laplace_factors.jl): KLU's factorization, its solves and its scaled
-# pivots, loaded on first use (src/lazy_dependencies.jl).
+# pivots, loaded with that package (src/fitting_extensions.jl).
 module BayesianRegressionModelsKLUExt
 
 import BayesianRegressionModels as BRM

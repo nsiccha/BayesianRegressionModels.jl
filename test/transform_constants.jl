@@ -9,6 +9,7 @@
 # floating-point tolerance. Public synthetic models only.
 #
 # Run: julia --project=test test/transform_constants.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels, Distributions, Statistics, Random
 using ReactiveKernels, ReactiveKernelsPPL

@@ -2,6 +2,7 @@
 # lengths, then lengths fixed by `=`. Synthetic stations only.
 #
 #     julia --project=test research/svi_field_units/multiresolution_probe.jl
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, Random, Statistics, Printf
 const BRM = BayesianRegressionModels

@@ -1,5 +1,6 @@
 # Production operator algebra without a large exact sparse factor.
 # RUN: julia --project=test research/matrixfree_conditional/production.jl NX NY NT [refine] [draw]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("scaling.jl")
 
 function proxy_spectrum(nx, ny, nt; rho=0.9)

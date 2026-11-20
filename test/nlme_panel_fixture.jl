@@ -4,6 +4,7 @@
 # size-stratified municipality effect, and a quantity observed only as
 # district-year totals.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Random
 
 function panel_data(; seed=1, nregion=3, ndistrict=2, nmuni=4, nyear=3, pmissing=0.25)

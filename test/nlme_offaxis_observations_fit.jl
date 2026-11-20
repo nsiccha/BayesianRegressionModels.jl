@@ -9,6 +9,7 @@
 #
 #     julia --project=<scratch-env> test/nlme_offaxis_observations_fit.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_offaxis_fixture.jl"))
 using NLMEEstimation

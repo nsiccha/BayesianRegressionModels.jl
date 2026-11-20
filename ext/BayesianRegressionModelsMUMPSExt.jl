@@ -1,5 +1,5 @@
-# The sparse Laplace's inertia check (`_brm_spl_inertia`), loaded on first use
-# (src/lazy_dependencies.jl): MUMPS brings MPI, which no model build needs.
+# The sparse Laplace's inertia check (`_brm_spl_inertia`), loaded with that package
+# (src/fitting_extensions.jl): MUMPS brings MPI, which no model build needs.
 module BayesianRegressionModelsMUMPSExt
 
 import BayesianRegressionModels as BRM

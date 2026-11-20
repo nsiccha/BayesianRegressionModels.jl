@@ -16,6 +16,7 @@
 # data, returns draws in the packed RK coordinates, and resumes bit for bit.
 #
 # RUN: julia --project=test test/nlme_svi_centering.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 

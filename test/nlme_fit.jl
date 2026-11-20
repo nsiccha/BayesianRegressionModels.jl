@@ -1,6 +1,7 @@
 # Prior-median starting values, NLME estimates in the model's own names and
 # natural units, and the one-call fit through NLMEEstimation's estimators.
 # RUN: julia --project=<env with NLMEEstimation> test/nlme_fit.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using NLMEEstimation, Random, LinearAlgebra
 using Treebars: with_progress, with_prepared_phases, render_text, request_interrupt!,
     ProgressInterrupted

@@ -11,6 +11,7 @@
 #
 # The same partition is what lets a sparse Laplace plan integrate the subjects'
 # effects: without it, a factor query refuses the table for having no row form.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems
 

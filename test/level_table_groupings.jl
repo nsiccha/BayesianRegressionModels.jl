@@ -16,6 +16,7 @@
 # gather written inline is refused with the assignment to write.
 #
 # Run: julia --project=test test/level_table_groupings.jl [testset substrings...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LinearAlgebra, Random
 

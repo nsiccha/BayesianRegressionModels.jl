@@ -4,6 +4,7 @@
 # `1nhjhdl`). A block must mean exactly its hand-inlined flat program: the
 # same priors, density, gradient and coordinates, with `lhs.local` for the
 # inlined `lhs_local`.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Distributions
 using Enzyme, LogDensityProblems, LinearAlgebra
 using DifferentiationInterface: AutoEnzyme

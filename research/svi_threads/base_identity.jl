@@ -6,6 +6,7 @@
 # RUN: julia --project=<checkout>/test --threads=4 research/svi_threads/base_identity.jl \
 #          <out.bin> <seed> [T]
 # with no T for a commit that has no `threads` option.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LinearAlgebra, Random

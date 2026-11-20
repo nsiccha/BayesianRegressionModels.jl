@@ -1,4 +1,5 @@
 # Run in the NLMEEstimation scratch environment from test/README.md.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_completion_fixture.jl"))
 using NLMEEstimation, Random

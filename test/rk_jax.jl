@@ -12,6 +12,7 @@
 # (`test/jax_python.jl`); without it those checks are skipped.
 #
 # Run: RK_JAX_PYTHON=<python with jax> julia --project=test test/rk_jax.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL

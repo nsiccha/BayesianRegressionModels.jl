@@ -9,6 +9,7 @@
 # `Distributions`, `ReactiveKernels` and `ReactiveKernelsPPL` loaded.
 
 module FittedStateVersionModels
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Distributions, Statistics
 flat_pk(d) = @brm d begin
     sigma ~ Exponential(1)

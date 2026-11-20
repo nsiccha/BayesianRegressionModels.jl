@@ -13,6 +13,7 @@
 #   scale         step cost and memory at growing state counts (no exact reference)
 #   multires      the moderate data through `multiresolution=3` under `:global`: do the learned
 #                 lengths stay near the truth, against the read-pair fit of the same data?
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, LinearAlgebra, Random, Statistics, Printf
 using SpecialFunctions: besselk

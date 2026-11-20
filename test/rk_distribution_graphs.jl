@@ -1,5 +1,6 @@
 # Public consumer-hook acceptance for BRM's joint completion laws. The
 # ordinary Julia adapter supplies an independent normalization/support oracle.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 function owned_completion_density(F, args)

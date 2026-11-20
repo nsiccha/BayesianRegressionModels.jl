@@ -1,4 +1,5 @@
 module SMCWindowFixture
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Random, Serialization
 
 normal(data) = @brm data begin

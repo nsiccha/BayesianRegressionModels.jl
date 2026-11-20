@@ -1,5 +1,6 @@
 module SMCTuningFixture
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Distributions
 using Random
 using WarmupHMC: MatrixFactorization, SuccessiveReflections
