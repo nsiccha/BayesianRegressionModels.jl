@@ -11,7 +11,8 @@
 # controls in the next window). A sparse global that is a centred cell's scale
 # steps on sites that see its readers' whole centered terms. A grouped HSGP's
 # weights are cells scaled by its spectral scales, and its centered fit beats
-# the plain one against NUTS. A fit learns controls that rise with a unit's
+# the plain one against the integrated posterior for the length scale and NUTS
+# for the remaining coordinates. A fit learns controls that rise with a unit's
 # data, returns draws in the packed RK coordinates, and resumes bit for bit.
 #
 # RUN: julia --project=test test/nlme_svi_centering.jl [testset-filter...]
@@ -22,6 +23,7 @@ include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_streaming_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_grouped_hsgp_fixture.jl"))
+include(joinpath(@__DIR__, "nlme_svi_centering_curve_reference.jl"))
 using Serialization
 
 const BRM_ = BayesianRegressionModels
@@ -523,11 +525,32 @@ end
 # 0.19-0.31 NUTS sds after the 40 windows of the two-window stop
 # (`trend_windows=0`), 0.32-0.38 after the 46-47 of the trend stop (BRM 0.2.264),
 # 0.47-0.50 after 200 and 0.21-0.28 after 400, while the plain fit's was 0.53-0.76
-# throughout; so the bound below sits between the two at the default stop.
+# throughout. The finite-chain reference also moved when Enzyme began fusing
+# derivative multiply-adds. Integrate the length-scale reference and compare
+# the two fits over the same three seeds used in the original calibration.
 @stestset "a grouped HSGP's centered fit against NUTS" begin
-    rk = RKBRMI(svi_centering_curve_model(svi_centering_curve_data()))
+    data = svi_centering_curve_data()
+    rk = RKBRMI(svi_centering_curve_model(data))
     m = brm_nlme_model(rk; ad_backend=NLME_AD)
     problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    names = string.(coordinate_names(rk.model.layout))
+    scale_indices = [only(findall(==(name), names)) for name in
+        ("hsgp_t.rho", "hsgp_t.sigma", "sigma", "b_subject.tau.1")]
+    rho, sd = scale_indices[1:2]
+    panel = CenteringCurveReference.subject_blocks(data)
+    # Both ways of integrating the Gaussian coefficients must give the same
+    # relative log posterior, including when all four scales move.
+    offsets = map([(-2.8, 0.3, -1.2, -0.5), (-1.6, -0.4, -0.8, 0.2),
+                   (-4.0, 0.7, -1.4, -1.2)]) do scales
+        CenteringCurveReference.log_marginal(panel, scales) -
+            CenteringCurveReference.rk_log_marginal(problem, scale_indices, scales)
+    end
+    @test maximum(offsets) - minimum(offsets) < 1e-8
+    integrated = CenteringCurveReference.length_moments(panel)
+    narrower = CenteringCurveReference.length_moments(panel; order=32,
+        bounds=((-26.0, 0.9), (-2.0, 1.9), (-1.7, -0.55), (-4.2, 1.3)))
+    @test abs(integrated.mean - narrower.mean) < 0.001 * integrated.sd
+    @test abs(integrated.sd - narrower.sd) < 0.001 * integrated.sd
     u0 = first(BRM_._brm_nlme_prior_median_point(m))
     reference = reduce(hcat, map(1:4) do chain
         run = adaptive_warmup_mcmc(Xoshiro(100 + chain), problem;
@@ -535,26 +558,33 @@ end
         convert(Matrix{Float64}, run.posterior_position)
     end)
     μr, σr = vec(mean(reference; dims=2)), vec(std(reference; dims=2))
-    names = string.(coordinate_names(rk.model.layout))
-    rho, sd = findfirst(==("hsgp_t.rho"), names), findfirst(==("hsgp_t.sigma"), names)
     options = (; batch_size=4, ndraws=2000)
     # Plain: independent factors. With the default linear coupling and no centering
     # (seed 5, BRM 0.2.286) the length scale was 0.20 NUTS sds off and the HSGP sd
     # 0.49, against the centered fit's 0.38 and 0.71: this check compares centering
     # with the independent factorization.
-    plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing, coupling=nothing)
-    fit = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=LearnedCentering())
-    c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
-    @test length(c) == 5 * 12
     mean_error(f) = abs.(vec(mean(f.draws; dims=2)) .- μr) ./ σr
     ratio(f) = vec(std(f.draws; dims=2)) ./ σr
     elbo(f) = mean(f.diagnostics.elbo[end-99:end])
-    locals = setdiff(eachindex(μr), fit.diagnostics.globals)
-    @test mean_error(fit)[rho] < 0.45 < mean_error(plain)[rho]
-    @test ratio(fit)[rho] > 0.15
-    @test mean_error(fit)[sd] < mean_error(plain)[sd]
-    @test sqrt(mean(abs2, mean_error(fit)[locals])) < 0.15
-    @test elbo(fit) > elbo(plain) + 1
+    rho_error(f) = abs(mean(view(f.draws, rho, :)) - integrated.mean) / integrated.sd
+    errors = map(5:7) do seed
+        plain = brm_svi_fit(m; options..., rng=Xoshiro(seed), centering=nothing, coupling=nothing)
+        fit = brm_svi_fit(m; options..., rng=Xoshiro(seed), centering=LearnedCentering())
+        if seed == 5
+            c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
+            @test length(c) == 5 * 12
+            locals = setdiff(eachindex(μr), fit.diagnostics.globals)
+            @test ratio(fit)[rho] > 0.15
+            @test mean_error(fit)[sd] < mean_error(plain)[sd]
+            @test sqrt(mean(abs2, mean_error(fit)[locals])) < 0.15
+            @test elbo(fit) > elbo(plain) + 1
+        end
+        centered, independent = rho_error(fit), rho_error(plain)
+        @info "Grouped HSGP length-scale mean error in posterior SDs" seed centered independent
+        @test centered < independent
+        (; centered, independent)
+    end
+    @test median(getproperty.(errors, :centered)) < 0.45 < median(getproperty.(errors, :independent))
 end
 
 # Measured with this data (seeds 5 and 6, 2026-11-07): the plain mean-field fit
