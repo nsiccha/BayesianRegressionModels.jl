@@ -89,7 +89,36 @@ function _rk_component_cell_statement(statement, kernel, definitions, bindings, 
     rhs = _brm_component_cell_ir(component, call, kernel.scope)
     defs, statements = Expr[], Expr[]
     columns, bound = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
-    _rk_submodel_rhs!(defs, statements, columns, bound, lhs, component, rhs)
+    sliced = Set{Symbol}()
+    calls = nothing
+    for axis in values(kernel.columns)
+        axis isa _BRMCollectionAxis && !isempty(axis.path) && last(axis.path) === lhs || continue
+        raw = Dict(param => kernel.columns[input.source] for (param, input) in
+            zip(kernel.params, kernel.inputs) if haskey(kernel.columns, input.source))
+        calls = _brm_collection_cell_calls(component, call, kernel.scope, raw, length(axis))
+        break
+    end
+    if isnothing(calls)
+        _rk_submodel_rhs!(defs, statements, columns, bound, lhs, component, rhs)
+    else
+        programs = map(eachindex(calls)) do i
+            defs, body = Expr[], Expr[]
+            data, bindings = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
+            _rk_submodel_rhs!(defs, body, data, bindings, lhs, component, calls[i]; cell=true)
+            (; defs, body, data, bindings)
+        end
+        head = first(programs)
+        all(p -> p.defs == head.defs && p.body == head.body &&
+            keys(p.data) == keys(head.data) && p.bindings == head.bindings, programs) ||
+            throw(ArgumentError("component `$(component.name)` has different programs within a collection variant"))
+        append!(defs, head.defs)
+        append!(statements, head.body)
+        append!(bound, head.bindings)
+        for key in keys(head.data)
+            columns[key] = [p.data[key] for p in programs]
+            push!(sliced, key)
+        end
+    end
     renames = Dict{Symbol,Symbol}()
     for name in (_rk_source_definition(def).name for def in defs)
         renames[name] = _rk_ast_fresh_name(string(kernel.name, "_", name), taken)
@@ -106,5 +135,11 @@ function _rk_component_cell_statement(statement, kernel, definitions, bindings, 
     end
     append!(definitions, (_rk_rename_symbols(def, renames) for def in defs))
     emitted = _rk_rename_symbols(only(statements), renames)
-    Expr(:(=), lhs, Expr(:call, _rk_cell_component, emitted.args[3]))
+    apply = emitted.args[3]
+    if !isempty(sliced)
+        outer = Set(renames[key] for key in sliced)
+        apply = Expr(:call, apply.args[1], (arg in outer ?
+            Expr(:brm_collection_slice, arg) : arg for arg in apply.args[2:end])...)
+    end
+    Expr(:(=), lhs, Expr(:call, _rk_cell_component, apply))
 end

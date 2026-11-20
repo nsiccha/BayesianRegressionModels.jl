@@ -32,7 +32,7 @@ function _brm_guard_value(expr, inputs)
     elseif Meta.isexpr(expr, :., 2) && expr.args[2] isa QuoteNode
         record = _brm_guard_value(expr.args[1], inputs)
         field = expr.args[2].value
-        return record isa AbstractDict ? record[field] : getproperty(record, field)
+        return _brm_record_field(record, field)
     elseif Meta.isexpr(expr, :&&, 2)
         return _brm_guard_value(expr.args[1], inputs) && _brm_guard_value(expr.args[2], inputs)
     elseif Meta.isexpr(expr, :||, 2)

@@ -1200,6 +1200,14 @@ end
 # simplex on the same explained-variance footing. Data-only, so it lands in
 # transformed data.
 StanBlocks.@deffun begin
+    brm_member_effects(b::matrix[n_groups, n_terms], groups::int[n],
+            members::int[n], columns::int[k])::vector[n] = begin
+        rv = rep_vector(0.0, n)
+        for i in 1:n
+            rv[i] = b[groups[i], columns[members[i]]]
+        end
+        return rv
+    end
     brm_cat_variances(x::int[n], n_levels::int, n::int)::vector[n_levels - 1] = begin
         rv = rep_vector(1., n_levels - 1)
         for l in 2:n_levels
@@ -5584,6 +5592,14 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     _sb_prune_cell_formula_inputs!(data, preproc, stmts)
     _sb_prune_guard_inputs!(data, preproc, stmts)
+    for column in _brm_operation_values(brmi)
+        column isa NamedColumn && parent(column) isa DataColumn || continue
+        value = parent(parent(column))
+        value isa _BRMObservedMemberRows || continue
+        source = name(column)
+        key = _rk_ast_fresh_name(string(source, "_member_rows"), union(Set(keys(preproc)), keys(data)))
+        preproc[key] = PreprocEntry(:collection_observation, value.layout, source, true)
+    end
     _sb_drop_shadowed_data!(data, preproc, stmts)
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
     # collected as reprocess provenance). See `_sb_is_stan_data_value`. This also
@@ -8009,7 +8025,12 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
-        e.kind in (:interaction, :submodel_hook, :cell_formulas, :brm_component) && continue
+        e.kind in (:interaction, :submodel_hook, :cell_formulas, :collection_cells, :brm_component) && continue
+        if e.kind === :collection_observation
+            value = _brm_df_column(new_df, e.raw_ref)
+            new_preproc[key] = PreprocEntry(e.kind, value.layout, e.raw_ref, true)
+            continue
+        end
         _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
@@ -8038,6 +8059,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # Cell formulas read the ragged inputs regenerated above, and retain the
     # field fitted to each semantic cell label.
     for (key, e) in sb.preproc
+        if e.kind === :collection_cells
+            _sb_replay_collection_cells!(new_data, new_preproc, handled, key, e, new_df,
+                freeze_constants)
+            continue
+        end
         e.kind === :cell_formulas || continue
         _sb_replay_cell_formulas!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
@@ -9038,6 +9064,14 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         group=isempty(grouped) && isempty(ragged_specs) ? nothing : name(group_col), distinct)
     _brm_check_cell_total_latents(body_stmts, params, _brm_inline_scope(lam); prefix="sbimpl")
     body_stmts = _sb_cell_prior_order(body_stmts, kept_params)
+    for column in dcols[2:end]
+        if column isa NamedColumn && parent(column) isa DataColumn &&
+                parent(parent(column)) isa _BRMCollectionAxis
+            body_stmts = _sb_collection_cell!(body_stmts, data, parent(parent(column)),
+                kept_names, kept_params, _brm_inline_scope(lam))
+            break
+        end
+    end
     # The cell is Julia source; give StanBlocks its Stan spellings.
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
@@ -15363,6 +15397,20 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
                                   term_overrides=Dict{Symbol,Any}())
     (; bucket_name, cols, idx_name, suffix) = info
     r_name = Symbol(:r_, target, :_, suffix)
+    if length(gterms) == 1 && only(gterms) isa _SBCellMeansTerm
+        term = only(gterms).term
+        codes = _sb_cat_levels(term)
+        if codes isa _BRMMemberCodes
+            margin = name(term)
+            data[margin] = codes.rows
+            positions = Symbol(:col_idx_, target, :_, suffix)
+            data[positions] = collect(Int, cols)
+            _sb_record_static!(data, positions)
+            push!(stmts, :($r_name = brm_member_effects($bucket_name, $idx_name, $margin, $positions)))
+            push!(summands, r_name)
+            return
+        end
+    end
     col_exprs = Any[]
     for t in gterms
         _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;

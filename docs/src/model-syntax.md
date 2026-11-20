@@ -154,6 +154,46 @@ at model scope, `recovery = kin.recovery`, then read `recovery[i]`.
 `brm_components` discovers the definitions and call paths; descriptor queries
 use `submodel=:left` rather than generated names.
 
+### Repeating a component over records
+
+Bind one member per record when the channels in a measurement vary between
+datasets. An `if` on the record's settings selects which declarations enter
+the model. Here the calibrated channels each get their own shift.
+
+```@example record_components
+using BayesianRegressionModels
+
+@brm function sensor(settings)
+    if settings.calibrated
+        shift ~ Normal(0, settings.scale)
+        reading = settings.offset + shift
+    else
+        reading = settings.offset
+    end
+    return reading
+end
+
+signals = @brm begin
+    for item in sensors
+        channels[item.id] ~ sensor(item)
+    end
+    y ~ Normal(channels, 1)
+end
+
+sensors = [(id=:left, calibrated=true, offset=0.4, scale=0.7),
+           (id=:right, calibrated=false, offset=1.2, scale=0.5)]
+data = (; sensors, y=[0.2, 1.0])
+model = signals(data)
+[call.path for call in brm_components(model)]
+```
+
+`channels` follows the order of the supplied records. Fitted parameters keep
+their labels when `reprocess` receives the same members in a different order.
+For example, `brm_outputs(brm_descriptor(SBBRMI(model)); submodel=(:channels,
+:left), logical=:shift)` finds the calibrated channel's shift. Binding with
+`channels[item]` uses positions as keys. For a fit with a different selection
+of members or declaration flags, call the builder on the new records.
+
 Use `merge(structure_a, structure_b, priors_a, priors_b)` for fragments that
 share one namespace. Put structure first and priors last within each scope;
 moving a cell-local prior outside the plate changes the model. A retained

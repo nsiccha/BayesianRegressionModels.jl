@@ -1633,7 +1633,12 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         if _rk_is_cell_component(statement)
             lhs, marker = statement.args
             entry = Expr(:ref, locals_of[lhs], index)
-            return Any[Expr(:call, :~, entry, marker.args[2]), Expr(:(=), lhs, entry)]
+            call = marker.args[2]
+            if any(arg -> Meta.isexpr(arg, :brm_collection_slice), call.args)
+                call = Expr(:call, (Meta.isexpr(arg, :brm_collection_slice) ?
+                    Expr(:ref, only(arg.args), index) : arg for arg in call.args)...)
+            end
+            return Any[Expr(:call, :~, entry, call), Expr(:(=), lhs, entry)]
         end
         _rk_is_cell_gmrf(statement) && return _rk_expand_cell_gmrf(statement, index, selected,
             defs, bindings, taken, avoid, coordinates, kernel.name)

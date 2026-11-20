@@ -329,7 +329,7 @@ function _brm_component_rk_plan(component, call)
 end
 
 function _rk_submodel_rhs!(definitions, statements, data, bindings,
-        target::Symbol, component::BRMComponent, call; reserved=())
+        target::Symbol, component::BRMComponent, call; reserved=(), cell=false)
     plan, instance = _brm_component_replay_scope(target, component, call) do
         _brm_component_rk_plan(component, call)
     end
@@ -373,7 +373,8 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     # computations still execute at binding time; no Julia-side fitting or
     # sampled value is substituted for them.
     fit_inputs = _rk_plan_fit_inputs(plan)
-    fitted = _rk_fitted_definitions(emitted, plan, Set{Symbol}(keys(fit_inputs)))
+    fitted = cell ? Dict{Symbol,Set{Symbol}}() :
+        _rk_fitted_definitions(emitted, plan, Set{Symbol}(keys(fit_inputs)))
     for key in sort!(collect(keys(fitted)))
         renames[key] = _rk_ast_fresh_name(string(target, "_component_", key), taken)
     end
@@ -417,6 +418,9 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     definition = Expr(:(=), Expr(:call, entry, params...), body)
     push!(definitions, _brm_documented_statement(definition, header))
     push!(statements, Expr(:call, :~, target, Expr(:call, entry, args...)))
+    # A plate invocation keeps its fit computations inside the indexed
+    # submodel. Its caller supplies their per-member inputs.
+    cell && return nothing
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs
         outer_fits[column_names[input]] = column_names[source]

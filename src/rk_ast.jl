@@ -2198,7 +2198,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing || continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; level_indices, level_sources, coordinates))
+            ranef_effects, taken, bindings; level_indices, level_sources, coordinates,
+            columns=plan.columns))
     end
     vector_priors = Dict(v.name => v for v in plan.vector_parameters)
     owned_vectors = Set{Symbol}()

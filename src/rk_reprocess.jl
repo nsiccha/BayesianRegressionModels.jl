@@ -92,7 +92,6 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         resample_groups=(), resample_covariates=(), keep_observed::Bool=false,
         held_out=_rk_held_out_names(rk.plan))
     prefix = "RK reprocess"
-    new_data = _brm_collection_replay_data(brm_source(rk), new_data)
     covariates = _rk_forecast_covariates(rk.plan, resample_covariates, keep_observed; prefix)
     isempty(covariates) || freeze_constants || throw(ArgumentError("$prefix: " *
         "`resample_covariates` forecasts with the fit's frozen constants; " *
@@ -101,9 +100,14 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         "`resample_covariates` needs the fit's data-bound backend; a data-free " *
         "replay of a fitted state does not forecast `mi()` covariates yet"))
     car_units = _rk_fitted_car_units(rk.plan)
-    freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out,
-        completions=_rk_completion_mode(rk.plan),
-        car_units=_rk_rebuilt_car_units(car_units))
+    if !freeze_constants
+        axes = _brm_collection_axes(brm_source(rk))
+        rebound = isempty(axes) ? _brm_rebind_brmi(parent(rk), new_data) :
+            first(axes).builder(new_data)
+        return RKBRMI(rebound; held_out, completions=_rk_completion_mode(rk.plan),
+            car_units=_rk_rebuilt_car_units(car_units))
+    end
+    new_data = _brm_collection_replay_data(brm_source(rk), new_data)
     _rk_refuse_level_correlated_resample(parent(rk),
         _rk_resample_group_set(resample_groups; prefix); prefix)
     _rk_refuse_grouped_hsgp_resample(parent(rk),

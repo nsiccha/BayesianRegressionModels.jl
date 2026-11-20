@@ -4225,6 +4225,7 @@ function _rk_ranef_dummies!(margins::Vector{_RKRanefMargin}, target::Symbol,
             "same string form; the draws regime needs unambiguous levels")
     end
     columns[source] = raw
+    raw isa _BRMMemberCodes && (columns[raw.extent] = collect(1:raw.count))
     for k in kept_values
         push!(margins, _RKRanefMargin(target,
             Symbol(string(source) * "_dummy_" * string(k)),

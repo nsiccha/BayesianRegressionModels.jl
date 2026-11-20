@@ -529,7 +529,7 @@ end
 # positions computed from the data (`b[g_level, k]`), which a `levels(g)` axis
 # would instead read as labels.
 function _rk_ast_group_component!(definitions, statements, taken, name, group, K, eta,
-        priors; scale_value=nothing, nu=nothing, L_value=nothing)
+        priors; scale_value=nothing, nu=nothing, L_value=nothing, dimension=K)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(priors,
         (:g, :K, :eta, :tau, :L, :z, :w, :nu, (Symbol(:tau_, j) for j in 1:K)...))
     index = K > 1 ? Expr(:call, :(:), 1, :K) : Expr(:call, :(:), 1, 1)
@@ -579,7 +579,7 @@ function _rk_ast_group_component!(definitions, statements, taken, name, group, K
         level-by-margin matrix $levels, one row per level of `g` in order.$mixing$(_rk_prior_inputs_doc(prior_inputs))"""
     callee = _rk_ast_shared_definition!(definitions, taken, base, arguments, body; doc)
     values = Any[group]
-    K > 1 && push!(values, K, eta)
+    K > 1 && push!(values, dimension, eta)
     scale_value === nothing || push!(values, scale_value)
     L_value === nothing || push!(values, L_value)
     nu === nothing || push!(values, nu)

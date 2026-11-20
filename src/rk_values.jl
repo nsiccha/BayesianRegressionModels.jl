@@ -240,11 +240,27 @@ _rk_bucket_eta(bucket) = something(bucket.eta_input, bucket.lkj_eta)
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
         level_indices, level_sources=Dict{Symbol,Symbol}(), predictors=(),
-        population_priors=Dict(), coordinates=nothing)
+        population_priors=Dict(), coordinates=nothing, columns=(;))
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
     stmts = Expr[]
+    add_extent(a, b) = a == 0 ? b : b == 0 ? a :
+        a isa Int && b isa Int ? a + b : Expr(:call, :+, a, b)
+    offsets = Dict{Symbol,Any}()
+    member_inputs = Dict{Symbol,Symbol}()
+    dimension = 0
+    for (target, margins) in bucket.slices
+        recipe = bucket.margins[first(margins)].z
+        codes = get(columns, recipe.column, nothing)
+        offsets[target] = dimension
+        width = length(margins)
+        if codes isa _BRMMemberCodes
+            member_inputs[target] = recipe.column
+            width = Expr(:call, :length, codes.extent)
+        end
+        dimension = add_extent(dimension, width)
+    end
     if grouping.form === :mm
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
         push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
@@ -299,7 +315,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             _rk_bucket_eta(bucket),
             known ? Any[_rk_known_scale_read(p, law)
                 for (p, law) in zip(bucket.sd_priors, priors)] : priors;
-            nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
+            nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value, dimension)
         # Plain groups retain semantic transport metadata at their actual
         # component-owned declarations; other grouping forms remain unpaired.
         # A Student-t block also records its per-level mixing weights; Gaussian
@@ -364,6 +380,18 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     # An ordinary RKPPL gather, so a per-cell query reads only its own row.
     gather_margin(col, margin) = Expr(:ref, gathered, indices[col], margin)
     for (target, margins) in bucket.slices
+        if haskey(member_inputs, target)
+            source = member_inputs[target]
+            row = _rk_ast_fresh_name("member_row", taken)
+            group_index = indices[_rk_target_group(grouping, target)]
+            margin = add_extent(offsets[target], Expr(:ref, source, row))
+            effect = effects[(target, bucket.group, bucket.id)]
+            cell = Expr(:(=), Expr(:ref, effect, row),
+                Expr(:ref, gathered, Expr(:ref, group_index, row), margin))
+            push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+                Expr(:for, Expr(:(=), row, Expr(:call, :eachindex, source)), Expr(:block, cell))))
+            continue
+        end
         summands = Any[]
         for margin in margins
             coef = if grouping.form === :gr
@@ -384,7 +412,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 end
                 result
             else
-                gather_margin(_rk_target_group(grouping, target), margin)
+                gather_margin(_rk_target_group(grouping, target),
+                    add_extent(offsets[target], margin-first(margins)+1))
             end
             recipe = bucket.margins[margin].z
             if recipe.kind !== :ones

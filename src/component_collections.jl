@@ -62,21 +62,22 @@ function _brm_collection_builder(source, scope)
     loops = filter(st -> st isa _BRMCollectionLoop, statements)
     names = [loop.target for loop in loops]
     allunique(names) || throw(ArgumentError("@brm: duplicate component collection binding"))
-    plain = Expr(:block, (st for st in statements if !(st isa _BRMCollectionLoop))...)
-    columns = setdiff(collect(Symbol, brm_columns(brm(plain; mod=scope))), names)
-    for loop in loops
-        push!(columns, loop.source)
-        for arg in loop.arguments
-            arg isa Symbol && arg !== loop.item && push!(columns, arg)
-        end
+    # Give the ordinary data-free inventory one representative call. It then
+    # sees reads of parent declarations, including forward references.
+    inventory = map(statements) do st
+        st isa _BRMCollectionLoop || return _brm_observation_inventory(st, loops)
+        arguments = Any[arg === st.item ? st.source : arg for arg in st.arguments]
+        Expr(:call, :~, st.target, Expr(:call, st.component, arguments...))
     end
+    columns = setdiff(collect(Symbol, brm_columns(brm(Expr(:block, inventory...); mod=scope))), names)
     occupied = _brm_cell_value_refs!(Set{Symbol}(columns), source)
     BRMBuilder(_BRMCollectionBuilder(statements, scope, occupied), source,
         Tuple(sort!(unique!(columns))), scope)
 end
 
 _brm_record_field(record, key) = getproperty(record, key)
-_brm_record_field(record::AbstractDict, key) = record[key]
+_brm_record_field(record::AbstractDict, key::Symbol) =
+    haskey(record, key) ? record[key] : record[String(key)]
 
 # A numeric cell axis is also the provenance for rebuilding columns from a new
 # table of records. It is an ordinary integer vector to the two emitters.
@@ -120,64 +121,98 @@ function _brm_project_record(expr, record, fields, occupied)
     expr
 end
 
-function _brm_variant_component(loop, selected, value)
+function _brm_variant_component(loop, selected, value, ports)
     original = loop.component
     formal = original.inputs[loop.record]
     fields = OrderedDict{Symbol,Symbol}()
     occupied = _brm_cell_value_refs!(Set{Symbol}(original.inputs), Expr(:block, selected..., value))
     body = _brm_project_record(Expr(:block, selected..., Expr(:return, value)), formal, fields, occupied)
     inputs = [s for s in original.inputs if s !== formal]
+    append!(inputs, ports)
     append!(inputs, values(fields))
     source = Expr(:function, Expr(:call, original.name, inputs...), body)
     _brm_component(source, original.scope), fields
 end
 
-function _brm_collection_variant!(out, frame, builder, occupied, loop, records, keys,
-        positions, selected, value, variant)
+function _brm_collection_variant!(out, frame, observers, builder, occupied, loop, records, keys,
+        positions, selected, value, variant, df)
     name = loop.target
     fresh(parts...) = _rk_ast_fresh_name(string(parts...), occupied)
     axis_name = fresh(name, "_axis_", variant)
     fields_prefix = string(name, "_", variant, "_")
-    component, fields = _brm_variant_component(loop, selected, value)
+    declarations = filter(st -> !_brm_is_observer(st), selected)
     index = fresh("brm_entry")
+    declarations, ports, shared = _brm_parent_margins!(out, frame, occupied, loop,
+        records, positions, variant, declarations, index, df)
+    component, fields = _brm_variant_component(loop, declarations, value, ports)
     args = Any[arg for (i, arg) in enumerate(loop.arguments) if i != loop.record]
+    append!(args, shared)
     for (key, formal) in fields
         column = fresh(fields_prefix, formal)
         frame[column] = [_brm_record_field(records[i], key) for i in positions]
         push!(args, Expr(:ref, column, index))
     end
     member = fresh(name, "_member_", variant)
-    result = fresh(name, "_result_", variant)
-    frame[axis_name] = _BRMCollectionAxis(builder, name, keys[positions], positions, (result, member))
+    returned = _brm_component_fields(component)
+    results = isnothing(returned) ? [fresh(name, "_result_", variant)] :
+        [fresh(name, "_result_", variant, "_", field) for field in Base.keys(returned)]
+    member_results = isnothing(returned) ? only(results) :
+        NamedTuple{Base.keys(returned)}(Tuple(results))
+    for st in selected
+        _brm_is_observer(st) || continue
+        push!(observers, (; loop, records, positions, keys=keys[positions], result=member_results, variant, observer=st))
+    end
+    frame[axis_name] = _BRMCollectionAxis(builder, name, keys[positions], positions, (last(results), member))
     call = Expr(:call, component, args...)
+    reads = isnothing(returned) ? [member] :
+        [Expr(:., member, QuoteNode(field)) for field in Base.keys(returned)]
     body = Expr(:block, Expr(:call, :~, member, call),
-        Expr(:(=), Expr(:ref, result, index), member))
+        (Expr(:(=), Expr(:ref, result, index), read) for (result, read) in zip(results, reads))...)
     header = Expr(:(=), index, Expr(:call, :eachindex, axis_name))
     push!(out, Expr(:macrocall, Symbol("@plate"), nothing, Expr(:for, header, body)))
-    result
+    member_results
 end
 
-function _brm_lower_collection!(out, frame, builder, occupied, loop, df)
+function _brm_lower_collection!(out, frame, observers, fields, builder, occupied, loop, df)
     records = getproperty(df, loop.source)
     records isa Union{AbstractVector,Tuple} ||
         throw(ArgumentError("@brm: `$(loop.source)` must be a vector or tuple of records"))
     keys = _brm_record_keys(loop, records)
     (; body, value) = _brm_component_parts(loop.component.source)
     input = loop.component.inputs[loop.record]
+    inputs = Dict{Symbol,Any}()
+    for (formal, arg) in zip(loop.component.inputs, loop.arguments)
+        arg === loop.item && continue
+        if arg isa Symbol
+            hasproperty(df, arg) && (inputs[formal] = getproperty(df, arg))
+        elseif !(arg isa Expr)
+            inputs[formal] = arg isa QuoteNode ? arg.value : arg
+        end
+    end
     groups = Dict{Tuple,Vector{Int}}()
     selected_bodies = Dict{Tuple,Vector{Any}}()
     for (i, record) in enumerate(records)
         decisions = Bool[]
-        selected = _brm_select_declarations!(Any[], Expr(:block, body...), Dict(input => record), decisions)
+        inputs[input] = record
+        selected = _brm_select_declarations!(Any[], Expr(:block, body...), inputs, decisions)
         group = Tuple(decisions)
         push!(get!(Vector{Int}, groups, group), i)
         get!(selected_bodies, group, selected)
     end
+    returned = _brm_component_fields(loop.component)
+    public_names = isnothing(returned) ? [loop.target] : map(collect(Base.keys(returned))) do field
+        name = _rk_ast_fresh_name(string(loop.target, "_", field), occupied)
+        fields[(loop.target, field)] = name
+        name
+    end
     if isempty(groups)
         frame[loop.target] = _BRMCollectionAxis(builder, loop.target, keys, Int[], ())
+        for name in public_names
+            frame[name] = frame[loop.target]
+        end
         return
     end
-    results, order = Symbol[], Int[]
+    results, order = Any[], Int[]
     for group in sort!(collect(Base.keys(groups)))
         variant = isempty(group) ? :all : Symbol(join(Int.(group)))
         # Native coordinates follow the stable keys, while the returned vector
@@ -185,26 +220,43 @@ function _brm_lower_collection!(out, frame, builder, occupied, loop, df)
         # therefore never exchanges two fitted parameters.
         positions = groups[group]
         sort!(positions; by=i -> (keys[i] isa Symbol, keys[i]))
-        push!(results, _brm_collection_variant!(out, frame, builder, occupied, loop, records, keys,
-            positions, selected_bodies[group], value, variant))
+        push!(results, _brm_collection_variant!(out, frame, observers, builder, occupied, loop, records, keys,
+            positions, selected_bodies[group], value, variant, df))
         append!(order, positions)
     end
     permutation = _rk_ast_fresh_name(string(loop.target, "_row_order"), occupied)
     frame[permutation] = invperm(order)
-    joined = length(results) == 1 ? only(results) : Expr(:call, :vcat, results...)
-    push!(out, Expr(:(=), loop.target, Expr(:ref, joined, permutation)))
+    for (i, name) in enumerate(public_names)
+        parts = isnothing(returned) ? results : [r[i] for r in results]
+        joined = length(parts) == 1 ? only(parts) : Expr(:call, :vcat, parts...)
+        push!(out, Expr(:(=), name, Expr(:ref, joined, permutation)))
+    end
+end
+
+function _brm_read_collection_fields(ex, fields)
+    ex isa Expr || return ex
+    if Meta.isexpr(ex, :., 2) && first(ex.args) isa Symbol && last(ex.args) isa QuoteNode
+        field = (first(ex.args), last(ex.args).value)
+        haskey(fields, field) && return fields[field]
+    end
+    Expr(ex.head, map(x -> _brm_read_collection_fields(x, fields), ex.args)...)
 end
 
 function _brm_collection_design(builder, df)
     statements, columns = Any[], Dict{Symbol,Any}()
     occupied = copy(builder.occupied)
+    observers = Dict{Symbol,Vector{NamedTuple}}()
+    fields = Dict{Tuple{Symbol,Symbol},Symbol}()
     for st in builder.statements
         if st isa _BRMCollectionLoop
-            _brm_lower_collection!(statements, columns, builder, occupied, st, df)
+            observers[st.target] = NamedTuple[]
+            _brm_lower_collection!(statements, columns, observers[st.target], fields, builder, occupied, st, df)
         else
             push!(statements, st)
         end
     end
+    statements = map(st -> _brm_expand_observers(st, observers, columns, occupied), statements)
+    isempty(fields) || (statements = map(st -> _brm_read_collection_fields(st, fields), statements))
     Expr(:block, statements...), columns
 end
 

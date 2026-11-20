@@ -304,7 +304,7 @@ struct BRMOutput
     term::Union{Nothing,Symbol}
     # A labelled member of a collection shares a physical carrier with its
     # peers. Its coordinates select this entry of the outer plate dimension.
-    member::Union{Nothing,Int}
+    member::Union{Nothing,Int,Vector{Int}}
 end
 BRMOutput(name, kind, type, size, constraints, generative, source, role,
           declaration, logical, labels, segments, component, dims, predictors, term) =
@@ -870,10 +870,10 @@ function _brm_submodels(plan, outputs)
     native = Tuple(BRMSubmodel(e.name, e.model, e.target, Tuple(e.path), e.parent, e.trigger,
                       e.declaration, e.inputs, e.declarations, Tuple(owned[i]), e.source)
           for (i, e) in enumerate(entries))
-    _brm_collection_submodels(native, _brm_collection_paths(brmi))
+    _brm_collection_submodels(native, _brm_collection_paths(brmi), plan.preproc, outputs)
 end
 
-function _brm_collection_submodels(native, axes)
+function _brm_collection_submodels(native, axes, preproc, all_outputs)
     isempty(axes) && return native
     entries = BRMSubmodel[]
     indices = Dict{Tuple,Int}()
@@ -890,14 +890,28 @@ function _brm_collection_submodels(native, axes)
             for (j, key) in enumerate(axis.keys)
                 address = (axis.collection, key, path[3:end]...)
                 parent = isnothing(entry.parent) ? nothing : indices[(entry.parent, key)]
-                outputs = map(entry.outputs) do o
+                outputs = BRMOutput[let
                     BRMOutput(o.name, o.kind, o.type, o.size, o.constraints, o.generative,
                         o.source, o.role, o.declaration, o.logical, o.labels, o.segments,
                         o.component, o.dims, o.predictors, o.term, j)
+                end for o in entry.outputs]
+                if length(path) == 2
+                    for recipe in values(preproc)
+                        recipe.kind === :collection_observation || continue
+                        layout = recipe.const_
+                        layout.collection === axis.collection && layout.keys == axis.keys || continue
+                        rows = findall(==(j), layout.members)
+                        for o in all_outputs
+                            o.logical === layout.source && o.role === :posterior_predictive || continue
+                            push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
+                                o.generative, o.source, o.role, o.declaration, layout.response,
+                                o.labels, o.segments, o.component, o.dims, o.predictors, o.term, rows))
+                        end
+                    end
                 end
                 push!(entries, BRMSubmodel(entry.name, entry.model, last(address), Base.front(address),
                     parent, entry.trigger, entry.declaration, entry.inputs, entry.declarations,
-                    outputs, entry.source, path))
+                    Tuple(outputs), entry.source, path))
                 indices[(i, key)] = length(entries)
             end
         end
@@ -1807,8 +1821,12 @@ end
 
 # A carrier with no elements: BridgeStan lists it under no name, so an empty
 # coordinate vector is its complete answer rather than evidence of drift.
-_brm_empty_carrier(output::BRMOutput) =
-    !isnothing(output.dims) && any(iszero, output.dims)
+function _brm_empty_carrier(output::BRMOutput)
+    !isnothing(output.dims) && any(iszero, output.dims) && return true
+    m, ends = output.member, output.segments
+    m isa Vector{Int} && return isempty(m)
+    !isnothing(m) && !isnothing(ends) && ends[m] == (m == 1 ? 0 : ends[m-1])
+end
 
 # The linear-predictor address of every output a formula term owns
 # (`BRMOutput.predictors` / `term`, and `component` for the parts of
@@ -2318,6 +2336,8 @@ end
 # call inlines the body under its `(path..., target)` prefix, which is the rule
 # `_brm_submodels` assigns outputs to entries by.
 function _brm_submodel_carriers(d::BRMDescriptor, s::BRMSubmodel, name::Symbol)
+    observations = BRMOutput[o for o in s.outputs if o.member isa Vector{Int} && o.logical === name]
+    isempty(observations) || return observations
     bound = _brm_submodel_bound_names(s)
     # A BRM component's returned field (`return (; hi = expr)`) is carried by
     # its local result; an authored local of the same name is the same value.
@@ -2486,9 +2506,21 @@ function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=no
           " `brm_outputs` to take them all and select on `declaration.target`.")
 end
 
-_brm_emitted_coordinates(output::BRMOutput, constrained_names) = begin
-    stem = isnothing(output.member) ? String(output.name) : string(output.name, ".", output.member)
+function _brm_emitted_coordinates(output::BRMOutput, constrained_names)
+    stem = String(output.name)
     prefix = stem * "."
+    if !isnothing(output.member)
+        member = output.member
+        # Stan packs variable-width cells end-to-end. Fixed-width cells
+        # occupy columns, and a scalar occupies its own vector entry.
+        ends = output.segments
+        selected = member isa Vector{Int} ? Set(member) : isnothing(ends) ? (member:member) :
+            ((member == 1 ? 0 : ends[member - 1]) + 1 : ends[member])
+        return Int[i for (i, raw) in enumerate(constrained_names) if begin
+            name = string(raw)
+            startswith(name, prefix) && tryparse(Int, last(split(name, '.'))) in selected
+        end]
+    end
     Int[i for (i, name) in enumerate(constrained_names)
         if string(name) == stem || startswith(string(name), prefix)]
 end
