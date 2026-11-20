@@ -1118,12 +1118,18 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     roles = record.type === :bym2 ?
         ((:sd, :sigma, false), (:mixing, :rho, false),
          (:structured, :phi, true), (:unstructured, :theta, true)) :
+        # a scaled ICAR field's `theta` holds its islands' own effects
+        _brm_car_scaled_icar(record) ?
+        ((:sd, :sigma, false), (:structured, :phi, true), (:unstructured, :theta, true)) :
         ((:sd, :sigma, false), (:structured, :phi, true))
     for (parameter, local_name, elementwise) in roles
         # A role held at a known value, or set to a value computed from model
         # values, is no coordinate on either backend.
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
+        # a scaled ICAR field over a graph without islands has no `theta`
+        parameter === :unstructured && _brm_car_scaled_icar(record) &&
+            record.n_island == 0 && continue
         stan_names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
             (; base..., parameter))

@@ -5247,6 +5247,12 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
         comp_size=column(:comp_size, collect(Int, state.comp_size)),
         inv_scale=column(:inv_scale, state.inv_scale),
         is_struct=column(:is_struct, Float64.(state.struct_idx .> 0)))
+    # A scaled ICAR field gives each island its own `theta`: an area reads its
+    # island's slot, any other area the zero padding slot `n_island + 1`, and
+    # `theta`'s length is the length of a data vector, the islands' positions.
+    islands = _brm_car_scaled_icar(state) ? (; island_pos=column(:island_pos,
+            [k == 0 ? state.n_island + 1 : k for k in state.island_idx]),
+        island_nodes=column(:island_nodes, findall(iszero, state.struct_idx))) : (;)
     value = _rk_mint_generated!(taken, columns, stem)
     sigma_param = _rk_term_parameter(state.sd_prior) do prior
         sigma_family, sigma_args, sigma_support = _rk_gp_hyper_prior(
@@ -5261,11 +5267,13 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
             _rk_car_mixing_prior(prior, target, source)..., :rho), state.mixing_prior) :
         nothing
     _RKTermSpec(:car, Symbol[],
-        (; value, area, source, type=state.type, n_struct=state.n_struct, nodes=state.nodes,
+        (; value, area, source, type=state.type, state.scaled, n_struct=state.n_struct,
+         n_island=state.n_island, island_areas=findall(iszero, state.struct_idx),
+         nodes=state.nodes,
          components=Tuple(zip(state.comp_start, state.comp_size)),
-         graph..., inputs=(graph.node_labels, graph.node1, graph.node2, graph.struct_pos,
-                           graph.comp_start, graph.comp_size, graph.inv_scale,
-                           graph.is_struct),
+         graph..., islands..., inputs=(graph.node_labels, graph.node1, graph.node2,
+                           graph.struct_pos, graph.comp_start, graph.comp_size,
+                           graph.inv_scale, graph.is_struct, values(islands)...),
          sigma_param, rho_param),
         value, value)
 end
