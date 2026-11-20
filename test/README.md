@@ -58,8 +58,8 @@ re-evaluates retained draws for finite densities and gradients. Its short fit
 does not establish convergence or reproduce the paper's analysis.
 `seal_joint_support.jl` checks both authored helper sets against the original
 joint density, finite-difference coordinate Jacobians and native gradients
-across four age counts. The test environment pins StanBlocks `dcabd24f`
-(0.2.40), which includes differentiable algebraic roots and native evaluation
+across four age counts. The test environment pins StanBlocks `c3912742`
+(0.2.53), which includes differentiable algebraic roots and native evaluation
 of the data-only support bound during descriptor construction.
 
 `rk_distribution_statistics.jl` checks native LogNormal moments and log tails:
@@ -294,6 +294,13 @@ retains component headers and local provenance at each nested call site.
 Run it as a standalone script in the test environment; StanBlocks 0.2.25
 preserves keyword labels when a component is called inside a plate, and
 ReactiveKernelsPPL 0.1.93 retains authored documentation.
+
+`component_settings.jl` and `component_collections.jl` cover declaration
+guards, keyed replay, independent time grids and fitted smooths.
+`component_collection_groups.jl` compares shared and local intercept
+blocks with explicit models. `component_collection_observations.jl` checks
+Gaussian, Student-t and censored readings of a shared subject trajectory,
+including readings indexed into each instrument's fitted curve.
 
 `component_cell_returns.jl` checks returned plate collections through direct,
 aliased and nested component calls. It
@@ -2415,9 +2422,8 @@ Both were verified together on ReactiveKernels 0.1.180 (`76708e00`,
 ReactiveKernelsPPL 0.1.160), StanBlocks 0.2.42 (`d8257e16`), Enzyme 0.13.220
 (`b86741c8`, libEnzyme `4990aa11`), Julia 1.10.12 and JAX 0.12.0.1. The JAX
 modules need that ReactiveKernels: the wastewater module still failed on 0.1.179.
-The test environment's RK 0.1.198 pin includes the required emitter fixes;
-its StanBlocks pin remains 0.2.40, below the verified tuple above. The wastewater's native
-gradient was verified only on that Enzyme line, because registered Enzyme
+The test environment includes the required RK emitter and StanBlocks fixes.
+The wastewater's native gradient was verified on that Enzyme line, because registered Enzyme
 0.13.219 lacks its `make_zero(Core.Binding)` repair.
 
 ```sh

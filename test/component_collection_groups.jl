@@ -44,6 +44,15 @@ const explicit = @brm begin
     yb ~ Normal(sum(b), 1)
 end
 
+const mixed = @brm begin
+    root ~ 0 + (1 | p | site)
+    a ~ 0 + (1 | p | a_site)
+    b ~ independent(b_site)
+    primary ~ Normal(root, 1)
+    ya ~ Normal(sum(a), 1)
+    yb ~ Normal(b, 1)
+end
+
 @stestset "Explicit parent-block margins share the parent's factor" begin
     site = ["x","y"]
     records = [(id=:b, shared=true, site=["y","y","x"]),
@@ -115,6 +124,33 @@ end
         expected, ref_grad = LogDensityProblems.logdensity_and_gradient(ref_problem, u)
         @test value ≈ expected
         @test sort(grad) ≈ sort(ref_grad)
+    end
+end
+
+@stestset "One member shares the parent block while another fits its own" begin
+    site = ["x","y"]
+    a = (id=:a, shared=true, site=["y","x"])
+    b = (id=:b, shared=false, site=["x","y","y"])
+    primary = [0.1,-0.1]
+    y = [0.4,0.2]
+    m = panels((;site,primary,records=[b,a],y))
+    ref = mixed((;site,primary,a_site=a.site,b_site=b.site,ya=[y[2]],yb=[y[1]]))
+    stan = consumer_stan(m, "collection-mixed-groups"; mod=@__MODULE__).model
+    twin = consumer_stan(ref, "explicit-mixed-groups"; mod=@__MODULE__).model
+    @test BridgeStan.param_unc_num(stan) == BridgeStan.param_unc_num(twin) == 10
+    native, rp = consumer_problem(m)
+    native_ref, twin_rp = consumer_problem(ref)
+    @test native.model.layout.total == native_ref.model.layout.total == 10
+    for x in (0., 0.23)
+        u = fill(x,10)
+        value, gradient = BridgeStan.log_density_gradient(stan,u;propto=false)
+        expected, ref_gradient = BridgeStan.log_density_gradient(twin,u;propto=false)
+        @test value ≈ expected
+        @test sort(gradient) ≈ sort(ref_gradient)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(rp,u)
+        expected, ref_gradient = LogDensityProblems.logdensity_and_gradient(twin_rp,u)
+        @test value ≈ expected
+        @test sort(gradient) ≈ sort(ref_gradient)
     end
 end
 end

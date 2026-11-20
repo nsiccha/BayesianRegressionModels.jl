@@ -127,6 +127,10 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
         _rk_block_argument!(block, :floor, floors)
     group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
         nothing
+    if haskey(options, :collection_levels)
+        levels = _rk_block_argument!(block, :fitted_levels, options.collection_levels)
+        G = :(length($levels))
+    end
     rho, rho_effects, rho_sampled = _rk_ast_hsgp_lengths!(block, options,
         rho_priors, floor, G, Val(options.iso))
     sigma, sigma_effects, sigma_sampled = _rk_ast_hsgp_hyper!(block, options, :sd,
@@ -148,7 +152,7 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
         sigma, rho, weights_value, spectral, bindings; group_index, multigroup)
     push!(block.statements, Expr(:(=), spectral, scales_call), Expr(:(=), value, value_call))
     doc = @_rk_definition_doc """
-        An HSGP term$(G > 1 ? " with $G groups" : "") whose length scale and marginal scale may vary by group.
+        An HSGP term$(G isa Expr ? " with one coefficient row per fitted group" : G > 1 ? " with $G groups" : "") whose length scale and marginal scale may vary by group.
 
         Draws the length scale(s) `$rho` and marginal scale(s) `$sigma` with their
         priors (and their group-level effects, when they have predictors), and the

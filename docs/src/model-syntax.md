@@ -194,6 +194,43 @@ For example, `brm_outputs(brm_descriptor(SBBRMI(model)); submodel=(:channels,
 `channels[item]` uses positions as keys. For a fit with a different selection
 of members or declaration flags, call the builder on the new records.
 
+To give selected instruments their own smooth time effects, put the formula
+inside the guard. Each enabled instrument supplies its time grid and basis
+size. The fixed instrument below contributes its known mean.
+
+```@example smooth_components
+using BayesianRegressionModels
+
+@brm function drift(instrument)
+    if instrument.smooth
+        trend ~ 0 + hsgp(instrument.time; k=instrument.k, c=1.5)
+        prediction = sum(trend)
+    else
+        prediction = instrument.offset
+    end
+    return prediction
+end
+
+survey = @brm begin
+    for item in instruments
+        estimates[item.id] ~ drift(item)
+    end
+    reading ~ Normal(estimates, 1)
+end
+
+instruments = [(id=:early, smooth=true, time=[0.1, 0.4, 0.7], k=3),
+               (id=:fixed, smooth=false, offset=0.2),
+               (id=:late, smooth=true, time=[1.0, 1.3, 1.8, 2.1], k=4)]
+model = survey((; instruments, reading=[0.5, 0.3, 0.7]))
+[call.path for call in brm_components(model)]
+```
+
+Here `early` and `late` each fit a marginal scale and a length scale,
+with three and four basis weights respectively. A second guard can add a
+seasonal term with `cov=:periodic, period=instrument.period`, or deviations
+by subject with `by=instrument.subject, anchor=0.0`. Each term reads the
+same instrument's time grid.
+
 An observation clause lets each member use a trajectory computed in a
 parent plate. Here each sensor supplies its readings as one vector per
 subject, in the order of `input`. An empty vector represents a subject

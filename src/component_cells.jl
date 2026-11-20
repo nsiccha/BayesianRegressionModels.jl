@@ -82,20 +82,39 @@ _rk_is_cell_component(statement) = Meta.isexpr(statement, :(=), 2) &&
     Meta.isexpr(last(statement.args), :call) &&
     first(last(statement.args).args) === _rk_cell_component
 
-function _rk_component_cell_statement(statement, kernel, definitions, bindings, taken)
-    lhs, marker = statement.args
-    call = marker.args[2]
-    component = _brm_component_cell_head(call, kernel.scope)
-    rhs = _brm_component_cell_ir(component, call, kernel.scope)
+# Each record has its own fitted group labels. Both the row lookup and the
+# number of coefficient rows read that input of the shared submodel.
+function _rk_collection_smooth_inputs!(plan)
+    taken = Set{Symbol}(keys(plan.columns))
+    for predictor in plan.regression.predictors, (i, term) in pairs(predictor.terms)
+        term.kind === :hsgp || continue
+        options = merge(term.options, (; collection_cell=true))
+        if haskey(options, :group_index)
+            levels = _rk_ast_fresh_name(string(options.id, "_fitted_levels"), taken)
+            plan.columns[levels] = options.group_levels
+            options = merge(options, (; collection_levels=levels))
+        end
+        predictor.terms[i] = _RKTermSpec(term.kind, term.columns, options, term.addressee, term.label)
+    end
+end
+
+# Prepare cell inputs with the enclosing plan. A cached emitted program can
+# then bind a new design without emitting again or mutating a kernel's columns.
+function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inputs,
+        kernel_columns, reserved)
+    component = _brm_component_cell_head(call, scope)
+    rhs = _brm_component_cell_ir(component, call, scope)
     defs, statements = Expr[], Expr[]
     columns, bound = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
     sliced = Set{Symbol}()
+    fit_inputs = Dict{Symbol,Symbol}()
+    sources = Dict(param => input.source for (param, input) in zip(params, inputs)
+        if haskey(kernel_columns, input.source))
     calls = nothing
-    for axis in values(kernel.columns)
+    for axis in values(kernel_columns)
         axis isa _BRMCollectionAxis && !isempty(axis.path) && last(axis.path) === lhs || continue
-        raw = Dict(param => kernel.columns[input.source] for (param, input) in
-            zip(kernel.params, kernel.inputs) if haskey(kernel.columns, input.source))
-        calls = _brm_collection_cell_calls(component, call, kernel.scope, raw, length(axis))
+        raw = Dict(param => kernel_columns[source] for (param, source) in sources)
+        calls = _brm_collection_cell_calls(component, call, scope, raw, length(axis))
         break
     end
     if isnothing(calls)
@@ -104,40 +123,54 @@ function _rk_component_cell_statement(statement, kernel, definitions, bindings, 
         programs = map(eachindex(calls)) do i
             defs, body = Expr[], Expr[]
             data, bindings = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
-            _rk_submodel_rhs!(defs, body, data, bindings, lhs, component, calls[i]; cell=true)
-            (; defs, body, data, bindings)
+            fits = _rk_submodel_rhs!(defs, body, data, bindings, lhs, component, calls[i];
+                cell=(; sources, position=i))
+            (; defs, body, data, bindings, fits)
         end
         head = first(programs)
         all(p -> p.defs == head.defs && p.body == head.body &&
-            keys(p.data) == keys(head.data) && p.bindings == head.bindings, programs) ||
+            keys(p.data) == keys(head.data) && p.bindings == head.bindings && p.fits == head.fits, programs) ||
             throw(ArgumentError("component `$(component.name)` has different programs within a collection variant"))
         append!(defs, head.defs)
         append!(statements, head.body)
         append!(bound, head.bindings)
+        merge!(fit_inputs, head.fits)
         for key in keys(head.data)
             columns[key] = [p.data[key] for p in programs]
             push!(sliced, key)
         end
     end
-    renames = Dict{Symbol,Symbol}()
-    for name in (_rk_source_definition(def).name for def in defs)
+    fields = Dict{Symbol,Symbol}()
+    for (name, value) in sort!(collect(columns); by=first)
+        outer = _rk_ast_fresh_name(string(kernel_name, "_", name), reserved)
+        fields[name] = outer
+        kernel_columns[outer] = value
+    end
+    fits = Dict{Symbol,Symbol}(fields[input] => get(fields, source, get(sources, source, source))
+        for (input, source) in fit_inputs)
+    (; defs, statement=only(statements), bound, fields, sliced, fits)
+end
+
+function _rk_component_cell_statement(statement, kernel, definitions, bindings, taken)
+    lhs, marker = statement.args
+    prepared = marker.args[3]
+    renames = copy(prepared.fields)
+    for name in (_rk_source_definition(def).name for def in prepared.defs)
         renames[name] = _rk_ast_fresh_name(string(kernel.name, "_", name), taken)
     end
-    for (name, value) in bound
-        outer = _rk_ast_fresh_name(string(kernel.name, "_", name), taken)
-        renames[name] = outer
+    for (name, value) in prepared.bound
+        # Keep compiler-known callables under their native names, including
+        # distribution heads that also occur in a prior inside the cell.
+        shared = isdefined(@__MODULE__, name) && getfield(@__MODULE__, name) === value
+        outer = shared ? name : _rk_ast_fresh_name(string(kernel.name, "_", name), taken)
+        shared || (renames[name] = outer)
         push!(bindings, outer => value)
     end
-    for (name, value) in columns
-        outer = _rk_ast_fresh_name(string(kernel.name, "_", name), taken)
-        renames[name] = outer
-        kernel.columns[outer] = value
-    end
-    append!(definitions, (_rk_rename_symbols(def, renames) for def in defs))
-    emitted = _rk_rename_symbols(only(statements), renames)
+    append!(definitions, (_rk_rename_symbols(def, renames) for def in prepared.defs))
+    emitted = _rk_rename_symbols(prepared.statement, renames)
     apply = emitted.args[3]
-    if !isempty(sliced)
-        outer = Set(renames[key] for key in sliced)
+    if !isempty(prepared.sliced)
+        outer = Set(renames[key] for key in prepared.sliced)
         apply = Expr(:call, apply.args[1], (arg in outer ?
             Expr(:brm_collection_slice, arg) : arg for arg in apply.args[2:end])...)
     end

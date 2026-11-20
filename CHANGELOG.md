@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.343
+
+- A model can call a component for each selected data record with
+  `for entry in records; channels[entry.id] ~ instrument(entry); end`.
+  Data-known guards select each member's declarations. Fitted members have
+  keyed `submodel` paths and keep their coordinates when records are reordered.
+- Each member can fit population, periodic and subject-specific HSGP terms
+  on its own time grid. A component can share an intercept correlation block
+  with its parent using `parentblock(:p)`. An `@observe` clause reads
+  the member's fitted return and the trajectory in a parent subject plate.
+  These forms use StanBlocks 0.2.53 and ReactiveKernelsPPL 0.1.240.
+
 ## 0.2.342
 
 - `brm_description` uses the prepared model's population coefficient labels

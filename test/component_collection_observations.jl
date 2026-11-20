@@ -132,7 +132,10 @@ end
     desc = brm_descriptor(sb)
     stan = consumer_stan(m, "observed-member-clocks"; mod=@__MODULE__).model
     names = BridgeStan.param_unc_names(stan)
-    refs = map((a,c)) do record
+    rk, problem = consumer_problem(m)
+    rknames = ReactiveKernelsPPL.coordinate_names(rk.model.layout)
+    stan_to_rk = zeros(Int,length(names))
+    refs = map((a,c), (1,2)) do record, position
         walk = reduce(vcat, [fill(0.5*input[s],length(record.y[s])) for s in eachindex(input)])
         source = one_clock((;record.time,record.k,walk,pick=reduce(vcat,record.pick),y=reduce(vcat,record.y)))
         ref = consumer_stan(source, "observed-single-clock"; mod=@__MODULE__).model
@@ -143,13 +146,22 @@ end
             src = brm_term_coordinates(rdesc, :trend, rnames; parameter)
             dst = brm_term_coordinates(desc, :trend, names; parameter, submodel=(:channels,record.id))
             mapping[src.coordinates] = dst.coordinates
+            native = parameter === :sd ? :sigma : parameter === :length_scale ? :rho_iso : :beta_raw
+            for (j, index) in enumerate(dst.coordinates)
+                suffix = parameter === :basis_weights ? ".$position.$j" : ".$position"
+                stan_to_rk[index] = coordinate(rknames, Symbol("channels_member_1.hsgp_config_time.",native,suffix))
+            end
         end
         (;ref,mapping)
     end
     n = length(names)
     @test sort(reduce(vcat, r.mapping for r in refs)) == 1:n
+    @test sort(stan_to_rk) == 1:n
     for u in (zeros(n), collect(range(-.37,.31;length=n)))
         value, gradient = BridgeStan.log_density_gradient(stan, u; propto=false)
+        native_value, native_gradient = LogDensityProblems.logdensity_and_gradient(problem,u[invperm(stan_to_rk)])
+        @test native_value ≈ value
+        @test native_gradient[stan_to_rk] ≈ gradient
         expected = logpdf(Normal(0.5*input[2]+b.baseline[2],1), only(b.y[2]))
         for (;ref,mapping) in refs
             part, grad = BridgeStan.log_density_gradient(ref, u[mapping]; propto=false)

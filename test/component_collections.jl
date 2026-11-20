@@ -64,6 +64,8 @@ end
 
 module CollectionSmoothsTest
 using Test, BayesianRegressionModels, StanBlocks
+using ReactiveKernelsPPL, ReactiveKernelsDistributionKernels, Enzyme, LogDensityProblems
+using DifferentiationInterface: AutoEnzyme
 import BridgeStan
 
 @brm function trend(config)
@@ -103,6 +105,13 @@ const periodic_reference = @brm begin
     curve ~ 0 + hsgp(time; k=k, c=1.5)
     seasonal ~ 0 + hsgp(time; k=kp, cov=:periodic, period=period)
     y ~ Normal(sum(curve + seasonal), 1)
+end
+
+const grouped_reference = @brm begin
+    population ~ 0 + hsgp(time; k=k, c=1.5)
+    seasonal ~ 0 + hsgp(time; k=period_modes, cov=:periodic, period=period)
+    deviations ~ 0 + hsgp(time; k=k, by=unit, anchor=0.0)
+    y ~ Normal(sum(population + seasonal + deviations), 1)
 end
 
 @testset "Each configured time smooth matches a model on its own clock" begin
@@ -155,6 +164,23 @@ end
         individual=true, unit=["one", "one", "two", "two"])
     design(records) = (; records, y=zeros(length(records)))
     periodic = (; d..., individual=false)
+    native = RKBRMI(model(design([a,b,c])))
+    @test native.model.layout.total == 11
+    draw = reshape(collect(1:11) .* 0.025, :, 1)
+    predictions(fit) = only(rk_draw_values(fit, draw, (:curves,)).curves)
+    original = predictions(native)
+    reordered = reprocess(native, design([c,b,a]))
+    @test predictions(reordered) ≈ reverse(original)
+    shifted = reprocess(native, design([(;a..., time=[.22,.51,.68]), b,
+        (;c..., time=0.8 .* c.time)]))
+    bound = rk_bound_data(native)
+    axis = only(k for k in keys(bound) if endswith(string(k), "_config_time_fit") &&
+        !occursin('.', string(k)))
+    @test bound[axis] == [a.time, c.time]
+    @test rk_bound_data(shifted)[axis] == bound[axis]
+    changed = predictions(shifted)
+    @test changed[2] == original[2] == b.offset
+    @test all(changed[[1,3]] .!= original[[1,3]])
     sb = SBBRMI(model(design([a,b,c,periodic])); mod=@__MODULE__, total_groups=())
     compiled = StanBlocks.stanc_check(stan_code(sb); warn_pedantic=false)
     @test isempty(compiled.output) && compiled.ok
@@ -176,5 +202,36 @@ end
     grouped = SBBRMI(model(design([a,b,c,d])); mod=@__MODULE__, total_groups=())
     grouped_check = StanBlocks.stanc_check(stan_code(grouped); warn_pedantic=false)
     @test grouped_check.ok
+    # Both selected clocks carry independent subject-specific deviations as
+    # well as a population curve and periodic curve. Their subjects need
+    # not share labels or row ordering.
+    e = (;d..., id=:e, k=3, period_modes=3, period=4.5, time=[-.3,.1,.9,1.5,2.8],
+        unit=["west","east","north","west","east"])
+    ys = [.3,-.2,.7]
+    function density_model(bound, name)
+        fit = SBBRMI(bound; mod=@__MODULE__, total_groups=())
+        path = joinpath(mkpath(joinpath(tempdir(), "brm-rk-consumer")), name*".stan")
+        BayesianRegressionModels.stan_instantiate(fit; path).model
+    end
+    records = [e,b,d]
+    assembled = model((;records,y=ys))
+    both = density_model(assembled, "grouped-member-clocks")
+    refs = [density_model(grouped_reference((;entry.time,entry.k,entry.period_modes,
+        entry.period,entry.unit,y=[y])), "grouped-one-clock") for (entry,y) in ((d,ys[3]),(e,ys[1]))]
+    n = BridgeStan.param_unc_num(both)
+    @test n == sum(BridgeStan.param_unc_num,refs)
+    rk = RKBRMI(assembled)
+    problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(;mode=Enzyme.Reverse))
+    @test rk.model.layout.total == n
+    for x in (0.,-.27,.34)
+        v,g = BridgeStan.log_density_gradient(both,fill(x,n);propto=false)
+        parts = [BridgeStan.log_density_gradient(ref,fill(x,BridgeStan.param_unc_num(ref));propto=false)
+            for ref in refs]
+        @test v ≈ sum(first,parts) - 0.5*(ys[2]-b.offset)^2 - 0.5*log(2pi)
+        @test sort(g) ≈ sort(reduce(vcat,last.(parts)))
+        native_value, native_gradient = LogDensityProblems.logdensity_and_gradient(problem, fill(x,n))
+        @test native_value ≈ v
+        @test sort(native_gradient) ≈ sort(g)
+    end
 end
 end

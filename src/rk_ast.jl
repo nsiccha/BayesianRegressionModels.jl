@@ -2137,9 +2137,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             index_sources[only(term.columns)] = (term.options.source,
                 _RKLevelInput(term.options.level_input))
         elseif term.kind === :hsgp && haskey(term.options, :group_index)
+            levels = haskey(term.options, :collection_levels) ?
+                _RKLevelInput(term.options.collection_levels) :
+                get(term.options, :group_fit_source, term.options.group_levels)
             index_sources[term.options.group_index] =
-                (term.options.group_source,
-                 get(term.options, :group_fit_source, term.options.group_levels))
+                (term.options.group_source, levels)
         end
     end
     # Data-only assignments, their fit-role twins and the constants they read

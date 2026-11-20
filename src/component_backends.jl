@@ -264,13 +264,24 @@ function _sb_replay_component!(new_data, new_preproc, handled, key, entry, sb, d
     nothing
 end
 
-function _brm_component_replay_scope(build, target, component, call)
+function _brm_component_replay_scope(build, target, component, call; cell=nothing)
     frozen = _brm_frozen_replay()
     frozen === nothing && return build()
     raw = Dict{Symbol,Any}()
     args = _brm_component_arguments(component, call)
     foreach(value -> _rk_raw_data_columns!(raw, value), args)
-    frame = _BRMReplayData((; raw...), frozen.training)
+    outer_training = frozen.training
+    outer_resample = frozen.resample
+    if cell !== nothing
+        outer_training = copy(outer_training)
+        outer_resample = copy(outer_resample)
+        for (local_name, source) in cell.sources
+            haskey(frozen.training, source) &&
+                (outer_training[local_name] = frozen.training[source][cell.position])
+            source in frozen.resample && push!(outer_resample, local_name)
+        end
+    end
+    frame = _BRMReplayData((; raw...), outer_training)
     training = Dict{Symbol,Any}()
     resample = Set{Symbol}()
     for (input, value) in zip(component.inputs, args)
@@ -279,11 +290,11 @@ function _brm_component_replay_scope(build, target, component, call)
             _BRMDataAssignments("BRM component replay"), Set{Symbol}())
         data === nothing || (training[input] = data)
         refs = _brm_operation_references!(Set{Symbol}(), value)
-        isempty(intersect(refs, frozen.resample)) || push!(resample, input)
+        isempty(intersect(refs, outer_resample)) || push!(resample, input)
     end
     # Fits use the same local names as the component body, but a fitted-state
     # export owns each call's fits under its full enclosing component path.
-    prefix = string(target, ".")
+    prefix = cell === nothing ? string(target, ".") : string(target, ".", cell.position, ".")
     fits = frozen.fits === nothing ? nothing : Dict{Tuple{Symbol,Symbol},Any}(
         (tag, Symbol(chop(string(name); head=length(prefix), tail=0))) => value
         for ((tag, name), value) in frozen.fits if startswith(string(name), prefix))
@@ -329,10 +340,11 @@ function _brm_component_rk_plan(component, call)
 end
 
 function _rk_submodel_rhs!(definitions, statements, data, bindings,
-        target::Symbol, component::BRMComponent, call; reserved=(), cell=false)
-    plan, instance = _brm_component_replay_scope(target, component, call) do
+        target::Symbol, component::BRMComponent, call; reserved=(), cell=nothing)
+    plan, instance = _brm_component_replay_scope(target, component, call; cell) do
         _brm_component_rk_plan(component, call)
     end
+    cell === nothing || _rk_collection_smooth_inputs!(plan)
     cells = Dict{Symbol,Symbol}()
     coordinates = Any[]
     emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates,
@@ -373,7 +385,7 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     # computations still execute at binding time; no Julia-side fitting or
     # sampled value is substituted for them.
     fit_inputs = _rk_plan_fit_inputs(plan)
-    fitted = cell ? Dict{Symbol,Set{Symbol}}() :
+    fitted = cell !== nothing ? Dict{Symbol,Set{Symbol}}() :
         _rk_fitted_definitions(emitted, plan, Set{Symbol}(keys(fit_inputs)))
     for key in sort!(collect(keys(fitted)))
         renames[key] = _rk_ast_fresh_name(string(target, "_component_", key), taken)
@@ -420,7 +432,12 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     push!(statements, Expr(:call, :~, target, Expr(:call, entry, args...)))
     # A plate invocation keeps its fit computations inside the indexed
     # submodel. Its caller supplies their per-member inputs.
-    cell && return nothing
+    if cell !== nothing
+        # Some fitted inputs, such as HSGP mode counts, are model settings
+        # without a separate raw data column in the enclosing program.
+        return Dict{Symbol,Symbol}(column_names[input] =>
+            get(column_names, source, column_names[input]) for (input, source) in fit_inputs)
+    end
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs
         outer_fits[column_names[input]] = column_names[source]

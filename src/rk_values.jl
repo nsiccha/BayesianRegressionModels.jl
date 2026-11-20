@@ -573,13 +573,22 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
         omega2 = _rk_ast_fresh_name(string(options.id, "_omega2"), taken)
         basis = _rk_ast_hsgp_periodic_basis_graph!(definitions, term, taken)
-        push!(stmts, Expr(:(=), Expr(:tuple, PHI, omega2), Expr(:call,
+        basis_call = Expr(:call,
             basis, only(term.columns), _rk_hsgp_mask_actuals(term)...,
-            options.modes, options.settings)))
+            options.modes, options.settings)
+        cell = get(options, :collection_cell, false)
+        if cell
+            # Per-cell submodels bind one local per statement. Both arrays
+            # come from the same data-only Fourier basis computation.
+            pair = _rk_ast_fresh_name(string(options.id, "_basis"), taken)
+            push!(stmts, :($pair = $basis_call), :($PHI = $pair[1]), :($omega2 = $pair[2]))
+        else
+            push!(stmts, Expr(:(=), Expr(:tuple, PHI, omega2), basis_call))
+        end
         floor_read && (floors = _rk_ast_hsgp_periodic_floor!(
             definitions, stmts, term, taken, bindings))
         inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
-        extent = :(axes(PHI, 2))
+        extent = cell ? :(1:length(omega2)) : :(axes(PHI, 2))
     else
         # A squared-exponential effect reads its axes; its spectral graph
         # composes the basis graph, so the main block names no basis values.

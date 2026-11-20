@@ -630,7 +630,11 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             if index === nothing
                 if _brm_component_cell_head(distribution, scope) !== nothing
                     lhs isa Symbol || error("RK backend: a component cell binding needs a local name")
-                    push!(body, Expr(:(=), lhs, Expr(:call, _rk_cell_component, distribution)))
+                    reserved = union!(Set{Symbol}(keys(columns)), keys(program.context.data),
+                        (op.name for op in program.operations))
+                    prepared = _rk_prepare_cell_component!(lhs, distribution, scope, name,
+                        params, inputs, columns, reserved)
+                    push!(body, Expr(:(=), lhs, Expr(:call, _rk_cell_component, distribution, prepared)))
                     continue
                 end
                 push!(body, _rk_kernel_cell_latent(scope, lhs, distribution, name,
