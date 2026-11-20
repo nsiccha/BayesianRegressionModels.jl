@@ -14,13 +14,16 @@ real scaled_inv_chi_scale_lpdf(
 ) {
     return (scaled_inv_chi_square_lpdf(square(tau) | nu, s) + log((2.0 * tau)));
 }
+// Form a matrix by concatenating the supplied columns in order.
 matrix hcat(vector x) {
     int n = dims(x)[1];
     return to_matrix(x, n, 1);
 }
+// Return the inclusive end of group i in flat storage.
 int ragged_end(array[] int ends, int i) {
     return ends[i];
 }
+// Return the one-based start of group i in flat storage: 1 for the first group, otherwise the previous inclusive end plus 1.
 int ragged_start(
     array[] int ends,
     int i
@@ -159,6 +162,7 @@ vector monster_interpolate(
         )
     );
 }
+// Return one normalized log probability per observation, broadcasting distribution parameters elementwise.
 vector lognormal_lpdfs(
     vector obs,
     vector loc,
@@ -178,6 +182,7 @@ vector jbroadcasted_lognormal_lpdfs(
     }
     return rv;
 }
+// Return the normalized log probability for a single observation.
 real lognormal_lpdfs(
     real args1,
     real args2,
@@ -185,9 +190,11 @@ real lognormal_lpdfs(
 ) {
     return lognormal_lpdf(args1 | args2, args3);
 }
+// Read element i of a container used in elementwise broadcasting.
 real broadcasted_getindex(vector x, int i) {
     return x[i];
 }
+// Draw independent values of the requested size, broadcasting scalar parameters and preserving the requested container type.
 vector lognormal_vector_rng(
     int anontok__1,
     vector a,

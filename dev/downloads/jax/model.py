@@ -513,7 +513,7 @@ def log_jacobian(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
 
 
 def constrain(unconstrained: ArrayLike, **prepared: ArrayLike) -> dict:
-    """The constrained value of each parameter, and of each requested value, at `unconstrained`, the packed unconstrained parameters (length `dimension(prepared)`), for the data `prepare_data` returned: `f(u, **prepared)`. Returns a dict, a submodel's values nested under its name:
+    """The constrained value of each parameter, and of each requested value, at `unconstrained`, the packed unconstrained parameters (length `dimension(prepared)`), for the data `prepare_data` returned: `f(u, **prepared)`. Returns a dict, a submodel's values nested under its name (a submodel call's own value under `return` there):
 
     - `sigma`: Residual scale of the response.
     - `b_mu__g_g.tau`
