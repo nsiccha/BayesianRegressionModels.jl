@@ -24,12 +24,21 @@ instead of failing at run time.
   resample the design points by weight and draw the integrated effects
   jointly at each point through the factor. It refuses above
   `max_dimension = 10` coordinates.
+- `brm_laplace_problem(rk; integrate = (..., :coefficients))` and
+  `brm_laplace_plan` integrate the formula's population coefficients with the
+  effects, as INLA keeps fixed effects in the latent field. Each coefficient
+  becomes its own block. Every coefficient must have a Normal prior of
+  constant mean and scale. Automatic plans never integrate coefficients.
 - `brm_ladder_fit(...; upto = 5)` runs it as rung 5c after the curvature
-  diagnostic when the population has at most 10 coordinates. Pass keywords
-  through `integration = (; ...)`. Rung 5b's comparison adds
-  `integration_mean_shift` and `integration_sd_ratio`. **Breaking:** without
-  a `sampler`, `fit.draws` at `upto = 5` are rung 5c's draws instead of rung
-  4's. Pass `integration = nothing` for the previous result.
+  diagnostic. When every coefficient has such a prior, the rung integrates the
+  coefficients too and starts from that target's own marginal mode. Its
+  design then spans only the remaining coordinates (scales, correlations,
+  dispersions). It runs when at most 10 coordinates remain. Pass keywords
+  through `integration = (; ...)`, including `coefficients = false`. Rung 5b's
+  comparison adds `integration_mean_shift` and `integration_sd_ratio`.
+  **Breaking:** without a `sampler`, `fit.draws` at `upto = 5` are rung 5c's
+  draws instead of rung 4's. Pass `integration = nothing` for the previous
+  result.
 
 ## 0.2.344
 

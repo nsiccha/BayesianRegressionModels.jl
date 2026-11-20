@@ -8,6 +8,9 @@
 #     the marginal tables, the grid's log evidence and the effect draws agree
 #     with brute-force quadrature of the exact marginal (grid at d = 2, CCD
 #     at d = 3);
+#   - formula coefficients integrate as blocks (`integrate = (..., :coefficients)`):
+#     exact on a Normal model, differentiable on a count model, admitted by
+#     named plans and never by `:auto`, refused for non-Normal priors;
 #   - the refusals name their reason.
 # RUN: julia --project=test test/laplace_integration.jl
 using WarmupHMC   # loads Optim, which brm_laplace_mode needs
@@ -197,6 +200,85 @@ end
     logmass = ref.logZ
     @test mg.density[200] ≈ exp(m.exact([x]) - logmass) rtol=0.02
     @test vec(mean(out.draws[p.integrated, :]; dims=2)) ≈ ref.field atol=0.05
+end
+
+const LINT_COEF_DATA = (; a=repeat(["a1", "a2", "a3", "a4"], 5), x=randn(Xoshiro(1), 20),
+    y=randn(Xoshiro(2), 20), count=rand(Xoshiro(3), Poisson(2.0), 20))
+
+lint_fd(f, x; h=1e-5) = [(f(x .+ h .* (1:length(x) .== j)) - f(x .- h .* (1:length(x) .== j))) / 2h
+    for j in eachindex(x)]
+
+@stestset "formula coefficients as integrated blocks (integrate = :coefficients)" begin
+    d = LINT_COEF_DATA
+    rk = RKBRMI(@brm (; d.a, d.x, d.y) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | a)
+        y ~ Normal(mu, sigma)
+    end)
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:a, :coefficients))
+    coefficient = [Symbol("pop_mu.beta_pop.1"), Symbol("pop_mu.beta_pop.2")]
+    @test [b.declaration for b in p.blocks if b.group === :coefficients] == coefficient
+    @test length(p.population) == 2 && !any(in(p.names), coefficient)
+    # Gaussian in the coefficients: the marginal is the :a-only marginal with
+    # the coefficients integrated in closed form (one Newton step, exact)
+    pa = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:a,))
+    ib = [findfirst(==(c), pa.names) for c in coefficient]
+    io = [findfirst(==(n), pa.names) for n in p.names]
+    function closed(phi)
+        full(β) = (x = zeros(length(pa.population)); x[io] .= phi; x[ib] .= β; x)
+        gβ(β) = last(LogDensityProblems.logdensity_and_gradient(pa, full(β)))[ib]
+        H = hcat([(gβ(1e-4 .* e) .- gβ(-1e-4 .* e)) ./ 2e-4 for e in ([1.0, 0], [0, 1.0])]...)
+        H = (H + H') / 2
+        β = -(H \ gβ(zeros(2)))
+        LogDensityProblems.logdensity(pa, full(β)) + log(2π) - logdet(-H) / 2
+    end
+    for phi in ([0.1, -0.3], [0.4, 0.2], [-0.5, 0.5])
+        v, g = LogDensityProblems.logdensity_and_gradient(p, phi)
+        @test v ≈ closed(phi) atol=1e-9
+        @test g ≈ lint_fd(x -> LogDensityProblems.logdensity(p, x), phi) atol=1e-6
+    end
+    # a count model: finite marginal and its gradient
+    rc = RKBRMI(@brm (; d.a, d.x, y=d.count) begin
+        log(mu) ~ 1 + x + (1 | a)
+        y ~ Poisson(mu)
+    end)
+    pc = brm_laplace_problem(rc; ad_backend=NLME_AD, integrate=(:a, :coefficients))
+    @test length(pc.population) == 1
+    v, g = LogDensityProblems.logdensity_and_gradient(pc, [-0.2])
+    @test isfinite(v)
+    @test g ≈ lint_fd(x -> LogDensityProblems.logdensity(pc, x), [-0.2]) atol=1e-6
+    # plans: named, the coefficients are terms and admitted; :auto is unchanged
+    plan = brm_laplace_plan(rc; ad_backend=NLME_AD, integrate=(:a, :coefficients), draws=8)
+    @test [t.declaration for t in plan.terms if t.grouping === :coefficients] ==
+        [Symbol("pop_log_mu.beta_pop.1"), Symbol("pop_log_mu.beta_pop.2")]
+    @test all(t -> t.admitted, plan.terms)
+    pp = brm_laplace_problem(rc; ad_backend=NLME_AD, integrate=plan)
+    @test LogDensityProblems.logdensity(pp, [-0.2]) ≈ v
+    auto = brm_laplace_plan(rc; ad_backend=NLME_AD, draws=8)
+    @test !any(t -> t.grouping === :coefficients, auto.terms)
+    # refusals: a coefficient whose prior is not a constant Normal, a model without
+    rt = RKBRMI(@brm (; d.a, d.x, d.y) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | a)
+        effect(mu, x) ~ Cauchy(0, 1)
+        y ~ Normal(mu, sigma)
+    end)
+    @test_throws "has the prior `Cauchy(0.0, 1.0)`" brm_laplace_problem(rt;
+        ad_backend=NLME_AD, integrate=(:a, :coefficients))
+    sampled = brm_laplace_plan(rt; ad_backend=NLME_AD, integrate=(:a,),
+        sample=(:coefficients,), draws=8)
+    @test only(t for t in sampled.terms if t.declaration === Symbol("pop_mu.beta_pop_2")).class === :never
+    m = lint_model()
+    @test_throws "no population coefficient" brm_laplace_problem(m.rk; ad_backend=NLME_AD,
+        integrate=(:field, :coefficients))
+    # 5c's target integrates them: the integration agrees with the outer-coefficient one
+    point = brm_laplace_mode(p).draws[p.population, 1]
+    out = brm_laplace_integration(p; point, draws=2000, rng=Xoshiro(4))
+    @test out.design === :grid && size(out.draws, 1) == length(p.u)
+    pa_point = brm_laplace_mode(pa).draws[pa.population, 1]
+    outer = brm_laplace_integration(pa; point=pa_point, design=:ccd, draws=2000, rng=Xoshiro(4))
+    ia = [findfirst(==(n), BRM._rk_layout_coordinate_names(rk)) for n in coefficient]
+    @test vec(mean(out.draws[ia, :]; dims=2)) ≈ vec(mean(outer.draws[ia, :]; dims=2)) atol=0.1
 end
 
 @stestset "refusals name their reason" begin

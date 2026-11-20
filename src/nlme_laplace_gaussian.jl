@@ -23,20 +23,33 @@ function _brm_spl_gaussian_outer(backend, candidates)
     Set(b.declaration for b in layout.blocks if any(i -> layout.integrated[i] in reads, b.z))
 end
 
+# Integrated formula coefficients (`integrate = (..., :coefficients)`) carry
+# their constant Normal prior as blocks without ports (`meanport == 0`): set
+# once here, never read from the model and with no outer gradient.
 function _brm_spl_gaussian_prior(p, records, u0)
     reads = _brm_spl_gaussian_prior_reads(p.backend, u0)
     isempty(intersect(reads, p.integrated)) || _brm_nlme_error(
         "brm_laplace_problem: declared Gaussian means and scales must depend only " *
         "on outer coordinates; sample the terms that supply their prior parameters")
     vectors = [r for r in records if r.kind === :vector]
-    isempty(vectors) && return nothing
+    coefficients = [r for r in records if r.kind === :population]
+    isempty(vectors) && isempty(coefficients) && return nothing
     ports = Tuple(s for r in vectors for s in (r.gaussian.mean, r.gaussian.scale))
     blocks = [(; z=vec(only(b for b in p.blocks if b.declaration === r.declaration).z),
         meanport=2j-1, scaleport=2j) for (j, r) in enumerate(vectors)]
-    read = _rk_value_reader(p.backend, ports)
-    pullback = _rk_value_pullback(p.backend, ports, u0)
-    _BRMSPLGaussianPrior(blocks, ports, read, pullback, zeros(length(p.integrated)),
-        ones(length(p.integrated)), Ref{Any}(nothing))
+    mean = zeros(length(p.integrated))
+    precision = ones(length(p.integrated))
+    for r in coefficients
+        m, s = _brm_spl_coefficient_prior(r)
+        name = _brm_spl_coefficient_name(r)
+        z = vec(only(b for b in p.blocks if b.declaration === name).z)
+        mean[z] .= m
+        precision[z] .= inv(s^2)
+        push!(blocks, (; z, meanport=0, scaleport=0))
+    end
+    read = isempty(ports) ? (u -> ()) : _rk_value_reader(p.backend, ports)
+    pullback = isempty(ports) ? nothing : _rk_value_pullback(p.backend, ports, u0)
+    _BRMSPLGaussianPrior(blocks, ports, read, pullback, mean, precision, Ref{Any}(nothing))
 end
 
 _brm_spl_gaussian_element(x::Number, i) = x
@@ -48,6 +61,7 @@ function _brm_spl_gaussian_parameters!(p, u)
     values = Tuple(g.read(u))
     g.values[] = values
     for b in g.blocks
+        b.meanport == 0 && continue
         mu, sigma = values[b.meanport], values[b.scaleport]
         _brm_spl_gaussian_parameters!(g.mean, g.precision, b.z, mu, sigma)
     end
@@ -77,12 +91,13 @@ end
 # Scalar prior arguments accumulate all coordinates before one RK pullback.
 function _brm_spl_gaussian_gradient!(gradient, p, state, S, v, active)
     g = p.gaussian
-    g === nothing && return gradient
+    (g === nothing || isempty(g.ports)) && return gradient
     values = g.values[]
     seeds = Any[x isa Number ? 0.0 : zeros(length(x)) for x in values]
     components = active === nothing ? nothing : Set(p.term_component[t]
         for t in eachindex(active) if active[t])
     for b in g.blocks
+        b.meanport == 0 && continue
         dm = zeros(length(b.z)); ds = zeros(length(b.z))
         for (j, i) in enumerate(b.z)
             components === nothing || p.component[i] in components || continue
