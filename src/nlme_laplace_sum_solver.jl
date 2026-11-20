@@ -3,7 +3,7 @@
 function _brm_spl_precision(p::BRMSparseLaplaceProblem)
     D = copy(p.pattern)
     any(g -> g isa _BRMSumCellGroup, p.cells) || return D
-    isdefined(SelectedInversion, :LUSelInvWorkspace) || _brm_nlme_error(
+    _brm_lazy(:SelectedInversion, _brm_lu_selinv_available) || _brm_nlme_error(
         "sum-cell Laplace needs SelectedInversion's pivoted KLU API; " *
         "pin fleet revision 8b1ee1077cea94c1aff746e182681ae39ce91526 or a later release carrying it")
     _BRMSumPrecision(D, spzeros(0, size(D, 1)), spzeros(0, 0), Any[])
@@ -225,7 +225,7 @@ function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h::_BRMSumPrecision; shift
 end
 
 function _brm_spl_selected_precision(p::BRMSparseLaplaceProblem, F)
-    nonzeros(selinv_extract(selinv(F; depermute=true).Z, p.pattern))
+    nonzeros(_brm_lazy(:SelectedInversion, _brm_selinv_on_pattern, F, p.pattern))
 end
 function _brm_spl_selected_precision(p::BRMSparseLaplaceProblem, F::_BRMAugmentedFactor)
     selected = _brm_spl_selected(F)
@@ -305,7 +305,7 @@ function _brm_spl_sum_inverse_blocks(F::_BRMAugmentedFactor, sets)
     ii = [i for set in sets for j in set for i in set]
     jj = [j for set in sets for j in set for i in set]
     request = sparse(ii, jj, ones(length(ii)), size(F.K)...)
-    selected = selinv(F.F, request)
+    selected = _brm_lazy(:SelectedInversion, _brm_lu_selinv, F.F, request)
     [Matrix(Symmetric(_brm_spl_entries(selected, set, set))) for set in sets]
 end
 
@@ -320,10 +320,11 @@ function _brm_spl_component_logdets(p::BRMSparseLaplaceProblem, F::_BRMAugmented
     # KLU's scaled identity is L*U+F = Diagonal(1 ./ Rs)*K[p,q].
     # Absolute determinants ignore permutation parity. Pivots remain within
     # a connected component; BTF off-diagonal blocks do not affect det(U).
-    d = diag(F.F.U)
-    for (k, i) in enumerate(F.F.p)
+    pivots = _brm_lazy(:KLU, _brm_klu_scaled_pivots, F.F)
+    d, Rs = pivots.d, pivots.Rs
+    for (k, i) in enumerate(pivots.p)
         c = labels[i]
-        c == 0 || (out[c] += log(abs(d[k])) + log(F.F.Rs[k]))
+        c == 0 || (out[c] += log(abs(d[k])) + log(Rs[k]))
     end
     out
 end

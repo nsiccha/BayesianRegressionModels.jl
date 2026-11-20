@@ -1,6 +1,6 @@
 # No AD compilation or model preparation. Run with the repository test env.
 using BayesianRegressionModels, LinearAlgebra, Random, Test
-const KrylovKit = BayesianRegressionModels.KrylovKit
+import KrylovKit
 include("quadrature.jl")
 
 @testset "log quadrature bounds against a bounded dense oracle" begin

@@ -43,40 +43,9 @@ LinearAlgebra.issuccess(f::_BRMAugmentedFactor) = f.positive_definite
 LinearAlgebra.logdet(f::_BRMAugmentedFactor) = f.logdet
 Base.:\(f::_BRMAugmentedFactor, b::AbstractVector) = _brm_spl_augmented_solve(f, b)
 
-# MUMPS's sequential backend still requires MPI initialization. Keep every
-# MUMPS operation under one lock, and destroy its temporary native workspace
-# before returning, including on errors. A chain retains only its KLU factor
-# and selected-inverse workspace; deepcopy resets that whole cache.
-const _BRM_INERTIA_LOCK = ReentrantLock()
-function _brm_spl_inertia(K)
-    lock(_BRM_INERTIA_LOCK) do
-        MUMPS.MPI.Initialized() || MUMPS.MPI.Init(; threadlevel=:serialized)
-        m = MUMPS.Mumps{Float64}(MUMPS.mumps_symmetric,
-            MUMPS.get_icntl(det=true, nthreads=1, tree_parallelism=false),
-            copy(MUMPS.default_cntl64); backend=MUMPS.Sequential())
-        try
-            MUMPS.set_icntl!(m, 13, 1; displaylevel=0)
-            # Elimination can leave roundoff at an exactly singular Schur
-            # complement. Reject numerical null pivots at MUMPS's default
-            # scale-aware tolerance, even if its remaining inertia is right.
-            MUMPS.set_icntl!(m, 24, 1; displaylevel=0)
-            MUMPS.set_icntl!(m, 31, 1; displaylevel=0)
-            MUMPS.associate_matrix!(m, K)
-            MUMPS.set_job!(m, 4)
-            MUMPS.invoke_mumps!(m)
-            (; negative=m.infog[28] == 0 ? Int(m.infog[12]) : -1,
-                logdet=log(abs(m.rinfog[12])) + m.infog[34] * log(2.0))
-        catch err
-            # A singular trial curvature is handled by Newton damping. Other
-            # solver failures must remain visible, rather than looking like
-            # a statistical rejection.
-            err isa MUMPS.MUMPSException && m.infog[1] == -10 || rethrow()
-            (; negative=-1, logdet=NaN)
-        finally
-            Base.finalize(m)
-        end
-    end
-end
+# The augmented system's inertia and log-determinant, from MUMPS's symmetric
+# indefinite factorization (src/lazy_dependencies.jl).
+_brm_spl_inertia(K) = _brm_lazy(:MUMPS, _brm_mumps_inertia, K)
 
 function _brm_spl_factor_selection(reads, integrated, population)
     sel = sort!(unique!(collect(Int, reads)))
@@ -553,16 +522,18 @@ function _brm_spl_augmented_factor(K, n; previous=nothing)
     # klu! reuses the old numeric pivots; a nonsingular updated matrix can
     # then hit a zero pivot. Re-pivot each new curvature with klu. The
     # selected-inverse workspace can still reuse an unchanged factor pattern.
-    F = positive_definite ? KLU.klu(K) : nothing
+    F = positive_definite ? _brm_lazy(:KLU, _brm_klu, K) : nothing
     _BRMAugmentedFactor(F, n, positive_definite, inertia.logdet, K,
         same ? previous.workspace : nothing, same ? previous.selected : similar(K), false)
 end
 
+# The selected inverse of K on its own pattern, from KLU's factor F, into
+# `f.selected`; the workspace is reused while K's pattern is. BRM never operates
+# on F itself: KLU's and SelectedInversion's extensions do (src/lazy_dependencies.jl).
 function _brm_spl_selected(f::_BRMAugmentedFactor)
     f.selected_ready && return f.selected
-    f.workspace === nothing &&
-        (f.workspace = SelectedInversion.LUSelInvWorkspace(f.F, f.K))
-    SelectedInversion.selinv!(f.selected, f.workspace, f.F)
+    f.workspace = _brm_lazy(:SelectedInversion, _brm_lu_selinv!,
+        f.selected, f.workspace, f.F, f.K)
     f.selected_ready = true
     f.selected
 end
@@ -583,10 +554,10 @@ end
 # not the measure: its q rows bottom out at roundoff of W's size.
 function _brm_spl_augmented_solve(factor, b::AbstractVector)
     length(b) == factor.n || throw(DimensionMismatch("wrong integrated-vector length"))
-    rhs = zeros(size(factor.F, 1))
+    rhs = zeros(size(factor.K, 1))
     function solve(v)
         fill!(rhs, 0.0); rhs[1:factor.n] .= v
-        (factor.F \ rhs)[1:factor.n]
+        _brm_lazy(:KLU, _brm_klu_solve, factor.F, rhs)[1:factor.n]
     end
     x = solve(b)
     r = b .- _brm_spl_augmented_action(factor, x)
@@ -607,31 +578,5 @@ end
 # This remains valid when the local part D is indefinite: only H must be
 # positive definite. KrylovKit owns the reorthogonalized Lanczos recurrence.
 # The basis is capped independently of model size, so memory stays O(n).
-function _brm_spl_covariance_root(solve, b; rtol=1e-10, maxdim=256)
-    β = norm(b)
-    β == 0 && return (; draw=copy(b), iterations=0, error_bound=0.0)
-    it = KrylovKit.LanczosIterator(solve, b, KrylovKit.ModifiedGramSchmidt2())
-    fact = KrylovKit.initialize(it)
-    bound = Inf
-    limit = min(length(b), maxdim)
-    for k in 1:limit
-        T = KrylovKit.rayleighquotient(fact)
-        E = eigen(T)
-        minimum(E.values) > 0 || _brm_nlme_error(
-            "brm_laplace_draws: the covariance projection is not positive definite")
-        roots = sqrt.(E.values)
-        weights = E.vectors * (roots .* E.vectors[1, :])
-        draw = β .* (KrylovKit.basis(fact) * weights)
-        # X = sqrt(S)V - V sqrt(T) solves sqrt(S)X + X sqrt(T) = r e_k'.
-        # Sign alternation makes the Jacobi T a Stieltjes matrix, so the
-        # scalar e_k' exp(-sqrt(T)t)e_1 has constant sign. Bound its integral
-        # using ||exp(-sqrt(S)t)|| <= 1: ||X e_1|| <= ||r|| |T^-1/2[k,1]|.
-        # No estimated smallest eigenvalue enters the stopping condition.
-        corner = dot(E.vectors[end, :], E.vectors[1, :] ./ roots)
-        bound = β * KrylovKit.normres(fact) * abs(corner)
-        bound <= rtol * norm(draw) && return (; draw, iterations=k, error_bound=bound)
-        k < limit && KrylovKit.expand!(it, fact)
-    end
-    _brm_nlme_error("brm_laplace_draws: the covariance square-root action did not " *
-        "reach relative tolerance $rtol in $limit Lanczos steps (error bound $bound)")
-end
+_brm_spl_covariance_root(solve, b; rtol=1e-10, maxdim=256) =
+    _brm_lazy(:KrylovKit, _brm_krylovkit_covariance_root, solve, b; rtol, maxdim)

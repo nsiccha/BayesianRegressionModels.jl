@@ -8,7 +8,7 @@
 # include paths. The standalone test filter must be registered only once.
 isdefined(@__MODULE__, :NLME_AD) || include(joinpath(@__DIR__, "../../test/nlme_fixtures.jl"))
 using LinearAlgebra, Random, LogDensityProblems
-const KrylovKit = BRM.KrylovKit
+import KrylovKit
 
 function shared_field_fixture(; groups=3, rows=3, temporal=2, spatial=2, poisson=false,
         prepare_model=true)
