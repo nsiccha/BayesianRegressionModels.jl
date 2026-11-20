@@ -308,13 +308,17 @@ end
 spl_block_values(rk, p, u, j) =
     getproperty(BRM._rk_constrained_values(rk, u), p.blocks[j].declaration)
 
-function spl_icar_oracle(p, rk, data, φ)
+# `coefficients`: the prior variance of the formula's coefficients (1 + x)
+# when they are integrated too, so that μ0 holds them at zero.
+function spl_icar_oracle(p, rk, data, φ; coefficients=0.0)
     u = spl_point(p, φ)
     ψ = BRM._brm_slap_psi!(zeros(length(p.port)), p, BRM._rk_slap_values(p.kernels, u))
     μ0 = [ψ[p.entry[t]] for t in eachindex(p.family)]
     σ = [exp(ψ[p.entry[t] + 1]) for t in eachindex(p.family)]
     τ = only(spl_block_values(rk, p, u, 1).sigma)
-    Σ = Diagonal(σ .^ 2) + τ^2 * spl_car_row_covariance(data.area, data.from, data.to)
+    X = hcat(ones(length(data.x)), data.x)
+    Σ = Diagonal(σ .^ 2) + τ^2 * spl_car_row_covariance(data.area, data.from, data.to) +
+        coefficients * X * X'
     plan = RKEXT._rk_translated_plan(rk.plan)
     prior = Base.invokelatest(prepare_query(rk.model, plan, :prior), u) +
         Base.invokelatest(prepare_query(rk.model, plan, :log_jacobian), u)
@@ -452,6 +456,87 @@ end
     @test values[3][1] - values[1][1] ≈ expected[3] - expected[1] atol=1e-8
     for (φ, (_, gradient)) in zip(φs, values)
         @test gradient ≈ spl_fd(oracle, φ) rtol=1e-6 atol=1e-6
+    end
+end
+
+# The soft sums stay out of the sparse factor (Woodbury). Without them its
+# matrix is singular to rounding along a field component's level when only
+# the soft sum holds that level: a vanishing field scale, or an integrated
+# intercept taking the level up. Each sum's anchor keeps the factor definite
+# (snag brm-laplace-coef-2aea38ff: a Scottish lip cancer ICAR model with its
+# coefficients integrated threw "stationary point that is not a maximum" in
+# brm_laplace_integration and in sampler chains).
+@stestset "car fields: soft sums at a vanishing field scale, coefficients integrated or not" begin
+    data = SPL_CAR
+    rk = RKBRMI(@brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + car(area; edges=(from, to), type=:icar)
+        effect(mu, :) ~ Normal(0.0, 10.0)
+        y ~ Normal(mu, sigma)
+    end)
+    counts = let rng = Xoshiro(44); [rand(rng, Poisson(exp(e))) for e in data.η]; end
+    rc = RKBRMI(@brm((; data.area, data.x, y=counts, data.from, data.to), begin
+        log(mu) ~ 1 + x + car(area; edges=(from, to), type=:icar)
+        effect(mu, :) ~ Normal(0.0, 10.0)
+        y ~ Poisson(mu)
+    end))
+    point(p, logscale) = (φ = fill(0.1, length(p.population));
+        φ[findfirst(==(Symbol("car_mu_area.sigma")), p.names)] = logscale; φ)
+    for (integrate, variance) in (((:area,), 0.0), ((:area, :coefficients), 100.0))
+        p = spl_problem(rk, integrate)
+        @test length(p.wcols) == 2
+        oracle(φ) = spl_icar_oracle(p, rk, data, φ; coefficients=variance)
+        φs = [point(p, s) for s in (-0.5, -20.0, -30.0)]
+        values = [LogDensityProblems.logdensity_and_gradient(p, φ) for φ in φs]
+        expected = oracle.(φs)
+        @test values[2][1] - values[1][1] ≈ expected[2] - expected[1] atol=1e-8
+        @test values[3][1] - values[1][1] ≈ expected[3] - expected[1] atol=1e-8
+        for (φ, (_, gradient)) in zip(φs, values)
+            @test gradient ≈ spl_fd(oracle, φ) rtol=1e-6 atol=1e-6
+        end
+        # the factored algebra against h with its soft sums, dense
+        for φ in φs
+            state = BRM._brm_spl_mode!(p, φ)
+            H = Matrix(Symmetric(state.h, :L))
+            for (c, cols) in enumerate(p.wcols)
+                H[cols, cols] .+= p.wλ[c]
+            end
+            @test BRM._brm_spl_logdet(p, state.F, state.W) ≈ logdet(H) atol=1e-8
+            b = randn(Xoshiro(46), size(H, 1))
+            @test BRM._brm_spl_solve(state.F, state.W, b) ≈ H \ b rtol=1e-9
+            # the draws' covariance (I − X K Uᵀ) A⁻¹ (I − X K Uᵀ)ᵀ is h⁻¹
+            T = I - state.W.X * BRM._brm_spl_draw_map(state.W) * state.W.U'
+            @test T * (state.F \ Matrix(1.0I, size(H)...)) * T' ≈ inv(H) rtol=1e-8
+        end
+        z = brm_laplace_draws(p, repeat(φs[3], 1, 20); rng=Xoshiro(45)).draws
+        @test all(isfinite, z)
+        # counts: the Newton search and the gradient
+        q = spl_problem(rc, integrate)
+        for s in (-0.5, -20.0, -30.0)
+            φ = point(q, s)
+            value, gradient = LogDensityProblems.logdensity_and_gradient(q, φ)
+            @test isfinite(value)
+            @test gradient ≈ spl_fd(q, φ) rtol=1e-6 atol=1e-6
+        end
+        @test p.nonfinite == q.nonfinite == 0
+        @test p.unconverged == q.unconverged == 0
+    end
+    # The blockwise step's per-block prior values (`fb`): moving one step
+    # block's effects changes the whole prior by exactly that block's change.
+    # The soft sums reach the blocks their `wsblocks` name (its counter once
+    # took an edge's weight and indexed `wsblocks[2.0]`).
+    p = spl_problem(rk, (:area, :coefficients))
+    nb = length(p.sblocks); nc = length(p.components)
+    rng = Xoshiro(47)
+    z0 = randn(rng, length(p.integrated))
+    prior(z) = (fc = zeros(nc); fb = zeros(nb);
+        BRM._brm_spl_prior!(fc, nothing, nothing, p, z, fb); (sum(fc), fb))
+    total0, fb0 = prior(z0)
+    for k in 1:nb
+        z = copy(z0)
+        z[p.sblocks[k]] .+= randn(rng, length(p.sblocks[k]))
+        total, fb = prior(z)
+        @test total - total0 ≈ fb[k] - fb0[k] atol=1e-10
     end
 end
 
