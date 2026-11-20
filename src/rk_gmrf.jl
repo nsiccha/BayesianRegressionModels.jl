@@ -153,18 +153,38 @@ function brm_gmrf_conditional_layout(f::_BRMGMRFFootprint)
     for p in 1:(length(f.pattern_ptr) - 1), slot in f.pattern_ptr[p]:(f.pattern_ptr[p + 1] - 1)
         patterns[f.pattern_states[slot]] = p
     end
-    parents = Vector{Vector{Int}}(undef, f.ncoordinates)
-    previous = Vector{UnitRange{Int}}(undef, f.ncoordinates)
+    inputs = Vector{Vector{Int}}(undef, f.ncoordinates)
     for s in eachindex(patterns), c in 1:C
-        first = C * (s - 1) + 1
-        k = first + c - 1
-        parents[k] = [C * (Int(f.neighbor[a]) - 1) + c
-            for a in f.neighbor_ptr[s]:(f.neighbor_ptr[s + 1] - 1)]
-        previous[k] = first:(k - 1)
+        first = C * (s - 1)
+        neighbors = view(f.neighbor, f.neighbor_ptr[s]:(f.neighbor_ptr[s + 1] - 1))
+        ids = [C * (Int(parent) - 1) + c for parent in neighbors]
+        for earlier in 1:(c - 1)
+            push!(ids, first + earlier)
+            append!(ids, (C * (Int(parent) - 1) + earlier for parent in neighbors))
+        end
+        inputs[first + c] = ids
     end
-    (; ids=1:(length(f.pattern_ptr) - 1), pattern=repeat(patterns; inner=C),
-       coordinates=1:f.ncoordinates, parents, previous, channel_ids=1:C,
-       channel=repeat(1:C, length(patterns)))
+    (; inputs, ids=1:(length(f.pattern_ptr) - 1), pattern=repeat(patterns; inner=C),
+       coordinates=1:f.ncoordinates, channel_ids=1:C, channel=repeat(1:C, length(patterns)))
+end
+
+# Direct-parent coefficients of one scalar conditional, with its conditional
+# standard deviation last. Within a state the earlier channel residuals are
+# explained by the same spatial weights as the current channel.
+function brm_gmrf_conditional_factor(pattern, channel)
+    n = length(pattern)
+    result = similar(pattern, n * length(channel))
+    for j in 1:n-1
+        result[j] = pattern[j]
+    end
+    for c in 1:length(channel)-1
+        result[n*c] = channel[c]
+        for j in 1:n-1
+            result[n*c+j] = -channel[c] * pattern[j]
+        end
+    end
+    result[end] = last(pattern) * last(channel)
+    result
 end
 
 # One field of a cell row read (`brm_gmrf_cell_read`), as a function of its
@@ -316,6 +336,7 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     conditional_functions = if footprint
         factors = _rk_gmrf_conditional_factors()
         (; layout=_rk_value_callee!(bindings, brm_gmrf_conditional_layout, taken),
+           combine=_rk_value_callee!(bindings, brm_gmrf_conditional_factor, taken),
            pattern=_rk_value_callee!(bindings, factors.pattern, taken),
            channel=_rk_value_callee!(bindings, factors.channel, taken))
     end
@@ -384,14 +405,14 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
     (; call, sigma, spatial_length, temporal_length, field, conditionals)
 end
 
-# Keep the two gathers in the emitted graph. Requesting one conditional mean
-# then reads its direct space-time parents and earlier channels at that state.
+# RK selects the same coefficient row for the conditional mean, SD and SVI map.
+# A mean reads only the packed parents of its scalar conditional.
 function _rk_ast_gmrf_conditionals!(definitions, taken, block, functions, geometry, field,
         spatial, temporal, L)
     layout = _rk_block_local!(block, :conditional_layout)
     factors = _rk_block_local!(block, :conditional_factors)
     channel = _rk_block_local!(block, :conditional_channels)
-    centers = _rk_block_local!(block, :state_mean)
+    conditional_factor = _rk_block_local!(block, :conditional_factor)
     conditional_mean = _rk_block_local!(block, :conditional_mean)
     conditional_scale = _rk_block_local!(block, :conditional_scale)
     function plate_kernel(name, args, lists, indices, expression)
@@ -403,30 +424,24 @@ function _rk_ast_gmrf_conditionals!(definitions, taken, block, functions, geomet
         [:ids], [:p], Expr(:call, functions.pattern, :geometry, :p, :space, :time))
     channel_factor = plate_kernel("brm_gmrf_channel_factors", [:L, :ids], [:ids], [:c],
         Expr(:call, functions.channel, :L, :c))
-    base = plate_kernel("brm_gmrf_state_means", [:field, :factors, :parents, :pattern],
-        [:parents, :pattern], [:indices, :p], Base.remove_linenums!(quote
-            coefficients = factors[p]
+    combine = plate_kernel("brm_gmrf_conditional_factors", [:spatial, :channel, :patterns, :channels],
+        [:patterns, :channels], [:p, :c], Expr(:call, functions.combine, :(spatial[p]), :(channel[c])))
+    locate = plate_kernel("brm_gmrf_conditional_means", [:field, :laws, :parents, :coordinates],
+        [:parents, :coordinates], [:indices, :k], Base.remove_linenums!(quote
+            coefficients = laws[k]
             sum(coefficients[1:length(indices)] .* field[indices])
         end))
-    locate = plate_kernel("brm_gmrf_conditional_means",
-        [:field, :base, :channel, :coordinates, :previous, :channels],
-        [:coordinates, :previous, :channels], [:k, :indices, :c], Base.remove_linenums!(quote
-            residuals = field[indices] .- base[indices]
-            coefficients = channel[c]
-            base[k] + sum(coefficients[1:length(indices)] .* residuals)
-        end))
-    scale = plate_kernel("brm_gmrf_conditional_scales", [:factors, :channel, :pattern, :channels],
-        [:pattern, :channels], [:p, :c], :(last(factors[p]) * last(channel[c])))
+    scale = plate_kernel("brm_gmrf_conditional_scales", [:laws, :coordinates],
+        [:coordinates], [:k], :(last(laws[k])))
     part(name) = _rk_ast_property(layout, name)
     push!(block.statements,
         Expr(:(=), layout, Expr(:call, functions.layout, geometry)),
         Expr(:(=), factors, Expr(:call, factor, geometry, part(:ids), spatial, temporal)),
         Expr(:(=), channel, Expr(:call, channel_factor, L, part(:channel_ids))),
-        Expr(:(=), centers, Expr(:call, base, field, factors, part(:parents), part(:pattern))),
-        Expr(:(=), conditional_mean, Expr(:call, locate, field, centers, channel, part(:coordinates),
-            part(:previous), part(:channel))),
-        Expr(:(=), conditional_scale, Expr(:call, scale, factors, channel, part(:pattern), part(:channel))))
-    (; conditional_mean, conditional_scale)
+        Expr(:(=), conditional_factor, Expr(:call, combine, factors, channel, part(:pattern), part(:channel))),
+        Expr(:(=), conditional_mean, Expr(:call, locate, field, conditional_factor, part(:inputs), part(:coordinates))),
+        Expr(:(=), conditional_scale, Expr(:call, scale, conditional_factor, part(:coordinates))))
+    (; conditional_layout=layout, conditional_factor, conditional_mean, conditional_scale)
 end
 
 # ---- Independent fields in `@plate for p in groups(g)` cells ----------------

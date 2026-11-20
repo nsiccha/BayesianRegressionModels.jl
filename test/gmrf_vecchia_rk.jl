@@ -62,7 +62,17 @@ function check_vecchia_conditionals(rk, u)
         Symbol(record.declaration, ".", record.locals.field)), names)
     bound = rk_bound_data(rk)
     C = f.nchannels
-    for (port, full) in zip(ports, (location, scale))
+    factor_port = Symbol(record.declaration, ".", record.locals.conditional_factor)
+    layout_port = Symbol(record.declaration, ".", record.locals.conditional_layout)
+    layout = Base.invokelatest(ReactiveKernels.prepare(rk.model.spec;
+        have=Tuple(keys(bound)), want=layout_port, bound))
+    rows = only(values(BRM._rk_value_reader(rk, (factor_port,))(u)))
+    for k in eachindex(rows)
+        @test length(rows[k]) == length(layout.inputs[k]) + 1
+        @test dot(rows[k][1:end-1], law.field[layout.inputs[k]]) ≈ location[k] atol=1e-12
+        @test rows[k][end] ≈ scale[k]
+    end
+    for (port, full) in zip((ports..., factor_port), (location, scale, rows))
         spec = ReactiveKernels.plate_cell(rk.model.spec, port; index=:k, name=:selected, locality=:error)
         selected = ReactiveKernels.prepare(spec; have=(:unconstrained, keys(bound)..., :k),
             want=:selected, bound)
