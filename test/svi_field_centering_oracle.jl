@@ -6,7 +6,7 @@ function check_centered_field(m, rk)
     t0 = BRM._brm_svi_target(m; field_states=:units, separator=:none)
     q0 = BRM._brm_svi_params(t0, m.unit[t0.globals], MeanFieldGlobal();
         global_scale=0.1, unit_scale=0.2)
-    t, q = BRM._brm_svi_with_centering(t0, q0, LearnedCentering(; delay=false))
+    t, q = BRM._brm_svi_with_centering(t0, q0, LearnedCentering(; delay=false, fields=true))
     plan = t.centering
     rng = Xoshiro(17)
     for x in q.centering.x
@@ -154,7 +154,7 @@ function check_field_window(first_fit, new_fit)
     t0 = BRM._brm_svi_target(m; previous=old, field_states=:units, separator=:none)
     t0, q0 = BRM._brm_svi_initialize(t0, old, old.q.family; start=nothing, inits=nothing,
         global_scale=0.2, unit_scale=0.2)
-    t, q = BRM._brm_svi_with_centering(t0, q0, LearnedCentering(; delay=false))
+    t, q = BRM._brm_svi_with_centering(t0, q0, LearnedCentering(; delay=false, fields=true))
     levels = BRM._brm_svi_unit_levels(t)
     # Change the ordinary controls to exercise transport in a Gaussian factor
     # with cross-covariance between its ordinary and its field coordinates.

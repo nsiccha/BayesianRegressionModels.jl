@@ -2260,8 +2260,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `LowRankGlobal(r)` (diagonal plus rank `r`).
 - `centering` — fresh fits default to [`LearnedCentering`](@ref), jointly
   learning each supported unit cell's coordinates and variational factor.
-  This includes unit-owned Gaussian random effects, Gaussian vector elements,
-  grouped HSGP weights and unit-owned read-pair GMRF states. The HSGP weights
+  This includes unit-owned Gaussian random effects, Gaussian vector elements
+  and grouped HSGP weights, and with `LearnedCentering(; fields=true)` the
+  unit-owned states of a read-pair GMRF (`field_states=:units`). The HSGP weights
   and GMRF states learn their controls from the first iteration. By default
   (`LearnedCentering(; delay=true)`) a fresh fit explores with its other cells
   in their packed coordinates and centres them once exploration's ELBO test first reads flat,
@@ -2278,7 +2279,7 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   its mean linear in the global factor's standard-normal draw at the globals
   the unit's term reads, learned with the fit, on the unit coordinates learned
   centering does not centre (`@plate` cell latents among them) and on unit-owned
-  read-pair GMRF states after their direct parents have been included. Fresh runs hold
+  read-pair GMRF states, packed or after their direct parents have been included. Fresh runs hold
   the coupling at zero during exploration and learn it in settling and
   polishing, using a mean-point gradient baseline to reduce update noise.
   It keeps the
@@ -2413,13 +2414,16 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 - `field_states` — how a read-pair field (`gmrf(...; neighbors=m)`) is held. `:global`
   (default) gives each state its own global Gaussian factor. `:units` puts a state read
   by one unit into that unit's factor, next to its effects, so its cost and storage follow
-  the unit's reads. A state read by several units stays global. With `LearnedCentering()`,
-  each unit-owned state has one control. Its draw uses the conditional scale and one
-  pass over its direct Vecchia parents, including earlier channels. A unit update
-  samples up to two additional owners for the gradients of terms that read its states.
-  `centering=nothing` fits the packed states. A streaming update accepts observations
-  on the fitted support with the same ownership. It keeps the field controls fixed
-  and draws any absent parent's states from its saved conditional Gaussian. A mesh `gmrf` is refused either way:
+  the unit's reads. A state read by several units stays global. The states keep
+  their packed coordinates unless `centering=LearnedCentering(; fields=true)` is given.
+  Then each unit-owned state has one control. Its draw uses the conditional scale and one
+  pass over its direct Vecchia parents, including earlier channels, which lets neighbouring
+  states covary. A unit update then also reads the coefficient rows of its states' parents
+  and of their parents, and samples up to two additional owners for the gradients of terms
+  that read its states, so an iteration costs a multiple of the packed one. A streaming
+  update accepts observations on the fitted support with the same ownership. It keeps any
+  field controls fixed and draws an absent parent's states from its saved conditional
+  Gaussian. A mesh `gmrf` is refused either way:
   one factor per mesh state collapses the learned lengths.
 - `start` / `inits` — where the global and unit means start: BRM's prior-median
   starting point by default, a full RK packed point `start`, or values keyed

@@ -115,7 +115,8 @@ end
 
 _brm_svi_centering_layout(q) = hasproperty(q, :centering) ?
     (; centering=(; q.centering.start, q.centering.step,
-        constant_laws=_brm_svi_saved_centering(q.centering).constant_laws)) : NamedTuple()
+        constant_laws=_brm_svi_saved_centering(q.centering).constant_laws,
+        fields=_brm_svi_saved_centering(q.centering).fields)) : NamedTuple()
 
 function brm_svi_checkpoint(fit)
     hasproperty(fit, :diagnostics) && hasproperty(fit.diagnostics, :q) ||

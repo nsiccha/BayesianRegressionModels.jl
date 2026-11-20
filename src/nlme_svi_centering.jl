@@ -51,7 +51,7 @@
 using ReparametrizableDistributions: PartiallyCentered, reparam
 
 """
-    LearnedCentering(; start=0.5, step=0.05, delay=true)
+    LearnedCentering(; start=0.5, step=0.05, delay=true, fields=false)
 
 The default on a fresh [`brm_svi_fit`](@ref): learned partial centering with one control
 `c ∈ (0, 1)` per eligible cell, optimized jointly with the variational factors
@@ -70,11 +70,19 @@ coordinates first, the plain factorization, until exploration's ELBO test first 
 flat (the trend test that ends exploration; its drift gate aside). Then each cell's
 control starts at `start`, each unit's factor is carried
 into its learned coordinates at the global factor's mean, and exploration goes on,
-its stopping test reading only the windows since. Grouped HSGP weights and
-unit-owned read-pair GMRF states learn from the first iteration. A GMRF state
-starts at `start` and uses its direct parents' scaled coordinates to compute
-the conditional location. Its control stays fixed across streaming windows. `delay=false` learns every
+its stopping test reading only the windows since. Grouped HSGP weights learn
+from the first iteration. `delay=false` learns every
 control from the first iteration. Pass `centering=nothing` for the plain factorization.
+
+`fields=true` also gives each unit-owned state of a read-pair GMRF
+(`field_states=:units`) a control, learned from the first iteration. The state
+starts at `start` and is located at its conditional mean over its direct
+Vecchia parents' scaled coordinates. Its control stays fixed across streaming
+windows. This recovers covariance between neighbouring states that the packed
+states cannot hold, and each unit's update then reads the coefficient rows of
+its states, their parents and the parents of those. With `fields=false` (the
+default) the states keep their packed coordinates.
+
 Streaming and optimizer continuation retain the saved policy.
 """
 struct LearnedCentering
@@ -94,23 +102,30 @@ struct LearnedCentering
     # about 600 nats below the plain fit's, and a draw put atanh(phi) past 19, where
     # tanh rounds to 1 (snag brm-svi-fit-stop-517ddc65); the plain fit recovered.
     delay::Bool
-    function LearnedCentering(; start::Real=0.5, step::Real=0.05, delay::Bool=true)
+    # Whether unit-owned read-pair GMRF states are cells (`kind=:gmrf`,
+    # src/nlme_svi_field_centering.jl). Off by default: a unit's update then
+    # reads the rows of its states' parents and of their parents too.
+    fields::Bool
+    function LearnedCentering(; start::Real=0.5, step::Real=0.05, delay::Bool=true,
+            fields::Bool=false)
         0 < start < 1 || throw(ArgumentError(
             "LearnedCentering: start must lie strictly between 0 and 1, got $start"))
         isfinite(step) && step > 0 || throw(ArgumentError(
             "LearnedCentering: step must be finite and positive, got $step"))
-        new(Float64(start), Float64(step), false, delay)
+        new(Float64(start), Float64(step), false, delay, fields)
     end
     LearnedCentering(c::LearnedCentering, constant_laws::Bool) =
-        new(c.start, c.step, constant_laws, c.delay)
+        new(c.start, c.step, constant_laws, c.delay, c.fields)
 end
 
 # A saved centering policy: `(; start, step)` and, from BRM 0.2.322, `constant_laws`.
 # A state saved before it centred constant-law vectors and keeps doing so. A saved
 # state carries its own controls, so its policy never delays: a carried unit keeps
-# its frame and a new one starts at `start`.
+# its frame and a new one starts at `start`. A streaming state names its field
+# policy `fields`; an optimizer checkpoint's controls hold it as `field_pass`.
 _brm_svi_saved_centering(saved) = LearnedCentering(
-    LearnedCentering(; saved.start, saved.step, delay=false),
+    LearnedCentering(; saved.start, saved.step, delay=false,
+        fields=Bool(get(saved, :fields, get(saved, :field_pass, false)))),
     Bool(get(saved, :constant_laws, true)))
 
 # Omission selects learned coordinates on a fresh fit. A streaming update keeps
@@ -432,7 +447,7 @@ end
 # absorb (`_brm_svi_location_references`); and each authored Gaussian vector
 # element a unit owns whose law reads a global but no unit coordinate (any law
 # that reads no unit coordinate under a saved `constant_laws` policy).
-function _brm_svi_centering_plan(t, centering::LearnedCentering; field_pass=true)
+function _brm_svi_centering_plan(t, centering::LearnedCentering; field_pass=centering.fields)
     m = t.m
     view = m.view
     owner = t.ownership.owner
@@ -677,7 +692,9 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering; field_pass=true
         owned = [p for (p, name) in enumerate(view.coordinates)
             if _brm_nlme_owned(name, record.declaration)]
         reason = if record.kind === :gmrf_footprint
-            "learned GMRF centering covers unit-owned read-pair states under field_states=:units"
+            "learned centering covers a read-pair GMRF's unit-owned states " *
+                "(field_states=:units) under LearnedCentering(; fields=true); its other " *
+                "states keep their packed coordinates"
         elseif record.kind === :car
             "the structured CAR prior specifies edge differences and component sums, " *
                 "so SVI holds the field in its sampled coordinates"

@@ -86,7 +86,8 @@ function _brm_svi_field_sweep(t, centering)
     index = Dict(row.coordinate => k for rows in centering.cells for (k, row) in enumerate(rows)
         if row.kind === :gmrf)
     absent = _brm_svi_absent_fields(t, state)
-    isempty(index) && isempty(absent.by_position) && return t
+    # Packed states need no map: neither this window's nor an absent owner's.
+    isempty(index) && all(source -> source.c == 1.0, values(absent.by_position)) && return t
     authored = t.fields !== nothing
     fields = map(state.fields) do field
         cell = [get(index, t.m.view.coordinates[j], 0) for j in field.positions]

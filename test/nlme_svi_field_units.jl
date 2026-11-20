@@ -110,9 +110,20 @@ end
 
 @testset "the public fit runs, reads back and continues" begin
     m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
-    controls = (; batch_size=3, max_iterations=40, ndraws=5, separator=:none, field_states=:units)
+    controls = (; batch_size=3, max_iterations=40, ndraws=5, separator=:none, field_states=:units,
+        centering=LearnedCentering(; fields=true))
     fit = brm_svi_fit(m; rng=Xoshiro(2), threads=1, controls...)
     @test fit.diagnostics.iterations == 40
+    @test count(cell -> cell.kind === :gmrf, fit.diagnostics.centering.cells) == length(states)
+    # Without `fields=true` the states keep their packed coordinates, and the
+    # report says how to centre them.
+    packed = brm_svi_fit(m; rng=Xoshiro(2), threads=1, controls..., max_iterations=2,
+        centering=LearnedCentering())
+    @test !any(cell -> cell.kind === :gmrf, packed.diagnostics.centering.cells)
+    @test any(row -> occursin("fields=true", row.reason) &&
+        any(name -> occursin(".field.", string(name)), row.coordinates),
+        packed.diagnostics.centering.uncentered)
+    @test !hasproperty(packed.diagnostics.sampling, :field_neighbor_calls)
     @test all(isfinite, fit.diagnostics.elbo)
     check_field_start_and_projection(m, fit)
     @test size(fit.draws, 1) == length(names)
@@ -254,10 +265,12 @@ end
 Threads.nthreads() > 1 && @testset "a run is the same at any number of tasks" begin
     m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
     controls = (; batch_size=3, max_iterations=25, ndraws=4, separator=:none, field_states=:units)
-    one = brm_svi_fit(m; rng=Xoshiro(4), threads=1, controls...)
-    two = brm_svi_fit(m; rng=Xoshiro(4), threads=2, controls...)
-    @test one.diagnostics.elbo == two.diagnostics.elbo
-    @test one.draws == two.draws
+    for centering in (LearnedCentering(), LearnedCentering(; fields=true))
+        one = brm_svi_fit(m; rng=Xoshiro(4), threads=1, controls..., centering)
+        two = brm_svi_fit(m; rng=Xoshiro(4), threads=2, controls..., centering)
+        @test one.diagnostics.elbo == two.diagnostics.elbo
+        @test one.draws == two.draws
+    end
 end
 
 @testset "a fixed field law needs only its bound coefficient rows" begin
@@ -280,11 +293,13 @@ end
     m = brm_nlme_model(rk_fixed; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:subjects)
     check_centered_field(m, rk_fixed)
     fit = brm_svi_fit(m; rng=Xoshiro(23), batch_size=2, max_iterations=3, ndraws=2,
-        separator=:none, field_states=:units, unit_reoptimize=1)
+        separator=:none, field_states=:units, unit_reoptimize=1,
+        centering=LearnedCentering(; fields=true))
     @test all(isfinite, fit.draws)
     saved = brm_svi_checkpoint(fit)
     start = brm_svi_combine(m, [saved]; field_states=:units)
-    initialized = brm_svi_fit(m; start, field_states=:units, max_iterations=0, ndraws=0)
+    initialized = brm_svi_fit(m; start, field_states=:units, max_iterations=0, ndraws=0,
+        centering=LearnedCentering(; fields=true))
     state = brm_svi_checkpoint(initialized)
     source = BRM._brm_svi_source("field test", state, "initialized fit")
     @test initialized.diagnostics.start.applied.units == length(m.view.levels)
@@ -370,7 +385,7 @@ end
     opts = (; threads=1,batch_size=2,max_iterations=7,ndraws=3,unit_curvature=:pair)
     fresh = brm_svi_fit(field_model(data); opts...,ad_backend=FIELD_AD,subject_group=:site,
         unit_partition=:connected,field_states=:units,separator=:none,rng=Xoshiro(303),
-        centering=LearnedCentering(;delay=false))
+        centering=LearnedCentering(;delay=false,fields=true))
     keep = 1:2:length(data.y)
     newdata = (;east=data.east[keep],north=data.north[keep],time=data.time[keep],
         site=data.site[keep],x=0.2 .- data.x[keep],y=randn(Xoshiro(301),length(keep)),
@@ -396,4 +411,44 @@ end
     @test brm_svi_checkpoint(absent).units[label].M == saved.M
     check_field_window(state,absent)
 
+end
+
+
+@testset "packed field states stream under learned centering of the other cells" begin
+    data = station_data(; stations=4, seed=7)
+    opts = (; threads=1, batch_size=2, max_iterations=7, ndraws=3, unit_curvature=:pair)
+    fresh = brm_svi_fit(field_model(data); opts..., ad_backend=FIELD_AD, subject_group=:site,
+        unit_partition=:connected, field_states=:units, separator=:none, rng=Xoshiro(403),
+        centering=LearnedCentering(; delay=false))
+    @test !isempty(fresh.diagnostics.centering.cells)
+    @test !any(cell -> cell.kind === :gmrf, fresh.diagnostics.centering.cells)
+    state = brm_svi_checkpoint(fresh)
+    @test state.layout.centering.fields === false
+    # One station has no observation in the new window.
+    label = ("s1",)
+    keep = [j for j in 1:2:length(data.y) if data.site[j] != only(label)]
+    window = (; east=data.east[keep], north=data.north[keep], time=data.time[keep],
+        site=data.site[keep], x=0.2 .- data.x[keep], y=randn(Xoshiro(401), length(keep)),
+        state=collect(eachindex(keep)), nb=data.nb)
+    update = brm_svi_fit(state, field_model(window); opts..., ad_backend=FIELD_AD, rng=Xoshiro(404))
+    @test all(isfinite, update.draws)
+    @test !any(cell -> cell.kind === :gmrf, update.diagnostics.centering.cells)
+    @test !hasproperty(update.diagnostics.sampling, :field_neighbor_calls)
+    @test !(label in update.diagnostics.unit_levels)
+    carried = brm_svi_checkpoint(update)
+    @test carried.units[label].M == state.units[label].M
+    @test carried.layout.centering.fields === false
+    m = update.diagnostics.model
+    paused = brm_svi_fit(state, m; opts..., rng=Xoshiro(404), stop_after=2)
+    resumed = brm_svi_resume(m, paused; threads=1, ndraws=3)
+    @test resumed.diagnostics.elbo == update.diagnostics.elbo
+    @test resumed.draws == update.draws
+    # A state saved with learned field coordinates keeps them in the next window.
+    learned = brm_svi_fit(field_model(data); opts..., ad_backend=FIELD_AD, subject_group=:site,
+        unit_partition=:connected, field_states=:units, separator=:none, rng=Xoshiro(403),
+        centering=LearnedCentering(; delay=false, fields=true))
+    kept = brm_svi_fit(brm_svi_checkpoint(learned), field_model(window); opts...,
+        ad_backend=FIELD_AD, rng=Xoshiro(404))
+    @test brm_svi_checkpoint(kept).layout.centering.fields === true
+    @test any(cell -> cell.kind === :gmrf, kept.diagnostics.centering.cells)
 end

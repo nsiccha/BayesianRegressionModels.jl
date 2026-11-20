@@ -49,7 +49,8 @@ include("svi_field_fixture.jl")
     options = (; field_states=:units, separator=:none, batch_size=4, ndraws=2000, threads=1)
     for seed in (5, 6)
         plain = brm_svi_fit(m; options..., rng=Xoshiro(seed), centering=nothing, coupling=nothing)
-        learned = brm_svi_fit(m; options..., rng=Xoshiro(seed))
+        learned = brm_svi_fit(m; options..., rng=Xoshiro(seed),
+            centering=LearnedCentering(; fields=true))
         @test count(cell -> cell.kind === :gmrf, learned.diagnostics.centering.cells) == length(states)
         plain_error, learned_error = covariance_error(plain.draws), covariance_error(learned.draws)
         @info "Within-station covariance error" seed plain_error learned_error

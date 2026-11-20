@@ -159,8 +159,8 @@ do not use that plate or embedded-Laplace surface. `field_states=:units`
 lets supported field states become SVI units; see the [SVI example](variational-inference.md).
 An SVI checkpoint with unit-owned states can take new observations at the
 fitted positions, times and channels. Retained coordinates keep their owners.
-The new window uses the saved joint approximation as its prior. With learned
-centering it retains each state's fitted control. A station absent from the window
+The new window uses the saved joint approximation as its prior. With
+`LearnedCentering(; fields=true)` it retains each state's fitted control. A station absent from the window
 still contributes draws from its saved factor conditional on the globals when
 other stations read its field. Adding field states requires rebuilding the fit.
 Embedded Laplace is an explicit mesh integration choice. Large operator
