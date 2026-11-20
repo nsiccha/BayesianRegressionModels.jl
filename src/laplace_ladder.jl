@@ -10,6 +10,8 @@
 #   4  effects given the point: Laplace draws through the factor
 #   5a the population's curvature at the point: a labelled diagnostic, never
 #      the delivered posterior
+#   5c deterministic integration of the Laplace marginal over a grid or CCD
+#      around the point (`brm_laplace_integration`, design `0r49iwd`)
 #   5b Sampling the Laplace marginal, the effects drawn through the factor
 #   6  exact MCMC on the full model, from rung 5
 #
@@ -22,7 +24,7 @@
         start = nothing, draws = 1000, conditional = 0, rng = Random.default_rng(),
         continue_from = nothing, subject_group = nothing, nested_groups = (;),
         shared_groups = (), saem_options = nothing, sampler = nothing,
-        max_cell_width = 128) -> NamedTuple
+        integration = (;), max_cell_width = 128) -> NamedTuple
 
 A staged fit of `rk` over its sparse embedded Laplace ([`brm_laplace_problem`](@ref)
 with `integrate`, by default [`brm_laplace_plan`](@ref)'s choice). It climbs the
@@ -56,12 +58,32 @@ that starts the next:
    of the Laplace gradient: a dense matrix over the population coordinates
    only, labelled a diagnostic. Its standard errors are never the delivered
    posterior. Above 128 population coordinates this dense diagnostic is
-   skipped with a reason. **(5b) Sampling the Laplace marginal:** `sampler(problem, init,
+   skipped with a reason. **(5c) Integrating the Laplace marginal**
+   ([`brm_laplace_integration`](@ref)): a grid (up to two population
+   coordinates) or a central composite design (three or more) around the
+   point, weighted by the Laplace marginal, with `draws` packed draws (design
+   points resampled by weight, the integrated effects drawn through the
+   factor). When every formula coefficient has a Normal prior of constant mean
+   and scale, 5c integrates the coefficients with the effects, as INLA does
+   (`integrate = (..., :coefficients)`). Its design then spans only the other
+   population coordinates (scales, correlations, dispersions), and it starts
+   from that target's own marginal mode, found from the point. Otherwise it
+   integrates the ladder's problem at the point with 5a's curvature, and its
+   check's `coefficient_reason` says why. It runs when at most
+   `integration.max_dimension` population coordinates (default 10) remain, and
+   is otherwise skipped with its reason. `integration` passes keywords to
+   `brm_laplace_integration` (`design`, `step`, `max_log_drop`, `f0`,
+   `max_dimension`, ...), plus `coefficients = false` to keep the coefficients
+   outer. `integration = nothing` skips the rung. Without a sampler its draws
+   are the fit's. **(5b) Sampling the Laplace marginal:** `sampler(problem, init,
    rng)` draws the population coordinates from the sparse problem started at
    the point, and each draw's integrated effects are drawn through the factor.
    Its check's `comparison` reports the sampled mean and standard deviation,
    the mean shift in curvature standard errors, and the ratio of standard
-   deviations, in `problem.population` order.
+   deviations, in `problem.population` order; when 5c ran, also the mean
+   shift in 5c's standard deviations (`integration_mean_shift`) and the ratio
+   of standard deviations to 5c's (`integration_sd_ratio`), 5c's moments taken
+   from its draws when its target integrated the coefficients.
 6. **Exact:** `sampler` on the full model ([`rk_logdensity_problem`](@ref)),
    started from the last draw of the highest rung below.
 
@@ -86,8 +108,9 @@ or the automatic defaults. Replanning and continuation retain that policy;
 continuation uses the existing target and does not change numerical options.
 
 Returns `(; draws, point, problem, plan, rungs, ladder)`:
-- `draws`: the packed draws of the highest sampling or point rung climbed
-  (coordinates × draws); the curvature diagnostic keeps rung 4's draws;
+- `draws`: the packed draws of the highest sampling, integration or point
+  rung climbed (coordinates × draws): 5b's, else 5c's, else rung 4's; the
+  curvature diagnostic draws nothing;
 - `point`: the population point (rung 3's, else rung 2's);
 - `problem`, `plan`: the sparse problem and its plan;
 - `rungs`: each rung's result;
@@ -102,7 +125,11 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         start=nothing, draws::Integer=1000, conditional::Integer=0,
         rng=Random.default_rng(), continue_from=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), saem_options=nothing,
-        sampler=nothing, max_cell_width=128, solver=nothing, matrixfree=nothing)
+        sampler=nothing, integration=(;), max_cell_width=128, solver=nothing,
+        matrixfree=nothing)
+    integration === nothing || integration isa NamedTuple || throw(ArgumentError(
+        "brm_ladder_fit: integration = $(repr(integration)); pass a NamedTuple of " *
+        "brm_laplace_integration keywords, or nothing to skip rung 5c"))
     1 <= upto <= 6 || throw(ArgumentError(
         "brm_ladder_fit: upto = $upto; the ladder's rungs are 1 to 6"))
     rungs = continue_from === nothing ? NamedTuple[] : copy(continue_from.rungs)
@@ -237,6 +264,29 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
                 standard_errors=curvature.standard_errors))
         end
     end
+    if upto >= 5 && !named(5, :population_integration)
+        result = integration === nothing ?
+            (; reason="the call passes integration = nothing") :
+            _brm_ladder_integration(backend, p, rungs, integration; ad_backend, draws,
+                rng, conditional, max_cell_width, solver, matrixfree)
+        if haskey(result, :out)
+            out, q = result.out, result.problem
+            # 5c's moments over the ladder problem's coordinates, for 5b's check
+            P = out.draws[p.population, :]
+            moments = q === p ? (; mean=out.mean, sd=out.sd) :
+                (; mean=vec(mean(P; dims=2)), sd=vec(std(P; dims=2)))
+            push!(rungs, (; rung=5, name=:population_integration, point=out.point,
+                out.draws, integration=out, problem=q, result.coefficients, moments))
+            push!(ladder, (; rung=5, name=:population_integration, out.design,
+                names=q.names, points=size(out.z, 2), out.ess, out.mean, out.sd,
+                out.log_evidence, out.diagnostics.evaluations, out.diagnostics.nonfinite,
+                out.diagnostics.max_gain, result.coefficients,
+                coefficient_reason=result.coefficient_reason))
+        else
+            push!(rungs, (; rung=5, name=:population_integration, skipped=true, result.reason))
+            push!(ladder, (; rung=5, name=:population_integration, skipped=true, result.reason))
+        end
+    end
     no_sampler = "pass `sampler = (problem, init, rng) -> draws` (dimension × draws), " *
         "for example `Matrix(adaptive_warmup_mcmc(rng, problem; init).posterior_position)` " *
         "with WarmupHMC"
@@ -258,6 +308,14 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
             comparison = (; mean=sample_mean, standard_deviations=sample_sd,
                 mean_shift_in_standard_errors=(sample_mean .- point) ./ curvature.standard_errors,
                 standard_deviation_ratio=sample_sd ./ curvature.standard_errors)
+            integrated = [r for r in rungs if r.name === :population_integration &&
+                !get(r, :skipped, false)]
+            if !isempty(integrated)
+                o = only(integrated).moments
+                comparison = (; comparison...,
+                    integration_mean_shift=(sample_mean .- o.mean) ./ o.sd,
+                    integration_sd_ratio=sample_sd ./ o.sd)
+            end
             push!(ladder, (; rung=5, name=:population_sampling, method=sampled.method, draws=size(P, 2),
                 conditional, newton_steps=maximum(out.diagnostics.newton_steps), comparison))
         end
@@ -304,6 +362,75 @@ function _brm_ladder_replan(p, u; ad_backend, rng)
     p.plan = r.plan
     p, r.plan, switched
 end
+
+# Rung 5c. Its target integrates the formula's coefficients with the effects
+# when every one has a Normal prior of constant mean and scale (decision
+# `0r49iwd`, prong `coordinates`; `integrate = (..., :coefficients)`), so its
+# design spans only the other population coordinates, and it starts from that
+# target's own marginal mode, found from the ladder's point. Otherwise, or with
+# `integration.coefficients = false`, it integrates the ladder's problem at the
+# ladder's point with 5a's curvature. Returns `(; out, problem, coefficients,
+# coefficient_reason)` or `(; reason)` when the rung is skipped.
+function _brm_ladder_integration(backend, p, rungs, integration; ad_backend, draws, rng,
+        conditional, max_cell_width, solver, matrixfree)
+    keywords = Base.structdiff(integration, NamedTuple{(:coefficients,)})
+    bound = get(integration, :max_dimension, 10)
+    records = get(integration, :coefficients, true) ?
+        [r for r in _rk_coordinate_records(backend) if r.kind === :population] : NamedTuple[]
+    names = Symbol[_brm_spl_coefficient_name(r) for r in records]
+    bad = [r for r in records if _brm_spl_coefficient_prior(r) === nothing]
+    coefficient_reason = !get(integration, :coefficients, true) ?
+            "the call passes integration = (; coefficients = false)" :
+        isempty(records) ? "the model has no population coefficient with its own prior" :
+        !isempty(bad) ? "the coefficient `$(first(bad).coefficient)` of " *
+            "`$(first(bad).predictor)` has the prior `$(first(bad).prior)`, not a Normal " *
+            "of constant mean and scale" :
+        !all(in(p.names), names) ? "some coefficients are not population coordinates here" :
+        nothing
+    u = _brm_ladder_packed_point(rungs)
+    d = length(p.population)
+    if coefficient_reason === nothing
+        dq = d - length(names)
+        dq > bound && return (; reason="$dq population coordinates remain with the " *
+            "coefficients integrated, above the design bound max_dimension = $bound; " *
+            "sample the marginal instead (5b)")
+        dq == 0 && return (; reason="no population coordinate remains once the " *
+            "coefficients are integrated, so there is nothing to integrate over")
+        policy = p.plan isa BRMLaplacePlan ? p.plan.algebra_policy :
+            (; solver=:auto, matrixfree=MatrixFreeLaplace())
+        q = try
+            _brm_sparse_laplace_problem(backend, unique([p.integrate; :coefficients]);
+                ad_backend, tol=p.tol, maxiter=p.maxiter,
+                declarations=Set([[b.declaration for b in p.blocks]; names]),
+                max_cell_width, solver=something(solver, policy.solver),
+                matrixfree=something(matrixfree, policy.matrixfree))
+        catch e
+            e isa BRMNLMEViewError || rethrow()
+            coefficient_reason = sprint(showerror, e)
+            nothing
+        end
+        if q !== nothing
+            point = brm_laplace_mode(q; init=u[q.population]).draws[q.population, 1]
+            out = brm_laplace_integration(q;
+                merge((; point, draws, rng, conditional), keywords)...)
+            return (; out, problem=q, coefficients=names, coefficient_reason)
+        end
+    end
+    d > bound && return (; reason="the population has $d coordinates, above the design " *
+        "bound max_dimension = $bound; sample the marginal instead (5b)")
+    curvature = only(r for r in rungs if r.name === :population_curvature)
+    get(curvature, :skipped, false) && return (; curvature.reason)
+    curvature.positive_definite || return (; reason="the curvature at the point is not " *
+        "negative definite, so it cannot place a design")
+    # the caller's integration keywords override the ladder's
+    out = brm_laplace_integration(p; merge((; point=u[p.population], curvature, draws, rng,
+        conditional), keywords)...)
+    (; out, problem=p, coefficients=Symbol[], coefficient_reason)
+end
+
+# The complete packed point of the highest point rung (3, else 2, else 1).
+_brm_ladder_packed_point(rungs) = vec(last(sort([r for r in rungs
+    if !get(r, :skipped, false) && r.rung in (1, 2, 3)]; by=r -> r.rung)).draws[:, 1])
 
 # The highest point a rung reached: rung 3's SAEM estimate, else rung 2's mode,
 # else rung 1's start.

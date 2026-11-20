@@ -26,7 +26,7 @@ instead of failing at run time.
   dependency loaded with BRM, because every `car` term computes its scaling
   factor with it at preparation.
 
-## 0.2.346
+## 0.2.349
 
 - `using BayesianRegressionModels` no longer loads the packages only fitting
   reaches: KLU, Krylov, KrylovKit, LimitedLDLFactorizations, MCMCDiagnosticTools,
@@ -38,6 +38,64 @@ instead of failing at run time.
   without these never loads them. They stay hard dependencies, so nothing
   changes in a consumer's code or `[deps]`; an environment resolved before this
   version must be resolved again so its manifest records the new extensions.
+
+## 0.2.348
+
+- A record-component member formula can carry its own terms beside a margin
+  in the parent's correlated block, for example
+  `shift ~ 1 + (1 | parentblock(:p) | setting.site)`. The member keeps its
+  predictor, so `effect(shift, Intercept) ~ Normal(0, 1)` sets that member's
+  intercept prior. Earlier such a model built, but neither backend lowered it
+  when the member had only an intercept or stated an `effect` prior.
+  **Breaking:** A member formula that combined a covariate or a smooth with a
+  `parentblock` margin already lowered. Its parameters were named after a
+  generated `..._local` predictor and are now named after the authored one.
+  The density is unchanged; refit such a model to read its draws by name.
+- RKBRMI accepts an offset that gathers a model value at data rows, such as
+  `offset(level[pick])`, as SBBRMI does. A predictor with no data column,
+  group or response of its own takes its rows from that offset.
+
+## 0.2.347
+
+- `car(area; edges=(from, to), type=:icar, scaled=true)` is the variance-scaled
+  ICAR (Besag) field, R-INLA's `besag` with `scale.model = TRUE`: each area's
+  ICAR value is divided by `sqrt(s_c)`, the scaling factor of its connected
+  component, so `sd(lp, car(area))` is the field's marginal SD, and each island
+  has its own `Normal(0, sigma)` effect. It is the BYM2 field with its mixing
+  share held at 1. It works on SBBRMI, RKBRMI, adaptive centering and
+  `brm_laplace_problem(rk; integrate = (:area,))`. `scaled` defaults to `false`
+  for `:icar`, so existing models keep their meaning; `:bym2` is always scaled
+  and refuses `scaled=false`. The `rkppl_model(:car_icar_scaled)` body and
+  `StatisticalPreparation.car_graph`'s new `n_island` and `island_pos` fields
+  serve hand-written `@rkppl` models.
+
+## 0.2.346
+
+- `brm_laplace_integration(problem)` integrates a sparse Laplace problem's
+  marginal over its population coordinates deterministically, as R-INLA
+  does. It evaluates the marginal on a design around the mode, standardized
+  by the curvature there: a grid for up to two coordinates, a central
+  composite design for three or more. It weights each point by the Laplace
+  marginal and returns the weighted points and each coordinate's marginal
+  density table. On a grid it also returns the log evidence. Its packed draws
+  resample the design points by weight and draw the integrated effects
+  jointly at each point through the factor. It refuses above
+  `max_dimension = 10` coordinates.
+- `brm_laplace_problem(rk; integrate = (..., :coefficients))` and
+  `brm_laplace_plan` integrate the formula's population coefficients with the
+  effects, as INLA keeps fixed effects in the latent field. Each coefficient
+  becomes its own block. Every coefficient must have a Normal prior of
+  constant mean and scale. Automatic plans never integrate coefficients.
+- `brm_ladder_fit(...; upto = 5)` runs it as rung 5c after the curvature
+  diagnostic. When every coefficient has such a prior, the rung integrates the
+  coefficients too and starts from that target's own marginal mode. Its
+  design then spans only the remaining coordinates (scales, correlations,
+  dispersions). It runs when at most 10 coordinates remain. Pass keywords
+  through `integration = (; ...)`, including `coefficients = false`. Rung 5b's
+  comparison adds `integration_mean_shift` and `integration_sd_ratio`.
+  **Breaking:** without a `sampler`, `fit.draws` at `upto = 5` are rung 5c's
+  draws instead of rung 4's. Pass `integration = nothing` for the previous
+  result.
 
 ## 0.2.345
 

@@ -504,4 +504,85 @@ end
     @test sum(adapted) / 36 > 0.5
 end
 
+# A scaled ICAR field (`type=:icar, scaled=true`, snag brm-car-icar-has-d25d72ec):
+# its `phi` cells in emitted order (scale `sigma / sqrt(s_c)`, location 0), then the
+# island "g"'s `theta` cell (scale `sigma`, location the intercept). The independent
+# map is written from the emitted law (`_sb_car_icar_scaled`).
+const CAR_AC_SCALED_SB = SBBRMI(@brm(CAR_AC_DF, begin
+    mu ~ 1 + car(area; edges=(from, to), type=:icar, scaled=true)
+    y ~ Normal(mu, 1.0)
+end); mod=@__MODULE__)
+
+@testset "car scaled ICAR: phi cells by 1/sqrt(s_c), the island's theta on the intercept" begin
+    sb = CAR_AC_SCALED_SB
+    problem = car_ac_instantiate(sb)
+    sm = problem.model
+    names = BS.param_unc_names(sm)
+    block = only(BRM._adaptive_car_centering_blocks(sb, names))
+    phi_idx = indices_of(names, "car_mu_area_phi")
+    theta_i = only(indices_of(names, "car_mu_area_theta"))
+    intercept_i = index_of(names, "pop_mu_beta_pop.1")
+    @test block.scaled && !block.bym2
+    @test block.structured == phi_idx
+    @test block.unstructured == [theta_i]
+    @test block.island_area == [7]
+    @test block.intercept == intercept_i
+    @test BRM._adaptive_car_n_cells(block) == 8
+    inv_scale = sb.data[:car_mu_area_inv_scale]
+    area_of = [findfirst(==(j), sb.data[:car_mu_area_struct_idx]) for j in 1:7]
+    function manual(x, c)
+        sigma = exp(x[index_of(names, "car_mu_area_sigma")])
+        y, ljac = copy(x), 0.0
+        for (j, i) in enumerate(phi_idx)
+            s = sigma * sqrt(inv_scale[area_of[j]])
+            y[i] = x[i] / s^c[j]
+            ljac -= c[j] * log(s)
+        end
+        y[theta_i] = (x[theta_i] - c[8] * x[intercept_i]) / sigma^c[8]
+        ljac -= c[8] * log(sigma)
+        ljac, y
+    end
+    wrapped = adaptive_centering_problem(sb, problem, DI.AutoEnzyme())
+    ir = WarmupHMC.reparametrizer(wrapped)
+    state = ir.pairs[1][2].args[1].state
+    @test first.(ir.pairs) == vcat(phi_idx, theta_i)
+    x = 0.3 .* randn(Xoshiro(17), length(names))
+    for c in (collect(range(0.1, 0.9; length=8)), ones(8))
+        set_car_sources!(state, ir, c)
+        ljac, mapped = ir(x)
+        expected_ljac, expected = manual(x, c)
+        @test ljac ≈ expected_ljac atol=1e-13
+        @test mapped ≈ expected atol=1e-13
+        inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(ir, mapped)
+        @test inverse_ljac ≈ -ljac atol=1e-13
+        @test roundtrip ≈ x atol=1e-13
+    end
+    # c = 1: each `phi` source is its area's effect, the island's its total.
+    set_car_sources!(state, ir, ones(8))
+    _, model_position = ir(x)
+    cnames = BS.param_names(sm; include_tp=true, include_gq=false)
+    constrained = BS.param_constrain(sm, model_position; include_tp=true, include_gq=false)
+    effects = constrained[indices_of(cnames, "car_mu_area_effects")]
+    intercept = constrained[index_of(cnames, "pop_mu_beta_pop.1")]
+    @test x[phi_idx] ≈ effects[area_of] atol=1e-12
+    @test x[theta_i] ≈ intercept + effects[7] atol=1e-12
+    # Exact density at mixed controls, and its Enzyme gradient.
+    controls = collect(range(0.1, 0.9; length=8))
+    set_car_sources!(state, ir, controls)
+    ljac, model_position = ir(x)
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test lp ≈ ljac + LogDensityProblems.logdensity(problem, model_position) atol=1e-10
+    @test gradient ≈ finite_difference(v -> LogDensityProblems.logdensity(wrapped, v), x;
+        step=1e-5) atol=3e-5 rtol=3e-5
+    rows = adaptive_centering_controls(wrapped, sb)
+    @test [r.term for r in rows] == vcat(fill(1, 7), 2)
+    @test [r.level for r in rows] == ["a", "b", "c", "d", "h", "e", "f", "g"]
+    # The plain-data map carries each cell's scale shift.
+    plan = adaptive_centering_cells(sb, names)
+    car_cells = filter(c -> c.family === :car, plan.cells)
+    @test [c.scale.log_scale_shift for c in car_cells] ≈
+        vcat(log.(inv_scale[area_of]) ./ 2, 0.0)
+    @test only(b for b in plan.blocks if b.family === :car).scaled
+end
+
 println("adaptive_car_centering.jl: all testsets passed")

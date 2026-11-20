@@ -126,6 +126,12 @@ and correlated vector priors are never admitted. Derived Normal observations
 stay sampled automatically because their dependence on the vector can be nonlinear;
 name the vector in `integrate` to opt in.
 
+The formula's population coefficients are terms only when `:coefficients` is
+named in `integrate` or `sample`, so an automatic plan never integrates them.
+Named in `integrate`, each coefficient with a Normal prior of constant mean
+and scale is its own term over the grouping `:coefficients`, integrated with
+the effects as INLA does. A coefficient with another prior is `:never`.
+
 - **integrated:** every row reading the term is recognized as affine Normal,
   with scale fixed conditional on the sampled coordinates. Its Laplace is exact
   with exact determinant algebra;
@@ -210,7 +216,11 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     forced = integrate === :auto ? Symbol[] : Symbol[_brm_plan_names(integrate)...]
     sampled = Symbol[_brm_plan_names(sample)...]
     named(t, names) = t.declaration in names || t.grouping in names
-    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT]
+    # Formula coefficients are terms only when `:coefficients` is named, so an
+    # automatic plan never integrates them (decision `0r49iwd`).
+    coefficients = :coefficients in forced || :coefficients in sampled
+    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT ||
+        (coefficients && r.kind === :population)]
     isempty(records) && _brm_nlme_error("brm_laplace_plan: the model has no random-effect " *
         "block, `cdar` walk, `car` field or declared vector to integrate")
     terms = map(records) do r
@@ -362,6 +372,8 @@ function _brm_plan_never(r)
         return "a Student-t block's draws are not Gaussian"
     r.kind === :car && r.separation !== nothing &&
         return "a `car_units` field's draws are not integrated"
+    r.kind === :population && _brm_spl_coefficient_prior(r) === nothing &&
+        return "its prior `$(r.prior)` is not a Normal of constant mean and scale"
     nothing
 end
 

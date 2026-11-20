@@ -1649,11 +1649,16 @@ end
 # of one declaration is one program (principle `0ikeidi`): `phi` has
 # `sum(comp_size)` entries and the components' sums are one vector factor
 # `Normal.(0, 0.001 .* comp_size)` (RKPPL 0.1.145), as `rkppl_model(:car_bym2)`
-# spells it. Islands read the zero padding slot of `phi`.
+# spells it. Islands read the zero padding slot of `phi`. A scaled ICAR field
+# (`scaled=true`) is the BYM2 field with its mixing share held at 1:
+# `sigma .* (sqrt.(inv_scale) .* phi_full .+ vcat(theta, 0.0)[island_pos])`, one
+# standard-normal `theta` per island, whose number is the length of the data
+# vector `island_nodes`, so a graph without islands is the same program.
 function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing,
         bindings=Pair{Symbol,Any}[])
     options = term.options
     bym2 = options.type === :bym2
+    scaled = _brm_car_scaled_icar(options)
     separation = get(options, :separation, nothing)
     sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
     rho_prior = bym2 ? _rk_ast_param_law(options.rho_param, bindings, taken) : nothing
@@ -1672,6 +1677,10 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     if bym2
         inv_scale = _rk_block_argument!(block, :inv_scale, options.inv_scale)
         is_struct = _rk_block_argument!(block, :is_struct, options.is_struct)
+    elseif scaled
+        inv_scale = _rk_block_argument!(block, :inv_scale, options.inv_scale)
+        island_pos = _rk_block_argument!(block, :island_pos, options.island_pos)
+        island_nodes = _rk_block_argument!(block, :island_nodes, options.island_nodes)
     end
     arguments = separation === nothing ? nothing :
         _rk_ast_car_separation_arguments!(block, separation, indices)
@@ -1683,6 +1692,11 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
         rho, theta = _rk_block_local!(block, :rho), _rk_block_local!(block, :theta)
         push!(block.statements, _rk_ast_hyper_statement(rho, rho_prior),
             Expr(:call, :.~, Expr(:ref, theta, Expr(:call, :axes, inv_scale, 1)),
+                _rk_ast_dotted(:Normal, 0, 1)))
+    elseif scaled
+        theta = _rk_block_local!(block, :theta)
+        push!(block.statements,
+            Expr(:call, :.~, Expr(:ref, theta, Expr(:call, :axes, island_nodes, 1)),
                 _rk_ast_dotted(:Normal, 0, 1)))
     end
     if separation === nothing
@@ -1705,7 +1719,16 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     end
     push!(block.statements,
         Expr(:(=), field, Expr(:ref, Expr(:call, :vcat, phi, 0.0), struct_pos)))
-    value = bym2 ?
+    if scaled
+        # Every `vcat` operand is a local of its own (see `_rk_ast_car_separated!`).
+        island_effects = _rk_block_local!(block, :theta_full)
+        push!(block.statements, Expr(:(=), island_effects,
+            Expr(:ref, Expr(:call, :vcat, theta, 0.0), island_pos)))
+    end
+    value = scaled ?
+        Expr(:call, :.*, sigma, Expr(:call, :.+,
+            Expr(:call, :.*, _rk_ast_dotted(:sqrt, inv_scale), field), island_effects)) :
+        bym2 ?
         Expr(:call, :.*, sigma, Expr(:call, :.+,
             Expr(:call, :.*, _rk_ast_dotted(:sqrt, Expr(:call, :.*, rho, inv_scale)), field),
             Expr(:call, :.*, _rk_ast_dotted(:sqrt, Expr(:call, :.-, 1.0,
@@ -1715,16 +1738,25 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     structured = separation === nothing ?
         "the ICAR field `$phi ~ ICAR(node1, node2)` over the areas' adjacency, with a soft sum-to-zero per connected component" :
         "the ICAR field `$phi`, separated into independent parts"
-    doc = @_rk_definition_doc """
+    doc = scaled ? @_rk_definition_doc("""
+        An areal (`car`) effect, the variance-scaled intrinsic CAR (ICAR) field.
+
+        Draws the marginal SD `$sigma`, one standard-normal island effect `$theta`
+        per island and $structured. Returns each row's area effect,
+        `$sigma .* (sqrt.(inv_scale) .* $field .+ $island_effects)` at the row's area
+        `$rows`, where `inv_scale` is `1 / s_c` of the area's connected component.""") :
+        @_rk_definition_doc """
         An areal (`car`) effect$(bym2 ? " in the BYM2 convolution" : ", intrinsic CAR (ICAR)").
 
         Draws the scale `$sigma`$(bym2 ? ", the mixing weight `$rho`, unstructured effects `$theta ~ Normal(0, 1)`" : "")
         and $structured. Islands read 0. Returns each row's area effect,
         $(bym2 ? "`$sigma .* (sqrt.($rho .* inv_scale) .* $field .+ sqrt.(1 .- $rho .* is_struct) .* $theta)`" :
             "`$sigma .* $field`") at the row's area `$rows`."""
-    call = _rk_ast_block_call!(definitions, taken, bym2 ? "brm_car_bym2" : "brm_car_icar",
+    call = _rk_ast_block_call!(definitions, taken,
+        bym2 ? "brm_car_bym2" : scaled ? "brm_car_icar_scaled" : "brm_car_icar",
         block, Expr(:ref, effects, rows); doc)
-    locals = bym2 ? (; sigma, rho, phi, theta, separated...) : (; sigma, phi, separated...)
+    locals = bym2 ? (; sigma, rho, phi, theta, separated...) :
+        scaled ? (; sigma, phi, theta, separated...) : (; sigma, phi, separated...)
     call, locals
 end
 
@@ -2332,7 +2364,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 push!(stmts, Expr(:call, :~, term.options.value, call))
                 _rk_coordinate_record!(coordinates, (; kind=:car,
                     declaration=term.options.value, predictor=predictor.name,
-                    area=term.options.source, type=term.options.type, locals,
+                    area=term.options.source, type=term.options.type,
+                    scaled=get(term.options, :scaled, term.options.type === :bym2),
+                    n_island=get(term.options, :n_island, 0),
+                    island_areas=get(term.options, :island_areas, Int[]), locals,
                     separation=get(term.options, :separation, nothing)))
                 _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
                     term.options.type === :bym2 ?

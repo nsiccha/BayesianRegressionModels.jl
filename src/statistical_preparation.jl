@@ -573,6 +573,10 @@ Fields:
   BYM2 scaling factor `s_c` is the geometric mean of the diagonal of the generalized
   inverse of the component's ICAR precision (Riebler et al. 2016); `scaling` holds the
   `s_c`.
+- `n_island`: the number of islands; `island_pos`: each area's position among the
+  islands in sorted label order, `n_island + 1` for an area with neighbours, so
+  `vcat(theta, 0.0)[island_pos]` gives each island its own `theta` and every other
+  area 0, as the `rkppl_model(:car_icar_scaled)` body reads them.
 
 Self-loops, repeated pairs, unequal edge vectors, mixed label kinds and a graph with
 no edges are refused, as by the `car` term.
@@ -588,9 +592,10 @@ function car_graph(area::AbstractVector, from::AbstractVector, to::AbstractVecto
     positions = Int[searchsortedfirst(graph.nodes, label) for label in area_labels]
     struct_pos = Int[iszero(k) ? graph.n_struct + 1 : k for k in graph.struct_idx]
     is_struct = Float64[iszero(k) ? 0.0 : 1.0 for k in graph.struct_idx]
+    island_pos = Int[iszero(k) ? graph.n_island + 1 : k for k in graph.island_idx]
     return (; graph.nodes, graph.n_nodes, area = positions, graph.n_struct, graph.node1,
         graph.node2, graph.n_comp, graph.comp_start, graph.comp_size, struct_pos,
-        is_struct, graph.inv_scale, graph.scaling)
+        is_struct, graph.inv_scale, graph.scaling, graph.n_island, island_pos)
 end
 
 include("statistical_gp.jl")

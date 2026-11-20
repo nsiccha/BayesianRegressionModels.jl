@@ -439,10 +439,10 @@ function _brm_car_arguments(term)
     length(args) == 1 || error(
         "BRM term preparation: `car(area; edges=(from, to), type=...)` takes exactly " *
         "one area column, got $(length(args)) positional arguments")
-    extra = setdiff(keys(kw), (:edges, :nodes, :type))
+    extra = setdiff(keys(kw), (:edges, :nodes, :type, :scaled))
     isempty(extra) || error(
-        "BRM term preparation: `car` takes only `edges=`, `nodes=` and `type=`, " *
-        "got $(collect(extra))")
+        "BRM term preparation: `car` takes only `edges=`, `nodes=`, `type=` and " *
+        "`scaled=`, got $(collect(extra))")
     haskey(kw, :edges) || error(
         "BRM term preparation: `car(area; edges=(from, to), type=...)` needs `edges=`")
     haskey(kw, :type) || error(
@@ -460,8 +460,31 @@ function _brm_car_arguments(term)
         "BRM term preparation: `car(...; nodes=...)` must name one data vector " *
         "holding every area of the graph, got $(repr(nodes))",
         _brm_inline_gather_hint(nodes))
-    only(args), edges, nodes, kw.type
+    only(args), edges, nodes, kw.type, _brm_car_scaled(kw)
 end
+
+# `scaled=true` divides each area's ICAR value by `sqrt(s_c)`, the scaling factor
+# of its connected component, so `sd(lp, car(area))` is the field's marginal SD
+# (R-INLA's `besag` with `scale.model = TRUE`; Sørbye and Rue 2014), and gives
+# each island its own `Normal(0, sigma)` effect (Freni-Sterrantino et al. 2018):
+# the BYM2 field with its mixing share held at 1. BYM2 is scaled by definition,
+# since its mixing share is a share of the variance only when its ICAR part is
+# scaled (Riebler et al. 2016), so `scaled=false` is refused there.
+function _brm_car_scaled(kw)
+    scaled = get(kw, :scaled, kw.type === :bym2)
+    scaled isa Bool || error(
+        "BRM term preparation: `car(...; scaled=...)` must be `true` or `false`, " *
+        "got $(repr(scaled))")
+    kw.type === :bym2 && !scaled && error(
+        "BRM term preparation: `car(...; type=:bym2, scaled=false)` is refused: " *
+        "BYM2's mixing share is the spatial share of the variance only when its " *
+        "ICAR part is scaled (Riebler et al. 2016). For an unscaled field write " *
+        "`type=:icar`")
+    scaled
+end
+# Whether a prepared `car` term's state (or an RK plan term's options) is the
+# variance-scaled ICAR field, `type=:icar, scaled=true`.
+_brm_car_scaled_icar(st) = st.type === :icar && get(st, :scaled, false) === true
 
 # Connected components of the structured nodes, each as the ascending node list,
 # ordered by their smallest node.
@@ -578,9 +601,16 @@ function _brm_car_graph(area_labels, from_labels, to_labels, node_labels=nothing
             inv_scale[structured[p]] = 1 / s
         end
     end
+    # Islands (areas without neighbours) numbered in sorted label order: a
+    # scaled ICAR field gives each its own standard-normal `theta`.
+    island_idx = zeros(Int, length(nodes))
+    n_island = 0
+    for k in eachindex(island_idx)
+        struct_idx[k] == 0 && (island_idx[k] = (n_island += 1))
+    end
     (; nodes, n_nodes=length(nodes), n_struct=length(structured),
        n_edges=length(pairs), n_comp=length(components), node1, node2,
-       comp_start, comp_size, struct_idx, inv_scale, scaling)
+       comp_start, comp_size, struct_idx, inv_scale, scaling, island_idx, n_island)
 end
 
 # The graph is a fit of its area and edge columns: an RK frozen replay builds it
@@ -639,7 +669,7 @@ function _brm_car_row_idx(nodes, area_labels; prefix="BRM term preparation")
 end
 
 function _brm_prepare_term(term::ExprColumn{typeof(car)}, target::Symbol, context)
-    area, (from, to), nodes, type = _brm_car_arguments(term)
+    area, (from, to), nodes, type, scaled = _brm_car_arguments(term)
     source, area_raw = _brm_term_data(:car, area, context)
     from_source, from_raw = _brm_term_data(:car, from, context)
     to_source, to_raw = _brm_term_data(:car, to, context)
@@ -662,7 +692,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(car)}, target::Symbol, contex
     mixing_prior = type === :bym2 ? something(mixing_spec,
         (; expression=ExprColumn(Beta, 0.5, 0.5))).expression : nothing
     _BRMPreparedTerm(car, source,
-        (; target, type, graph..., row_idx, edge_sources=(from_source, to_source),
+        (; target, type, scaled, graph..., row_idx, edge_sources=(from_source, to_source),
            sd_prior, mixing_prior),
         sources)
 end

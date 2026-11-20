@@ -836,6 +836,11 @@ function _brmd_builtin_call(::typeof(car),c)
         equations=("b_k=\\sigma\\left(\\sqrt{\\rho/s_{c(k)}}\\,\\phi_k+\\sqrt{1-\\rho}\\,\\theta_k\\right),\\quad\\theta_k\\sim\\mathcal N(0,1)",
             "\\log p(\\phi)=-\\tfrac12\\sum_{i\\sim j}(\\phi_i-\\phi_j)^2+\\sum_c\\log\\mathcal N\\!\\left(\\textstyle\\sum_{k\\in c}\\phi_k\\mid 0,\\,0.001\\,n_c\\right)"),
         covers=(c.id,)) :
+    get(c.keywords,:scaled,false)===true ? BRMDescriptionFragment(
+        prose=(common*" "*_brmd_text(c,:areal_icar_scaled),),
+        equations=("b_k=\\sigma\\,\\phi_k/\\sqrt{s_{c(k)}}\\ (d_k>0),\\quad b_k=\\sigma\\,\\theta_k\\ (d_k=0),\\quad\\theta_k\\sim\\mathcal N(0,1)",
+            "\\log p(\\phi)=-\\tfrac12\\sum_{i\\sim j}(\\phi_i-\\phi_j)^2+\\sum_c\\log\\mathcal N\\!\\left(\\textstyle\\sum_{k\\in c}\\phi_k\\mid 0,\\,0.001\\,n_c\\right)"),
+        covers=(c.id,)) :
     BRMDescriptionFragment(
         prose=(common*" "*_brmd_text(c,:areal_icar_isolated),),
         equations=("b_k=\\sigma\\,\\phi_k",

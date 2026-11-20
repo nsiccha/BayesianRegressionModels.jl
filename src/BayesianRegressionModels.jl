@@ -190,6 +190,7 @@ include("start_prior.jl")
 include("start_components.jl")
 include("laplace_start.jl")
 include("laplace_mode.jl")
+include("laplace_integration.jl")
 include("laplace_ladder.jl")
 include("nlme_fit.jl")
 include("nlme_two_stage.jl")
@@ -381,7 +382,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_nlme_loglikelihoods_and_gradients,
        BRMLaplaceProblem, BRMStructuredLaplaceProblem, BRMSparseLaplaceProblem,
        brm_laplace_problem, brm_laplace_mode, brm_laplace_plan, BRMLaplacePlan,
-       brm_ladder_fit,
+       brm_ladder_fit, brm_laplace_integration,
        brm_laplace_draws,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 export brm_transform_constants
@@ -458,7 +459,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        ranef_correlated_draws_completion,
        brm_col_variances, brm_r2d2_scale, brm_cat_variances, brm_member_effects,
        multi_membership_intercept, multi_membership_correlated,
-       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
+       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_icar_scaled, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
        _sb_interval_censored_predictor,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,

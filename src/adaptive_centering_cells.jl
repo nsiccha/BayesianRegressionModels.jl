@@ -280,19 +280,19 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
     for b in _adaptive_cell_car_blocks(model, names, fields)
         bi = length(blocks) + 1
         push!(blocks, (; block=bi, family=:car, binding=b.logical, term=b.term,
-            type=b.bym2 ? :bym2 : :icar, areas=[_adaptive_cell_level(a) for a in b.areas],
-            target=0.0))
+            type=b.bym2 ? :bym2 : :icar, scaled=b.bym2 || b.scaled,
+            areas=[_adaptive_cell_level(a) for a in b.areas], target=0.0))
         for k in 1:_adaptive_car_n_cells(b)
             c = _adaptive_car_cell(b, k)
             area = _adaptive_car_area(b, k)
             push!(cells, (; cell=length(cells) + 1, family=:car, block=bi,
                 binding=b.logical, margin=(; predictor=b.logical, coefficient=b.term),
                 level=_adaptive_cell_level(b.areas[area]),
-                level_index=area, term=b.bym2 ? 2 : 1, effect=c.index,
+                level_index=area, term=_adaptive_car_term(b, k), effect=c.index,
                 name=names[c.index],
                 scale=(; sigma=_adaptive_cell_hyper(c.sigma, c.sigma_lower, c.sigma_upper),
                          rho=_adaptive_cell_hyper(c.rho, c.rho_lower, c.rho_upper),
-                         share=c.share),
+                         share=c.share, log_scale_shift=c.log_scale_shift),
                 location=(; intercept=c.intercept, phi=c.phi,
                             log_inv_scale=c.log_inv_scale)))
         end
@@ -380,12 +380,16 @@ known value (`lower == upper`); `omega2` holds the basis function's squared
 frequency per axis (`:exp_quad`), and `harmonic` its harmonic (`:periodic`).
 
 A `car` cell (`family = :car`, one per area; an `:icar` field's cells in its
-emitted `phi` order, a `:bym2` field's in sorted area order) has `cell`,
+emitted `phi` order, then a scaled `:icar` field's islands in sorted area order,
+a `:bym2` field's in sorted area order) has `cell`,
 `family`, `block`, `binding` (the predictor), `margin` (`(; predictor,
 coefficient)`, the coefficient being the term), `level` (the area's label) and
 `level_index`, `term` (1 for an `:icar` area's `phi`, 2 for a `:bym2` area's
-`theta`), `effect`, `name`, `scale = (; sigma, rho, share)` (`sigma` and `rho`
-each `(; coordinate, lower, upper)`; `rho.coordinate == 0` for `:icar`) and
+or a scaled `:icar` island's `theta`), `effect`, `name`,
+`scale = (; sigma, rho, share, log_scale_shift)` (`sigma` and `rho` each
+`(; coordinate, lower, upper)`; `rho.coordinate == 0` for `:icar`; the cell's scale
+is `sigma`, times `sqrt(1 - rho)` when `share`, times `exp(log_scale_shift)`,
+which is `1 / sqrt(s_c)` for a scaled `:icar` `phi` cell) and
 `location = (; intercept, phi, log_inv_scale)`.
 
 A `cdar` cell (`family = :cdar`, one per group × step innovation, group
@@ -407,7 +411,8 @@ An HSGP block (one per term, per level of a grouped term): `block`, `family`
 (`:hsgp`), `kind = :basis`, `binding` (the predictor), `term`, `level_index`, `n_basis`,
 `spectrum` and `target` (per basis function).
 A `car` block: `block`, `family` (`:car`), `binding` (the predictor), `term`,
-`type` (`:icar` or `:bym2`), `areas`, `target` (0). A `cdar` block: `block`,
+`type` (`:icar` or `:bym2`), `scaled` (`true` for `:bym2` and a scaled `:icar`),
+`areas`, `target` (0). A `cdar` block: `block`,
 `family` (`:cdar`), `binding`, `term`, `n_groups`, `n_steps`, `target` (0).
 
 A grouped HSGP level block has `family = :hsgp`, `kind = :levels`, `binding`,

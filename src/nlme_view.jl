@@ -1364,7 +1364,8 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                     "grouping `$group`; lower it with the subject labels as `car_units`")
             end
             # Each unit's interior draws `<field>.<z_u>.<j>`, then each area's
-            # BYM2 iid part `<field>.<theta>.<area>`.
+            # BYM2 iid part `<field>.<theta>.<area>`, or a scaled ICAR field's
+            # island effects `<field>.<theta>.<island>`, each its island's unit's.
             draws = [(Symbol(record.declaration, ".", z, ".", j), b.label)
                 for (b, z) in zip(separation.blocks, record.locals.z) if z !== nothing
                 for j in 1:b.ndraws]
@@ -1372,6 +1373,10 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             record.type === :bym2 && push!(parts,
                 ([(Symbol(record.declaration, ".", record.locals.theta, ".", k), label)
                     for (k, label) in enumerate(separation.node_units)], :iid))
+            _brm_car_scaled_icar(record) && push!(parts,
+                ([(Symbol(record.declaration, ".", record.locals.theta, ".", j),
+                   separation.node_units[k])
+                    for (j, k) in enumerate(record.island_areas)], :iid))
             for (coordinates, part) in parts
                 isempty(coordinates) && continue
                 family = length(families) + 1

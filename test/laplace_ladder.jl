@@ -3,7 +3,8 @@
 # starts the next; rung 2 is a stationary maximum of the marginal; rung 3 is
 # skipped and named without units (test/nlme_integrated.jl runs it); rung 4's
 # draws keep the point; rung 5a's curvature is
-# negative definite there and labelled a diagnostic; rungs 5b and 6 run with a
+# negative definite there and labelled a diagnostic; rung 5c integrates the
+# marginal over a design and its draws are the fit's; rungs 5b and 6 run with a
 # sampler (WarmupHMC here) and are named without one; a later call continues
 # from an earlier fit; `:auto` re-measures the plan at rung 2's point.
 # RUN: julia --project=test test/laplace_ladder.jl
@@ -32,8 +33,8 @@ end
     end)
     fit = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=5, draws=50, rng=Xoshiro(3))
     p = fit.problem
-    @test [r.rung for r in fit.rungs] == [1, 2, 3, 4, 5, 5]
-    @test [c.rung for c in fit.ladder] == [1, 2, 3, 4, 5, 5]
+    @test [r.rung for r in fit.rungs] == [1, 2, 3, 4, 5, 5, 5]
+    @test [c.rung for c in fit.ladder] == [1, 2, 3, 4, 5, 5, 5]
     @test fit.plan isa BRMLaplacePlan && p.plan === fit.plan
     # rung 1: the modes at the prior medians, a complete packed point
     r1 = fit.rungs[1]
@@ -58,9 +59,44 @@ end
     @test all(>(0), c.standard_errors)
     r5 = only(r for r in fit.rungs if r.name === :population_curvature)
     @test r5.covariance ≈ inv(-Symmetric(r5.hessian)) rtol=1e-8
-    @test fit.draws === r4.draws
+    # 5c integrates the two coefficients with the effects, so its CCD spans
+    # sigma and the two scales, from that target's own mode
+    r5c = only(r for r in fit.rungs if r.name === :population_integration)
+    c5c = fit.ladder[6]
+    @test c5c.name === :population_integration && c5c.design === :ccd
+    @test length(p.population) == 5
+    @test c5c.coefficients == [Symbol("pop_mu.beta_pop.1"), Symbol("pop_mu.beta_pop.2")]
+    @test c5c.coefficient_reason === nothing
+    q = r5c.problem
+    @test q !== p && length(q.population) == 3 && c5c.names == q.names
+    @test c5c.points == 1 + 6 + 8
+    @test norm(last(LogDensityProblems.logdensity_and_gradient(q, r5c.point))) < 1e-4
+    @test sum(r5c.integration.weights) ≈ 1 && c5c.nonfinite == 0
+    @test size(r5c.draws) == (length(p.u), 50)
+    @test all(>(0), vec(std(r5c.draws[p.population, :]; dims=2)))
+    @test fit.draws === r5c.draws
+    # with coefficients = false it integrates the ladder's problem with 5a's curvature
+    outer = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=5, draws=10, rng=Xoshiro(3),
+        integration=(; coefficients=false))
+    o5c = only(r for r in outer.rungs if r.name === :population_integration)
+    @test o5c.problem === outer.problem && size(o5c.integration.z, 2) == 1 + 10 + 16
+    @test o5c.integration.standardization.hessian ==
+        only(r for r in outer.rungs if r.name === :population_curvature).hessian
+    @test only(c for c in outer.ladder if c.name === :population_integration).coefficient_reason ==
+        "the call passes integration = (; coefficients = false)"
     # 5b needs a sampler, and is named without one
-    @test fit.ladder[6].name === :population_sampling && fit.ladder[6].skipped
+    @test fit.ladder[7].name === :population_sampling && fit.ladder[7].skipped
+    # integration = nothing skips 5c and keeps rung 4's draws
+    off = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=5, draws=10, rng=Xoshiro(3),
+        integration=nothing)
+    @test only(c for c in off.ladder if c.name === :population_integration).skipped
+    @test off.draws === only(r for r in off.rungs if r.rung == 4).draws
+    # above the design bound 5c is skipped with its reason
+    bounded = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=5, draws=10, rng=Xoshiro(3),
+        integration=(; max_dimension=2))
+    c = only(c for c in bounded.ladder if c.name === :population_integration)
+    @test c.skipped && occursin("3 population coordinates remain", c.reason) &&
+        occursin("max_dimension = 2", c.reason)
 
     # Supplying a sampler later runs both skipped sampling rungs, preserving
     # the old result and passing the marginal draw to the exact sampler.
@@ -76,7 +112,7 @@ end
     @test more.draws === exact.draws && size(more.draws, 2) == 3
     @test only(r for r in missing.rungs if r.name === :exact).skipped
     @test only(r for r in fit.rungs if r.name === :population_sampling).skipped
-    @test length(more.rungs) == length(more.ladder) == 7
+    @test length(more.rungs) == length(more.ladder) == 8
 end
 
 @stestset "rungs 5b and 6 with a sampler" begin
@@ -88,7 +124,7 @@ end
     end)
     sampler(q, init, rng) = Matrix(adaptive_warmup_mcmc(rng, q; init,
         n_draws=100).posterior_position)
-    fit = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=6, draws=20, sampler,
+    fit = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=6, draws=400, sampler,
         rng=Xoshiro(6))
     p = fit.problem
     hmc = only(r for r in fit.rungs if r.name === :population_sampling)
@@ -103,6 +139,14 @@ end
         (comparison.mean .- fit.point) ./ curvature.standard_errors
     @test comparison.standard_deviation_ratio ≈
         comparison.standard_deviations ./ curvature.standard_errors
+    # 5c integrated the coefficients, so its moments here come from its draws
+    r5c = only(r for r in fit.rungs if r.name === :population_integration)
+    m5c = r5c.moments
+    @test m5c.mean ≈ vec(mean(r5c.draws[p.population, :]; dims=2))
+    @test comparison.integration_mean_shift ≈ (comparison.mean .- m5c.mean) ./ m5c.sd
+    @test comparison.integration_sd_ratio ≈ comparison.standard_deviations ./ m5c.sd
+    # a Normal model, so 5c and 5b sample the same marginal
+    @test maximum(abs, comparison.integration_mean_shift) < 0.5
     exact = only(r for r in fit.rungs if r.rung == 6)
     @test size(exact.draws, 1) == length(p.u) && size(exact.draws, 2) >= 100
     @test fit.ladder[end].started_from == 5

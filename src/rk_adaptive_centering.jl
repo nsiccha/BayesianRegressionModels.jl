@@ -534,7 +534,8 @@ end
 # positions and the extension's car and cdar maps apply unchanged. A BYM2 field
 # is `sigma .* (sqrt.(rho .* inv_scale) .* phi_full .+ sqrt.(1 .- rho .* is_struct)
 # .* theta)` (`_rk_ast_car_block!`), the SBBRMI emission with `inv_scale = 1 / s_c`,
-# and an ICAR field `sigma .* phi_full`; a `cdar` walk reads its standard-normal
+# an ICAR field `sigma .* phi_full`, and a scaled ICAR field
+# `sigma .* (sqrt.(inv_scale) .* phi_full .+ vcat(theta, 0.0)[island_pos])`; a `cdar` walk reads its standard-normal
 # innovations `eta[p, w]`, stored column-major.
 
 # The plan term of a `car` or `cdar` component declaration. A model with
@@ -579,6 +580,7 @@ function _rk_adaptive_car_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_nam
             "without `car_units`.")
         o = _rk_adaptive_term(rk, :car, r.declaration).options
         bym2 = r.type === :bym2
+        scaled = _brm_car_scaled_icar(r)
         S = o.n_struct
         struct_pos = rk.plan.columns[o.struct_pos]
         struct_idx = Int[p <= S ? p : 0 for p in struct_pos]
@@ -593,19 +595,22 @@ function _rk_adaptive_car_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_nam
         for (k, j) in enumerate(struct_idx)
             j > 0 && (area_of[j] = k)
         end
+        island_area = scaled ? findall(iszero, struct_idx) : Int[]
         unstructured = bym2 ?
             [pos[string(r.declaration, ".", r.locals.theta, ".", k)] for k in eachindex(struct_pos)] :
+            scaled ? [pos[string(r.declaration, ".", r.locals.theta, ".", i)]
+                for i in eachindex(island_area)] :
             Int[]
-        log_inv_scale = bym2 ? log.(Float64.(rk.plan.columns[o.inv_scale][area_of])) :
-            zeros(S)
+        log_inv_scale = bym2 || scaled ?
+            log.(Float64.(rk.plan.columns[o.inv_scale][area_of])) : zeros(S)
         sigma = _rk_adaptive_hyper(pos, bounds, names, r.declaration, r.locals.sigma,
                                    "marginal SD")
         rho = bym2 ? _rk_adaptive_hyper(pos, bounds, names, r.declaration, r.locals.rho,
                                         "mixing share"; unit=true) : (0, 0.0, 1.0)
-        push!(out, _CARAdaptiveCenteringBlock(r.predictor, r.declaration, bym2,
-            structured, unstructured, struct_idx, area_of, log_inv_scale,
+        push!(out, _CARAdaptiveCenteringBlock(r.predictor, r.declaration, bym2, scaled,
+            structured, unstructured, struct_idx, area_of, island_area, log_inv_scale,
             sigma..., rho...,
-            bym2 ? get(population, (r.predictor, :Intercept), 0) : 0,
+            bym2 || scaled ? get(population, (r.predictor, :Intercept), 0) : 0,
             collect(Any, o.nodes)))
     end
     out
