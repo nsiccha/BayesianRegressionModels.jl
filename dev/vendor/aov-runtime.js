@@ -30,6 +30,9 @@ window.AoV = window.AoV || {
     _tipThemes: {},
     _tipStyle: null,
     _cellTips: {},
+    // vega-embed's tooltip handler per tooltip option, for a plot whose
+    // tooltips name each facet panel's own axis title (_panelTooltip).
+    _tipHandlers: {},
     // Keyed highlights (AoV.highlight): each plot's match test and the
     // revision its view's `aov_highlight` signal shows. Hovers: the mark
     // under the pointer, and the key it announced to its link group.
@@ -47,6 +50,15 @@ window.AoV = window.AoV || {
     // The observers that keep a plot's scroll frame keyboard-reachable while
     // it scrolls (see _syncScrollFrame).
     _scrollFrames: {},
+    // A map's pan and zoom ({k, x, y} of its `aov_zoom` signal), carried into
+    // the re-embeds of its element (see _mapZoom).
+    _mapZooms: {},
+    // A two-finger gesture on a map in progress (see _mapPinchStart).
+    _mapPinches: {},
+    // A figure an htmx swap brought under the id of the plot on the page,
+    // waiting for the swap to end to take that plot's drawing over (see
+    // _adoptAfterSwap).
+    _adopting: {},
 
     // Every map keyed by plot id; dispose() clears each. A new per-plot
     // map belongs in this list.
@@ -54,7 +66,8 @@ window.AoV = window.AoV || {
         '_signals', '_liveRows', '_specRows', '_origSpecs', '_droppedLegends',
         '_embedOpts', '_observers', '_computedWidths', '_corrections', '_correctedRegime',
         '_cur', '_pickers', '_mappings', '_themeKeys', '_reembeds', '_frames',
-        '_highlights', '_hovers', '_touches', '_unmeasured', '_ribbonViews', '_scrollFrames'],
+        '_highlights', '_hovers', '_touches', '_unmeasured', '_ribbonViews', '_scrollFrames',
+        '_mapZooms', '_mapPinches', '_readouts', '_refPending', '_adopting'],
 
     // Whether the runtime sizes this spec to its container: Julia's
     // `_embed_spec` marks a responsive layered/faceted/per-column spec with
@@ -72,9 +85,16 @@ window.AoV = window.AoV || {
     // `_aov.autoColumns`. In the browser the row takes as many panels as fit the
     // plot's width instead (_wrapColumns), re-wrapping when that width changes.
     // An authored count (`config(columns=N)`, `wrapped(cols=N)`) carries no
-    // marker and is never changed.
+    // marker and is never changed. A wrap given per-panel Y scales is a
+    // `concat` of its panels (`_per_wrap_y_concat!`), wrapped the same way.
     _autoColumns: function(spec) {
-        return !!(spec && spec._aov && spec._aov.autoColumns && this._wrapField(spec));
+        return !!(spec && spec._aov && spec._aov.autoColumns && (this._wrapField(spec) || this._isPanelWrap(spec)));
+    },
+
+    // A `layout=` facet given per-panel Y scales: a `concat` of one view per
+    // panel, each recording its wrap value (`_aovPanel`).
+    _isPanelWrap: function(spec) {
+        return !!(spec && Array.isArray(spec.concat) && this._panelKids(spec));
     },
 
     // The field of a wrap facet: the operator's `facet.field`, or a single
@@ -99,16 +119,20 @@ window.AoV = window.AoV || {
     // for the y axis on the left and ~6px of x-label overhang per panel
     // (measured on Vega-Lite 5.23: 170px panels take 196px each). At most one
     // row of every level; without inline rows the Julia count stays. A first
-    // paint that still overshoots drops columns once (_fitCorrection).
+    // paint that still overshoots drops columns until it fits or reaches
+    // one column (_fitCorrection). A per-panel-Y wrap (`concat`) counts its
+    // panels, and every panel draws its own y axis, so each takes the ~40px.
     _wrapColumns: function(spec, budget, fit) {
-        var n = this._distinctCount(spec.data && spec.data.values, this._wrapField(spec));
+        var wrap = this._isPanelWrap(spec);
+        var n = wrap ? spec.concat.length : this._distinctCount(spec.data && spec.data.values, this._wrapField(spec));
         if (!n) return spec.columns;
-        var panel = spec.spec || spec;
+        var panel = wrap ? spec.concat[0] : (spec.spec || spec);
         var cell = (!fit && typeof panel.width === 'number') ? panel.width : 200;
-        var facetCfg = (spec.config && spec.config.facet) || {};
-        var gap = typeof spec.spacing === 'number' ? spec.spacing :
-            (typeof facetCfg.spacing === 'number' ? facetCfg.spacing : 20);
-        var k = Math.floor((budget - 40 + gap) / (cell + gap + 6));
+        var cfg = (spec.config && (wrap ? spec.config.concat : spec.config.facet)) || {};
+        var sp = wrap && spec.spacing && typeof spec.spacing === 'object' ? spec.spacing.column : spec.spacing;
+        var gap = typeof sp === 'number' ? sp : (typeof cfg.spacing === 'number' ? cfg.spacing : 20);
+        var k = wrap ? Math.floor((budget + gap) / (cell + 40 + gap + 6)) :
+            Math.floor((budget - 40 + gap) / (cell + gap + 6));
         return Math.max(1, Math.min(n, k));
     },
 
@@ -170,7 +194,7 @@ window.AoV = window.AoV || {
         };
         var fit = this._fitSized(spec), wrap = this._autoColumns(spec);
         if (!fit && !wrap) return unsized();
-        var el = document.getElementById(id);
+        var el = this._elOf(id);
         if (!el) return unsized();
         var containerWidth = budget;
         if (containerWidth === undefined) {
@@ -188,15 +212,15 @@ window.AoV = window.AoV || {
         // authored panel widths that is all the runtime changes.
         if (wrap) {
             var wrapEst = this._wrapColumns(spec, containerWidth, fit);
-            var wrapRegime = [containerWidth, 'wrap', wrapEst, this._wrapField(spec)].join('|');
+            var wrapRegime = [containerWidth, 'wrap', wrapEst, this._wrapField(spec) || 'concat'].join('|');
             var wrapCorr = (self._corrections || {})[id];
-            var wrapCols = (wrapCorr && wrapCorr.regime === wrapRegime && wrapCorr.cols) ? wrapCorr.cols : wrapEst;
+            var wrapCols = (wrapCorr && wrapCorr.wrapRegime === wrapRegime && wrapCorr.cols) ? wrapCorr.cols : wrapEst;
             spec = Object.assign({}, spec, {columns: wrapCols,
                 _aov: Object.assign({}, spec._aov, {nFacetCols: wrapCols})});
             if (!fit) {
                 self._computedWidths = self._computedWidths || {};
                 self._computedWidths[id] = {kind: 'wrap', nCols: wrapCols, estimate: wrapEst,
-                    budget: containerWidth, regime: wrapRegime};
+                    budget: containerWidth, regime: wrapRegime, wrapRegime: wrapRegime};
                 return spec;
             }
         }
@@ -204,7 +228,17 @@ window.AoV = window.AoV || {
         // Classify the shape. Only _aov-marked composite specs are JS-sized
         // (single views use VL-native width:"container").
         var kind = null, nCols = 0, computed = 0;
-        if (spec._aov && spec._aov.nFacetCols && spec.hconcat) {
+        if (spec._aov && this._isPanelWrap(spec)) {
+            // A per-panel-Y wrap (`concat`): `columns` panels to a row, each
+            // written its share of the container, as the hconcat's children.
+            kind = 'concat'; nCols = Math.max(1, Math.min(spec.concat.length, spec.columns || spec.concat.length));
+            computed = Math.max(minCell, Math.floor((containerWidth - padding) / nCols) - padding);
+        } else if (spec._aov && spec.vconcat) {
+            // A `vconcat` stack (src/vconcat.jl): every panel spans the
+            // container, one width for all, so their plot areas line up.
+            kind = 'vconcat';
+            computed = Math.max(minCell, containerWidth - padding);
+        } else if (spec._aov && spec._aov.nFacetCols && spec.hconcat) {
             // hconcat of per-column facet views (per-column Y scales):
             // per-child width from container / nCols, written into every
             // child's inner spec.
@@ -243,6 +277,10 @@ window.AoV = window.AoV || {
             spec.hconcat.forEach(function(child) {
                 if (child && child.spec) child.spec = Object.assign({}, child.spec, {width: width});
             });
+        } else if (kind === 'vconcat' || kind === 'concat') {
+            var kids = {};
+            kids[kind] = spec[kind].map(function(child) { return Object.assign({}, child, {width: width}); });
+            spec = Object.assign({}, spec, kids);
         } else if (kind === 'facet' || kind === 'inner') {
             spec.spec = Object.assign({}, spec.spec, {width: width});
         } else {
@@ -251,7 +289,8 @@ window.AoV = window.AoV || {
             spec = Object.assign({}, spec, {width: width});
         }
         self._computedWidths = self._computedWidths || {};
-        self._computedWidths[id] = {kind: kind, width: width, computed: computed, nCols: nCols, budget: containerWidth, regime: regime};
+        self._computedWidths[id] = {kind: kind, width: width, computed: computed, nCols: nCols,
+            budget: containerWidth, regime: regime, wrapRegime: wrap ? wrapRegime : null};
         return spec;
     },
 
@@ -260,29 +299,37 @@ window.AoV = window.AoV || {
     // headers, per-panel axes, spacing, legends) varies per spec — so the
     // first paint can overshoot the budget it was sized for. Measure the
     // rendered canvas; if it overshoots, shrink the cells by the excess
-    // and re-embed once via reembed(budget). Bounded: at most one correction
-    // per regime (budget/kind/columns/fields); a resize/remap opens a new
-    // regime. The re-embed reuses the measured budget rather than measuring
+    // and remeasure via reembed(budget). Facet titles can become wider than
+    // the cells as they shrink, so the first correction need not fit.
+    // Every overflow correction reduces the cell width (or wrap count),
+    // bounded below by the readable minimum (or one column). If shrinking
+    // stops reducing the drawing, try that minimum directly. After a
+    // correction, never grow within the same column count: chrome thresholds
+    // could oscillate. At the minimum, an automatic wrap can take fewer columns
+    // and fit their cells afresh; authored counts keep their scrolling frame.
+    // Re-embeds reuse the measured budget rather than measuring
     // again: in a container that grows with its content the overshooting
     // paint has already widened it, so a fresh measurement opened a new
     // regime on every pass and the corrections never ended. When cells
-    // already sit at the readable minimum there is nothing to shrink — the
-    // frame's in-frame scroll takes over.
+    // already sit at the readable minimum and no further wrapping is possible,
+    // the frame's in-frame scroll takes over.
     _fitCorrection: function(id, reembed) {
         var self = window.AoV || {};
         var info = (self._computedWidths || {})[id];
         if (!info) return;
-        if (self._correctedRegime && self._correctedRegime[id] === info.regime) return;
-        var el = document.getElementById(id);
-        var canvas = el && el.querySelector('canvas.marks');
-        if (!canvas) return;
-        // Layout px (pre-zoom): CSS zoom scales the canvas and the budget's
+        var corrected = self._correctedRegime && self._correctedRegime[id] === info.regime;
+        var el = self._elOf(id);
+        var drawing = el && el.querySelector('canvas.marks, svg.marks');
+        if (!drawing) return;
+        // Layout px (pre-zoom): CSS zoom scales the drawing and the budget's
         // container alike, so the factor cancels in the difference.
-        var over = canvas.clientWidth - info.budget;
+        var rendered = drawing.clientWidth;
+        var over = rendered - info.budget;
         self._correctedRegime = self._correctedRegime || {};
         self._corrections = self._corrections || {};
         var minCell = 100;
-        var perCell = (info.kind === 'facet' || info.kind === 'encfacet' || info.kind === 'hconcat') && info.nCols > 0;
+        var perCell = (info.kind === 'facet' || info.kind === 'encfacet' || info.kind === 'hconcat' ||
+            info.kind === 'concat') && info.nCols > 0;
         // A relayout can also need less room than the correction made: a mark
         // at the domain's edge drawn past the frame for some rows, then not.
         // The plot widens back by what it falls short of its column, never
@@ -292,6 +339,7 @@ window.AoV = window.AoV || {
         // comes back with its first rows, so widening it would only replace
         // the view twice (keyed removal of the last group, then its return).
         if (over < -2) {
+            if (corrected) return;
             var corr = self._corrections[id];
             if (info.kind === 'wrap' || !corr || corr.regime !== info.regime || !(info.computed > info.width)) return;
             if (!self._drawsMarks(self.views[id])) return;
@@ -299,26 +347,40 @@ window.AoV = window.AoV || {
             var wider = Math.min(info.computed, info.width + grow);
             if (wider <= info.width) return;
             self._correctedRegime[id] = info.regime;
-            self._corrections[id] = {regime: info.regime, width: wider};
+            self._corrections[id] = {regime: info.regime, width: wider,
+                wrapRegime: info.wrapRegime, cols: info.nCols};
             reembed(info.budget);
             return;
         }
-        if (over <= 2) return;
-        if (info.kind === 'wrap') {
-            // Authored panel widths stay: the row takes fewer panels instead.
+        // Automatic wraps can fit exactly; even a 1px overshoot gives their
+        // scroll frame a horizontal scrollbar. Preserve the existing rounding
+        // tolerance for shapes whose column count is not ours to change.
+        if (over <= (info.wrapRegime ? 0 : 2)) return;
+        if (info.kind === 'wrap' || (info.wrapRegime && info.width <= minCell)) {
+            // Authored widths stay; fitted cells have exhausted their readable
+            // width. In either case only an automatic count may be reduced.
             if (info.nCols <= 1) return;
             var cols = Math.max(1, Math.min(info.nCols - 1,
-                Math.floor(info.nCols * info.budget / canvas.clientWidth)));
+                Math.floor(info.nCols * info.budget / rendered)));
             self._correctedRegime[id] = info.regime;
-            self._corrections[id] = {regime: info.regime, cols: cols};
+            self._corrections[id] = {wrapRegime: info.wrapRegime, cols: cols};
             reembed(info.budget);
             return;
         }
         var shrink = perCell ? Math.ceil(over / info.nCols) : Math.ceil(over);
-        var newWidth = info.width - shrink;
-        if (newWidth >= info.width || newWidth < minCell) return;
+        var previous = self._corrections[id];
+        if (corrected && previous && previous.previousWidth > info.width) {
+            // Use the observed width reduction when fixed-size titles or
+            // labels kept some columns from shrinking with their cells.
+            var gain = (previous.previousRendered - rendered) / (previous.previousWidth - info.width);
+            shrink = gain > 0 ? Math.max(shrink, Math.ceil(over / gain)) : info.width - minCell;
+        }
+        var newWidth = Math.max(minCell, info.width - shrink);
+        if (newWidth >= info.width) return;
         self._correctedRegime[id] = info.regime;
-        self._corrections[id] = {regime: info.regime, width: newWidth};
+        self._corrections[id] = {regime: info.regime, width: newWidth,
+            wrapRegime: info.wrapRegime, cols: info.nCols,
+            previousWidth: info.width, previousRendered: rendered};
         reembed(info.budget);
     },
 
@@ -337,7 +399,7 @@ window.AoV = window.AoV || {
     },
 
     // Run a view whose data changed, laying it out again. Vega sizes the
-    // view (autosize padding, and the plot width of an autosize "fit" view)
+    // view (autosize padding, and the plot width of an autosize "fit-x" view)
     // only when it is embedded or resized: its `autosize.resize` is false,
     // so a plain run keeps the layout of the rows it was embedded with. A
     // plot that starts empty has no axis labels then, and its axis titles
@@ -351,15 +413,41 @@ window.AoV = window.AoV || {
     // it was sized for (an empty first paint has no axis labels). Vega calls
     // a view's resize listeners when it resizes the canvas, which after the
     // embed only a relayout does, and the overshoot is corrected as a first
-    // paint's is, once for each data change that brings it.
+    // paint's is, once for each data change that brings it. A correction
+    // of the plot's width is applied to the mounted view (its width
+    // signal), so a data change keeps the view, its canvas and its zoom:
+    // a keyed removal whose axis labels come out a few pixels wider no
+    // longer rebuilds the plot. Only a wrap count, or a composition whose
+    // width has no single signal, re-embeds. The resize that in-place
+    // correction causes is checked as a corrected regime's, so the width
+    // can only keep shrinking towards the readable minimum, never swing.
     _refitOnRelayout: function(id, view, reembed) {
         var self = this;
         if (!(self._computedWidths || {})[id]) return;
+        var applying = false;
         view.addResizeListener(function() {
             if (self.views[id] !== view) return;
-            if (self._correctedRegime) delete self._correctedRegime[id];
-            self._fitCorrection(id, reembed);
+            if (!applying && self._correctedRegime) delete self._correctedRegime[id];
+            self._fitCorrection(id, function(budget) {
+                var sig = self._widthSignal(id, view);
+                if (!sig) return reembed(budget);
+                self._computedWidths[id].width = self._corrections[id].width;
+                applying = true;
+                view.signal(sig, self._corrections[id].width);
+                view.resize().runAsync().then(function() { applying = false; }, function() { applying = false; });
+            });
         });
+    },
+
+    // The view signal holding the width a fit correction sets, when the
+    // correction is a width (not a wrap count) and one signal holds it: a
+    // single or layered plot's `width`, a facet's `child_width`.
+    _widthSignal: function(id, view) {
+        var info = (this._computedWidths || {})[id], corr = (this._corrections || {})[id];
+        if (!info || !corr || corr.width === undefined || corr.regime !== info.regime) return null;
+        var sig = {top: 'width', facet: 'child_width', inner: 'child_width', encfacet: 'child_width'}[info.kind];
+        if (!sig) return null;
+        try { return typeof view.signal(sig) === 'number' ? sig : null; } catch (e) { return null; }
     },
 
     // ggplot-style "broadcast across all facet panels" pass.
@@ -442,11 +530,137 @@ window.AoV = window.AoV || {
     },
 
     embed: function(id, spec, opts) {
+        var el = this._plotElement(id), pending = this._adopting[id];
+        if (pending) {
+            // A further embed of the figure waiting to take the drawing over,
+            // in the same swap (an update_spec script after it): its newest
+            // spec is the one the figure shows.
+            if (pending.el === el) {
+                pending.spec = spec;
+                pending.opts = opts;
+                return pending.promise;
+            }
+            this._settleAdoption(id);
+        }
+        // A new element with the id of a plot that has a live view: an htmx
+        // swap replacing that figure, or a second figure under the id.
+        var old = this._els[id];
+        if (el && old && old !== el && this.views[id] && !this._inFlight[id] &&
+                !old.contains(el) && !el.contains(old) && this._keptOnSwap(id)) {
+            return this._adoptAfterSwap(id, el, old, spec, opts);
+        }
         return this._embed(id, this._takeRibbonViews(id, spec, false), opts, false);
     },
 
+    // --- A same-id swap keeps the drawing ---
+    // A fragment that brings a new figure under the id of the one on the
+    // page, with the same structure (a control's refresh, a part sent ahead,
+    // the finished answer after them), updates that figure in place, as
+    // update_spec does: the drawing, its view and what the reader set on it
+    // (zoom and pan, the legend selection, the Ribbons | Intervals choice)
+    // stay, and only the new rows (and the tick values axes list, which
+    // often follow them) are swapped in. The caption, tables and
+    // everything else around the plot come from the new fragment.
+    //
+    // htmx runs a swapped fragment's scripts as it inserts them, before it
+    // removes what they replace (HTMXObjects' first part sent ahead removes
+    // the old result just before), so when the new figure's embed runs, the
+    // old figure may or may not be on its way out. The take-over therefore
+    // waits for the swap to end: the removal sweep, which runs when it has,
+    // or the next microtask, whichever comes first (_settleAdoption). Only
+    // then does the old element take the new one's place: moving it while
+    // htmx is still swapping could move the very node htmx is about to
+    // remove. An old figure still in the page by then was not replaced (a
+    // second figure under the id), so the new figure embeds on its own, as
+    // does any figure the take-over does not apply to (_adopt).
+    _adoptAfterSwap: function(id, el, old, spec, opts) {
+        var self = this, a = {el: el, old: old, spec: spec, opts: opts};
+        a.promise = new Promise(function(resolve) { a.resolve = resolve; });
+        self._adopting[id] = a;
+        var later = typeof queueMicrotask === 'function' ? queueMicrotask :
+            function(fn) { Promise.resolve().then(fn); };
+        later(function() { if (self._adopting[id] === a) self._settleAdoption(id); });
+        return a.promise;
+    },
+    // The waiting figure of plot `id` takes the drawing over, or embeds on
+    // its own. Queued data ops and whenReady callbacks run after either.
+    _settleAdoption: function(id) {
+        var self = this, a = self._adopting[id];
+        if (!a) return;
+        delete self._adopting[id];
+        var done;
+        try {
+            done = self._adopt(id, a) ||
+                self._embed(id, self._takeRibbonViews(id, a.spec, false), a.opts, false, a.el);
+        } catch (err) {
+            done = Promise.reject(err);
+        }
+        a.resolve(done);
+    },
+    // The take-over, when it applies; null otherwise.
+    _adopt: function(id, a) {
+        var self = this, old = a.old, el = a.el, view = self.views[id], cur = self._cur[id];
+        // The old figure stayed, the new one has already left, or the old
+        // drawing is no longer this plot's settled live view.
+        if (old.isConnected || !el.isConnected || self._els[id] !== old || !view || !cur ||
+                self._inFlight[id]) return null;
+        if (!self._keptOnSwap(id)) return null;
+        if (JSON.stringify(self._withDefaultActions(a.opts)) !== JSON.stringify(self._embedOpts[id] || {})) return null;
+        var p = self._preparedUpdate(id, a.spec);
+        if (!self._sameStructure(id, p.prepared)) return null;
+        // The old element, with its drawing, view and listeners, takes the new
+        // one's place in the new figure.
+        el.replaceWith(old);
+        var done = null, swapped = self._swapData(id, view, p.prepared);
+        if (swapped) {
+            cur.spec = p.prepared;
+            delete self._liveRows[id];
+            self._ribbonViewControls(id, old);
+            // The plot sits in the new figure's area now.
+            self._observeResize(id, cur.spec);
+            self._watchScrollFrame(id);
+            done = Promise.resolve(self._results[id]);
+        } else {
+            // A legend the new rows would leave empty: re-embed in place
+            // (its view runs what is queued).
+            done = self._embed(id, p.shown, a.opts, false, old);
+        }
+        self._origSpecs[id] = p.pristine;
+        self._dataChanged(id);
+        if (swapped) {
+            var queued = self._pending[id] || [];
+            delete self._pending[id];
+            queued.forEach(function(fn) { fn(view); });
+        }
+        return done;
+    },
+    // Whether plot `id` can be kept across a swap. Not when the new figure's
+    // own scripts set up again what keeping the old one would double or
+    // contradict: a channel picker (its controls come with the new figure)
+    // and signals wired to requests. A map starts at its fitted view, as a
+    // swap that shows other regions (a drill-down) needs. A frame player and
+    // a legend dropped for an empty domain re-embed on any new spec.
+    _keptOnSwap: function(id) {
+        return !(this._pickers[id] || this._mappings[id] || (this._signals[id] || []).length ||
+            this._mapView(id) || this._frames[id] || this._droppedLegends[id]);
+    },
+    // A call that reads or changes plot `id`'s state while a swapped-in
+    // figure waits to take it over settles that first, so it acts on the
+    // plot the page will show.
+    _settleWaiting: function(id) {
+        if (this._adopting[id]) this._settleAdoption(id);
+    },
+    // `opts` with the page's default for the actions menu (vega_controls).
+    _withDefaultActions: function(opts) {
+        opts = opts || {};
+        if (window.AoV && window.AoV.defaultActions !== undefined) {
+            opts = Object.assign({}, opts, {actions: window.AoV.defaultActions});
+        }
+        return opts;
+    },
+
     // --- Ribbons | Intervals ---
-    // A coloured ribbon over a few x values arrives with two drawings
+    // A ribbon over a few x values arrives with two drawings
     // (src/ribbon_view.jl): the spec shows the starting one and carries the
     // other as `_aov.ribbonView.alt`. Record both and return the drawing to
     // show: the starting one, or, for a new spec of the same plot (`keep`,
@@ -463,7 +677,8 @@ window.AoV = window.AoV || {
         specs[rv.view] = this._withoutRibbonView(spec);
         specs[rv.alt._aov.ribbonView.view] = this._withoutRibbonView(rv.alt);
         var view = keep && prev && specs[prev.view] ? prev.view : rv.view;
-        this._ribbonViews[id] = {view: view, specs: specs, score: rv.score, threshold: rv.threshold};
+        this._ribbonViews[id] = {view: view, specs: specs, score: rv.score, threshold: rv.threshold,
+                                 pairs: rv.pairs !== false};
         return specs[view];
     },
     _withoutRibbonView: function(spec) {
@@ -478,6 +693,7 @@ window.AoV = window.AoV || {
     // render and the host theme carry over, as on a picker change. Returns
     // whether the plot has that drawing.
     setRibbonView: function(id, view) {
+        this._settleWaiting(id);
         var st = this._ribbonViews[id];
         if (!st || !st.specs[view]) return false;
         if (st.view === view) return true;
@@ -504,11 +720,14 @@ window.AoV = window.AoV || {
     // buttons, first in its captioned figure's action row (HTMXObjects'
     // caption styles give them the row's look), else in a group right after
     // the plot (as a frame player). Removed when a new spec no longer
-    // offers the point-interval drawing.
+    // offers the point-interval drawing. Only the buttons beside this
+    // element count: a figure that an htmx swap is replacing still holds
+    // its own pair while the new figure's script runs (_plotElement), and
+    // reusing that pair left the new figure without one.
     _ribbonViewControls: function(id, el) {
         var self = this, st = this._ribbonViews[id];
         var sel = '[data-aov-ribbon-view-for="' + id + '"]';
-        var buttons = document.querySelectorAll(sel);
+        var buttons = this._ownRibbonButtons(el, sel);
         if (!st) {
             buttons.forEach(function(b) {
                 var group = b.parentElement;
@@ -546,21 +765,34 @@ window.AoV = window.AoV || {
                 var host = el.parentElement && el.parentElement.classList.contains('aov-plot-area') ? el.parentElement : el;
                 host.insertAdjacentElement('afterend', group);
             }
-            buttons = document.querySelectorAll(sel);
+            buttons = made;
         }
         if (!buttons.length) return;
         var text = this._texts(buttons[0]);
         var pct = function(x) { return Math.round(100 * x) + '%'; };
-        var tip = st.threshold === null || st.threshold === undefined ?
+        // Without two colour groups sharing an x (one group, as a ribbon
+        // without a colour mapping) the overlap score compared nothing.
+        var tip = !st.pairs ? null : st.threshold === null || st.threshold === undefined ?
             text('overlap', {score: pct(st.score)}) :
             text('overlap_auto', {score: pct(st.score), threshold: pct(st.threshold)});
         var group = buttons[0].parentElement;
         if (group && group.classList.contains('aov-ribbon-view')) group.setAttribute('aria-label', text('ribbon_view'));
         buttons.forEach(function(b) {
             b.textContent = text(b.dataset.view);
-            b.title = tip;
+            if (tip) b.title = tip; else b.removeAttribute('title');
             b.setAttribute('aria-pressed', String(b.dataset.view === st.view));
         });
+    },
+    // The switch buttons (`sel`) of the plot drawn in `el`: those in its
+    // captioned figure, else those in the group right after it.
+    _ownRibbonButtons: function(el, sel) {
+        if (!el) return [];
+        var fig = el.closest('figure.captioned');
+        if (fig) return Array.prototype.slice.call(fig.querySelectorAll(sel));
+        var host = el.parentElement && el.parentElement.classList.contains('aov-plot-area') ? el.parentElement : el;
+        var next = host.nextElementSibling;
+        return next && next.classList.contains('aov-ribbon-view') ?
+            Array.prototype.slice.call(next.querySelectorAll(sel)) : [];
     },
 
     // --- Polygon winding (geometry loaded from a URL) ---
@@ -690,9 +922,41 @@ window.AoV = window.AoV || {
     // microtask checkpoint, so a node removed and re-inserted synchronously
     // stays live; it compares element identity, so a same-id re-render
     // already embedded into its new element is untouched.
+    // The element a new embed of plot `id` draws into. An id names one
+    // element, except while an htmx 2 swap runs: htmx runs a swapped
+    // fragment's scripts as it inserts them, before it removes what they
+    // replace, and HTMXObjects keeps the parts a running read sent ahead
+    // above its finished answer until that swap has ended. For that moment
+    // the old figure and the new one share the id, and getElementById names
+    // the old one whenever it comes first (sent-ahead parts do). An embed
+    // the old element then owned was disposed with it when it left the page
+    // (_sweepDetached): no switch, no fit, no view. So an embed called from
+    // an inline script (to_node's sits beside its plot) takes the element
+    // nearest that script; any other call takes _elOf(id).
+    _plotElement: function(id) {
+        var script = document.currentScript;
+        if (script && script.parentNode && typeof CSS !== 'undefined' && CSS.escape) {
+            var sel = '#' + CSS.escape(id);
+            for (var n = script.parentNode; n && n.querySelector; n = n.parentNode) {
+                var hit = n.querySelector(sel);
+                if (hit) return hit;
+            }
+        }
+        return this._elOf(id);
+    },
+    // The element plot `id` lives in: the one its last embed took while that
+    // is still in the page, else the one the id names. Sizing, observers and
+    // exports read it, so they follow the embed's own element (_plotElement).
+    _elOf: function(id) {
+        var el = this._els[id];
+        return el && el.isConnected ? el : document.getElementById(id);
+    },
     _sweepDetached: function() {
         var self = this;
         Object.keys(self._els).forEach(function(id) {
+            // A figure waiting to take this plot's drawing over goes first:
+            // the swap that brought it has ended (_adoptAfterSwap).
+            if (self._adopting[id]) self._settleAdoption(id);
             var el = self._els[id];
             if (el && !el.isConnected) self.dispose(id);
         });
@@ -707,6 +971,70 @@ window.AoV = window.AoV || {
             }
         });
         this._removalObserver.observe(document.documentElement, {childList: true, subtree: true});
+    },
+
+    // The element styles a single `width: "container"` view needs, written at
+    // each embed and again after an htmx settle (_restoreSettled).
+    // - Its width: Vega-Lite sizes the view from the embed element's own
+    //   width, and vega-embed makes that element display:inline-block, which
+    //   shrink-wraps its (not yet rendered) content: unless a page stylesheet
+    //   happens to widen it, the container measures 0 and the plot renders
+    //   0px wide. Sized here, where the runtime runs, single-view plots fill
+    //   their container on any page (vega_head pages, to_html files,
+    //   runtime-only docs embeds).
+    // - Its cap: width:"container" has no max, so the element itself is
+    //   bounded and the plot fills min(container, cap). (JS-sized
+    //   layered/faceted specs are capped through the sizing budget in
+    //   _applyResponsiveWidth instead.)
+    _styleElement: function(el, spec) {
+        if (!spec) return;
+        if (spec.width === 'container' && el) el.style.width = '100%';
+        var cap = (spec._aov && spec._aov.maxWidth) || (window.AoV && window.AoV.maxWidth);
+        if (cap !== undefined && cap !== null && isFinite(cap) && spec.width === 'container' && el) {
+            el.style.maxWidth = cap + 'px';
+        }
+    },
+
+    // An htmx swap that brings a plot element in under the id of one it
+    // replaces settles it: the swap gives the new element the old one's
+    // `class` and `style`, and the settle, about 20 ms later, puts the served
+    // values back (htmx.config.attributesToSettle). The plot's script runs
+    // in between, so whatever its embed wrote there first is reverted:
+    // vega-embed's `vega-embed` and `has-actions` classes (its stylesheet
+    // makes the element the positioned box the reset control hangs from, and
+    // lays out the actions menu) and the runtime's width and cap
+    // (_styleElement). Each plot the settle covered gets them back, so a
+    // swapped-in figure matches a freshly loaded one (snag
+    // map-reset-button-4351fbe6: on every RegionExplorer drill-down the
+    // reset button hung from the map column, over the caption). One listener
+    // per page; it holds no view (R3).
+    _watchSettles: function() {
+        if (this._settleListener || typeof document === 'undefined') return;
+        var self = this;
+        this._settleListener = function(event) { self._restoreSettled(event.target); };
+        document.addEventListener('htmx:afterSettle', this._settleListener);
+    },
+    _restoreSettled: function(root) {
+        var self = this;
+        if (!root || typeof root.contains !== 'function') return;
+        Object.keys(self._els).forEach(function(id) {
+            var el = self._els[id];
+            if (!el || !root.contains(el)) return;
+            // vega-embed's classes, once it has drawn into the element (an
+            // embed yet to draw adds them itself): `has-actions` goes with the
+            // chart wrapper it makes for an actions menu.
+            var wrapper = false, drawing = false;
+            Array.prototype.forEach.call(el.children, function(c) {
+                if (c.classList.contains('chart-wrapper')) wrapper = true;
+                if (c.classList.contains('marks')) drawing = true;
+            });
+            if (wrapper || drawing) {
+                el.classList.add('vega-embed');
+                if (wrapper) el.classList.add('has-actions');
+            }
+            self._styleElement(el, self._origSpecs[id]);
+            if (el.querySelector('.aov-zoom-reset')) self._positionedBox(el);
+        });
     },
 
     // The primitive units of a spec, each with the data and encoding it
@@ -874,22 +1202,23 @@ window.AoV = window.AoV || {
     },
 
     // `keepData` retains rows added via updateData/appendData on re-embed.
-    _embed: function(id, spec, opts, keepData) {
-        opts = opts || {};
-        if (window.AoV && window.AoV.defaultActions !== undefined) {
-            opts = Object.assign({}, opts, {actions: window.AoV.defaultActions});
-        }
+    // `into` is the element to draw in, for an embed that no inline script
+    // calls (a figure that waited for its swap to end); else _plotElement.
+    _embed: function(id, spec, opts, keepData, into) {
+        opts = this._withDefaultActions(opts);
         var self = this;
         self._watchRemovals();
+        self._watchSettles();
         self._watchTheme();
         self._watchLinks();
+        self._watchBound();
         // Live state (rows added via updateData/appendData, onSignal listeners) belongs
         // to the plot element: a new element with this ID (e.g. after an HTMX swap)
         // starts fresh, a new spec for the same element keeps the listeners.
         // Same element: the one the last embed recorded — which also covers
         // a re-embed issued while the previous one is still in flight (no
         // view registered yet), e.g. the two remaps of one picker change.
-        var prev = self.views[id], el = document.getElementById(id);
+        var prev = self.views[id], el = into || self._plotElement(id);
         var sameEl = el && (self._els[id] === el || (prev && el.contains(prev.container())));
         if (!sameEl) {
             // A hover on the replaced element ends (its link group hears the
@@ -903,6 +1232,7 @@ window.AoV = window.AoV || {
             delete self._mappings[id];
             self._frameStop(id);
             delete self._frames[id];
+            delete self._mapZooms[id];
         } else if (!keepData) {
             delete self._liveRows[id];
         }
@@ -947,24 +1277,7 @@ window.AoV = window.AoV || {
         var framePlan = self._frameSetup(id, el, origSpec, opts);
         self._ribbonViewControls(id, el);
 
-        // width:"container" sizes the view from the embed element's own
-        // width, and vega-embed makes that element display:inline-block,
-        // which shrink-wraps its (not yet rendered) content: unless a page
-        // stylesheet happens to widen it, the container measures 0 and the
-        // plot renders 0px wide. Size the element here, where the runtime
-        // runs, so single-view plots fill their container on any page
-        // (vega_head pages, to_html files, runtime-only docs embeds).
-        if (spec.width === 'container' && el) el.style.width = '100%';
-
-        // Width cap for VL-native single-view specs: width:"container" has
-        // no max, so bound the embed element itself and the plot fills
-        // min(container, cap). (JS-sized layered/faceted specs are capped
-        // through the sizing budget in _applyResponsiveWidth instead.)
-        var _cap = (spec._aov && spec._aov.maxWidth) || (window.AoV && window.AoV.maxWidth);
-        if (_cap !== undefined && _cap !== null && isFinite(_cap) && spec.width === 'container') {
-            var _capEl = document.getElementById(id);
-            if (_capEl) _capEl.style.maxWidth = _cap + 'px';
-        }
+        self._styleElement(el, spec);
 
         // `budget` (the correction re-embed only) pins the sizing budget.
         var doEmbed = function(budget) {
@@ -975,11 +1288,21 @@ window.AoV = window.AoV || {
             // Superseded by a newer embed of this id, or disposed: a resize or
             // fit re-embed scheduled earlier must not resurrect the old spec.
             if (self._embedTok[id] !== tok) return Promise.resolve();
-            var s = self._withHighlight(id, self._applyResponsiveWidth(id, JSON.parse(JSON.stringify(cur.spec)), budget));
+            var s = self._bindDodge(self._capTicks(id, self._withHighlight(id, self._applyResponsiveWidth(id, JSON.parse(JSON.stringify(cur.spec)), budget))));
             // Host theme, read now: a theme change re-runs this embed.
             var embedOpts = self._withFrame(id, self._themedOpts(id, s, opts), plan);
             var fonts = self._fontsPending((s.config && s.config.font) || (embedOpts.config && embedOpts.config.font));
-            return fonts ? fonts.then(function() { return render(s, embedOpts); }) : render(s, embedOpts);
+            // Per-panel axis titles (src/panel_labels.jl): the tooltip names
+            // each panel's title, through a handler vega-embed installs
+            // before the view first draws (setting one later resets the
+            // renderer). Other plots embed as before, in the same tick.
+            var labels = self._panelLabelsOf(s);
+            var draw = !labels ? function() { return render(s, embedOpts); } : function() {
+                return self._tooltipHandler(embedOpts.tooltip).then(function(base) {
+                    return render(s, base ? Object.assign({}, embedOpts, {tooltip: self._panelTooltip(base, labels)}) : embedOpts);
+                });
+            };
+            return fonts ? fonts.then(draw) : draw();
         };
         var render = function(s, embedOpts) {
             // Superseded while its font loaded.
@@ -998,7 +1321,11 @@ window.AoV = window.AoV || {
                 settled = true;
                 if (--self._inFlight[id] <= 0) delete self._inFlight[id];
             };
-            return vegaEmbed('#' + id, s, self._withLiveRows(id, embedOpts, gen)).then(function(result) {
+            // By selector, as pages and test harnesses that wrap vegaEmbed
+            // expect. vega-embed resolves it only after its own awaits, by
+            // which time a swap that briefly gave two elements this id
+            // (_plotElement) has removed the old one.
+            return vegaEmbed('#' + id, s, self._withViewLog(id, self._withLiveRows(id, embedOpts, gen))).then(function(result) {
                 settle();
                 if (self._gens[id] !== gen) {
                     result.finalize();
@@ -1016,12 +1343,15 @@ window.AoV = window.AoV || {
                 self._attachClick(id, view);
                 self._attachHover(id, view);
                 self._attachTouch(id, view);
+                self._attachReadout(id);
+                self._refLabelsWatch(id, view);
+                self._mapZoom(id, view, result.vgSpec);
                 self._frameSync(id, view);
                 // Run anything queued before the view was ready (e.g. appendData)
                 var pending = self._pending[id] || [];
                 delete self._pending[id];
                 pending.forEach(function(fn) { fn(view); });
-                // One bounded correction pass for JS-sized specs whose
+                // Bounded correction passes for JS-sized specs whose
                 // rendered chrome overshoots the computed budget. Not for an
                 // embed a newer spec has superseded before it resolved: its
                 // correction would describe the old chrome and be read by
@@ -1029,6 +1359,7 @@ window.AoV = window.AoV || {
                 if (self._embedTok[id] === tok) self._fitCorrection(id, function(budget) { doEmbed(budget); });
                 self._refitOnRelayout(id, view, function(budget) { doEmbed(budget); });
                 self._watchScrollFrame(id);
+                self._syncCsvEntries(id);
                 return result;
             }).catch(function(err) { settle(); self._console.error.call(console, '[' + id + ']', err); });
         };
@@ -1069,7 +1400,7 @@ window.AoV = window.AoV || {
     _observeResize: function(id, spec) {
         var self = this;
         if (spec._aov || self._fitSized(spec)) {
-            var el = document.getElementById(id);
+            var el = self._elOf(id);
             if (el && el.parentElement && window.ResizeObserver) {
                 var timer = null;
                 var lastWidth = el.parentElement.clientWidth;
@@ -1187,7 +1518,7 @@ window.AoV = window.AoV || {
     _wrapChanged: function(id, spec) {
         var info = (this._computedWidths || {})[id];
         if (!info || info.kind !== 'wrap') return true;
-        var el = document.getElementById(id);
+        var el = this._elOf(id);
         var budget = el ? this._sizingBudget(el, spec) : null;
         return budget !== null && this._wrapColumns(spec, budget, false) !== info.estimate;
     },
@@ -1258,20 +1589,26 @@ window.AoV = window.AoV || {
     // look is a theme of its own: one rule, written once. The rule ranks with
     // vega-tooltip's defaults and comes right after them, so a page's own
     // `#vg-tooltip-element` rules still win.
-    _tooltipTheme: function(el) {
+    // An opaque surface in the page's colours for chrome drawn over a plot
+    // (the tooltip, a map's reset control): the page's text colour on its
+    // background.
+    _surfaceLook: function(el) {
         var cs = el ? getComputedStyle(el) : null;
         var text = (cs && this._rgba(cs.color)) || [0, 0, 0, 1];
         var back = (el && this._rgba(this.hostBackground(el))) || [255, 255, 255, 1];
         // Text that cannot be read on that background is not read on it: a
-        // background image or gradient, a translucent card (hostBackground
-        // takes its colour as opaque) or a dark `color-scheme` page that
-        // paints no background of its own. Pick the surface for the text.
+        // background image or gradient may differ from its solid fallback.
+        // Pick a surface for the text when that fallback is unreadable.
         var lt = this._luminance(text), lb = this._luminance(back);
         if ((Math.max(lt, lb) + 0.05) / (Math.min(lt, lb) + 0.05) < 3) {
             back = this._lightText(text) ? [32, 32, 32, 1] : [255, 255, 255, 1];
         }
-        var surface = this._withAlpha(back, 1), color = this._withAlpha(text, 1);
-        var border = this._withAlpha(text, 0.15), key = this._withAlpha(text, 0.75);
+        return {surface: this._withAlpha(back, 1), color: this._withAlpha(text, 1),
+            border: this._withAlpha(text, 0.15), key: this._withAlpha(text, 0.75)};
+    },
+    _tooltipTheme: function(el) {
+        var l = this._surfaceLook(el);
+        var surface = l.surface, color = l.color, border = l.border, key = l.key;
         var look = [surface, color, border, key].join('|');
         var theme = this._tipThemes[look];
         if (theme) return theme;
@@ -1308,10 +1645,17 @@ window.AoV = window.AoV || {
             text: {color: text},
             style: {'aov-ink': {color: text}, 'aov-ink-stroke': {stroke: text}, 'aov-ink-fill': {fill: text}}
         };
+        var background = this.hostBackground(el);
+        cfg.style['aov-background'] = {color: background};
+        cfg.style['aov-background-stroke'] = {stroke: background};
+        cfg.style['aov-background-fill'] = {fill: background};
         var dark = this._lightText(c) && this._darkCategory();
         if (dark) {
             cfg.range = {category: dark};
             cfg.mark = {color: dark[0]};
+            // Rules drawn in the default mark colour (an uncoloured
+            // ribbon's interval drawing, src/ribbon_view.jl) follow it.
+            cfg.style['aov-mark-color'] = {color: dark[0]};
         }
         if (cs) this._hostLook(cfg, el, cs);
         return cfg;
@@ -1423,13 +1767,49 @@ window.AoV = window.AoV || {
             console.warn('AoV: plot font ' + font + ' did not load; drawing with the fallback:', err);
         });
     },
-    // The first opaque background behind `el` (exports paint it).
+    // The solid drawing surface behind `el`, compositing translucent ancestors.
+    // Images/gradients have no single colour; this follows their solid fallback.
     hostBackground: function(el) {
+        var rgb = [0, 0, 0], remaining = 1;
         for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
             var c = this._rgba(getComputedStyle(n).backgroundColor);
-            if (c && c[3] > 0) return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
+            if (!c) continue;
+            for (var i = 0; i < 3; i++) rgb[i] += remaining * c[3] * c[i];
+            remaining *= 1 - c[3];
+            if (!remaining) break;
         }
-        return 'white';
+        if (remaining) {
+            var canvas = this._cssRGBA('Canvas', document.documentElement) || [255, 255, 255, 1];
+            for (var j = 0; j < 3; j++) rgb[j] += remaining * canvas[j];
+        }
+        return 'rgb(' + rgb.map(Math.round).join(',') + ')';
+    },
+    _cssRGBA: function(color, el) {
+        var direct = this._rgba(color);
+        if (direct) return direct;
+        var probe = document.createElement('span');
+        probe.style.display = 'none';
+        probe.style.color = color;
+        if (!probe.style.color) return null;
+        (el || document.documentElement).appendChild(probe);
+        var rgba = this._rgba(getComputedStyle(probe).color);
+        probe.remove();
+        return rgba;
+    },
+    _solidBackground: function(color, el, under) {
+        var back = this._rgba(under || this.hostBackground(el));
+        var c = color && this._cssRGBA(color, el);
+        if (!c) return this._withAlpha(back, 1);
+        return 'rgb(' + c.slice(0, 3).map(function(v, i) {
+            return Math.round(c[3] * v + (1 - c[3]) * back[i]);
+        }).join(',') + ')';
+    },
+    _plotBackground: function(spec, el, config) {
+        config = config || spec.config || {};
+        var color = spec.background;
+        if (color === undefined) color = config.background;
+        var surface = this._solidBackground(color, el);
+        return config.view ? this._solidBackground(config.view.fill, el, surface) : surface;
     },
     _deepMerge: function(base, over) {
         var out = Object.assign({}, base);
@@ -1445,25 +1825,49 @@ window.AoV = window.AoV || {
     // `aov-ink` (`color=:ink`, dot-interval rules), a style Vega-Lite
     // resolves, and `aov-ink-stroke` / `aov-ink-fill` (`stroke=:ink`,
     // `fill=:ink`), whose colour the server also wrote onto every mark that
-    // carries them. LOCKSTEP: `_AOV_INK_STYLES` (src/to_vegalite.jl).
-    _hostInk: function(spec, theme) {
+    // carries them. Background styles likewise take the local solid surface;
+    // `_aov.paintDefaults` records their server-side defaults so explicit style
+    // overrides survive. LOCKSTEP: `_AOV_INK_STYLES` and
+    // `_apply_background_default!` (src/to_vegalite.jl).
+    // `aov-mark-color` likewise, unless the spec set a mark colour other
+    // than Vega-Lite's default (`_AOV_MARK_COLOR`, src/ribbon_view.jl).
+    // A palette's `:ink` entries (`scales(Color=(; palette=[:ink, …]))`)
+    // follow the `aov-ink` colour: `_aov.inkPalette` records the range as
+    // written and the ink entries' positions, and every colour scale with
+    // exactly that range takes the host ink there, so the category's marks
+    // and legend symbol do. LOCKSTEP: `_record_ink_palette!`
+    // (src/to_vegalite.jl).
+    _hostInk: function(spec, theme, el, config) {
         var styles = spec.config && spec.config.style;
         if (!styles) return;
-        var paint = [];
+        var paint = [], ink = null;
+        var defaults = (spec._aov && spec._aov.paintDefaults) || {};
         Object.keys(theme.style).forEach(function(name) {
             var prop = Object.keys(theme.style[name])[0], own = styles[name];
-            if (!own || own[prop] !== '#333') return;
-            own[prop] = theme.style[name][prop];
-            if (prop !== 'color') paint.push([name, prop, own[prop]]);
-        });
-        if (!paint.length) return;
+            var background = Object.prototype.hasOwnProperty.call(defaults, name);
+            var base = background ? defaults[name] : name === 'aov-mark-color' ? '#4c78a8' : '#333';
+            if (!own || own[prop] !== base) return;
+            own[prop] = background ? this._plotBackground(spec, el, config) : theme.style[name][prop];
+            if (name === 'aov-ink') ink = own[prop];
+            if (prop !== 'color') paint.push([name, prop, own[prop], base]);
+        }, this);
+        var pal = ink && spec._aov && spec._aov.inkPalette;
+        var palKey = pal && Array.isArray(pal.range) && Array.isArray(pal.ink) ? JSON.stringify(pal.range) : null;
+        if (!paint.length && !palKey) return;
         (function walk(node) {
             if (Array.isArray(node)) { node.forEach(walk); return; }
             if (!node || typeof node !== 'object') return;
             var style = node.style;
             paint.forEach(function(p) {
                 var styled = style === p[0] || (Array.isArray(style) && style.indexOf(p[0]) !== -1);
-                if (styled && node[p[1]] === '#333') node[p[1]] = p[2];
+                if (styled && node[p[1]] === p[3]) node[p[1]] = p[2];
+            });
+            var enc = palKey && node.encoding;
+            if (enc && typeof enc === 'object') ['color', 'stroke', 'fill'].forEach(function(ch) {
+                var sc = enc[ch] && enc[ch].scale;
+                if (!sc || !Array.isArray(sc.range) || JSON.stringify(sc.range) !== palKey) return;
+                sc.range = sc.range.slice();
+                pal.ink.forEach(function(i) { sc.range[i] = ink; });
             });
             Object.keys(node).forEach(function(k) {
                 if (k !== 'data' && k !== 'datasets' && k !== 'config') walk(node[k]);
@@ -1474,10 +1878,10 @@ window.AoV = window.AoV || {
     // applied. Records the theme so refreshTheme can tell when it changed.
     _themedOpts: function(id, spec, opts) {
         if (!this._themeOn(spec)) { delete this._themeKeys[id]; return opts; }
-        var el = this._els[id] || document.getElementById(id);
+        var el = this._elOf(id);
         var cfg = this.hostThemeConfig(el), tip = this._tooltipTheme(el);
         this._themeKeys[id] = this._themeKey(cfg, tip);
-        this._hostInk(spec, cfg);
+        this._hostInk(spec, cfg, el, this._deepMerge(opts.config || {}, spec.config));
         var themed = Object.assign({}, opts, {config: this._deepMerge(cfg, opts.config)});
         if (opts.tooltip === undefined) themed.tooltip = {theme: tip};
         return themed;
@@ -1535,10 +1939,118 @@ window.AoV = window.AoV || {
         ['warn', 'error'].forEach(function(level) {
             console[level] = function() {
                 var a = Array.prototype.slice.call(arguments), ids = Object.keys(self._inFlight);
-                if (ids.length === 1) a[0] = '[' + ids[0] + '] ' + a[0];
+                if (ids.length === 1 && !self._viewLogging) a[0] = '[' + ids[0] + '] ' + a[0];
                 return orig[level].apply(console, a);
             };
         });
+    },
+
+    // A view's own dataflow messages (Vega's transforms, data loading) are
+    // logged after its embed settled, often while another plot's embed is
+    // in flight, so _tagConsole would tag them with that plot's id. Each
+    // view therefore logs through a logger of its own (vega-embed's
+    // `viewClass`), which tags them with its plot's id and leaves out
+    // _emptyExtent's message. It reaches the view only through this logger,
+    // which the view holds, and keeps no per-plot state.
+    _viewLogging: false,
+    _withViewLog: function(id, opts) {
+        var self = this, patch = opts.patch, Base = opts.viewClass || vega.View, refs = null;
+        var View = function(spec, viewOpts) {
+            var view = null;
+            var logger = vega.logger(vega.Warn, undefined, function(method, level, args) {
+                args = Array.prototype.slice.call(args);
+                if (method === 'warn' && self._emptyExtent(view, refs, args)) return;
+                self._viewLogging = true;
+                try { console[method].apply(console, ['[' + id + '] ' + level].concat(args)); }
+                finally { self._viewLogging = false; }
+            });
+            view = Reflect.construct(Base, [spec, Object.assign({}, viewOpts, {logger: logger})], View);
+            return view;
+        };
+        View.prototype = Base.prototype;
+        return Object.assign({}, opts, {viewClass: View, patch: function(vg) {
+            if (typeof patch === 'function') vg = patch(vg);
+            refs = self._extentRefs(vg);
+            return vg;
+        }});
+    },
+
+    // Vega takes one extent per dataset and field of a continuous scale's
+    // domain and skips an extent with no finite value, so a layer with no
+    // rows (a bound reference that is off, a typed-empty start) leaves the
+    // domain to the other layers. It still warns `Infinite extent for
+    // field "f": [Infinity, -Infinity]` for it, on every update. The
+    // message names only the field, so it is left out when every dataset
+    // over that field with no finite value comes from source rows that
+    // are empty. Rows that are there but have no finite value (all missing
+    // or non-finite) still warn: those are rows the layer cannot draw.
+    _EMPTY_EXTENT: /^Infinite extent for field "(.*)": \[Infinity, -Infinity\]$/,
+    _emptyExtent: function(view, refs, args) {
+        var m = view && refs && args.length === 1 && typeof args[0] === 'string' &&
+            this._EMPTY_EXTENT.exec(args[0]);
+        var list = m && Object.prototype.hasOwnProperty.call(refs, m[1]) && refs[m[1]];
+        if (!list) return false;
+        try {
+            var empty = false;
+            for (var i = 0; i < list.length; i++) {
+                var get = vega.field(list[i].field);
+                var finite = view.data(list[i].data).some(function(t) {
+                    var v = get(t);
+                    return v != null && v !== '' && Number.isFinite(+v);
+                });
+                if (finite) continue;
+                if (!list[i].roots.every(function(n) { return view.data(n).length === 0; })) return false;
+                empty = true;
+            }
+            return empty;
+        } catch (err) { return false; }
+    },
+    // Field -> its domain references in a compiled Vega spec, each
+    // {data, field, roots}: the dataset an extent reads and the source
+    // datasets (no `source` of their own) its rows come from. False when
+    // one of them cannot be traced (then nothing is left out).
+    _extentRefs: function(vg) {
+        var sources = Object.create(null), refs = [], byField = Object.create(null);
+        var domainRefs = function(d) {
+            if (!d || typeof d !== 'object' || Array.isArray(d) || d.signal) return [];
+            if (typeof d.data === 'string' && typeof d.field === 'string') return [[d.data, d.field]];
+            if (typeof d.data === 'string' && Array.isArray(d.fields)) return d.fields
+                .filter(function(f) { return typeof f === 'string'; })
+                .map(function(f) { return [d.data, f]; });
+            if (Array.isArray(d.fields)) return d.fields
+                .filter(function(f) { return f && typeof f.data === 'string' && typeof f.field === 'string'; })
+                .map(function(f) { return [f.data, f.field]; });
+            return [];
+        };
+        (function walk(g) {
+            (g.data || []).forEach(function(d) {
+                sources[d.name] = d.source === undefined ? null : [].concat(d.source);
+            });
+            var facet = g.from && g.from.facet;
+            if (facet && facet.name) sources[facet.name] = [].concat(facet.data);
+            (g.scales || []).forEach(function(s) { refs = refs.concat(domainRefs(s.domain)); });
+            (g.marks || []).forEach(walk);
+        })(vg || {});
+        var trace = function(name, seen) {
+            if (!(name in sources) || seen.indexOf(name) >= 0) return null;
+            if (sources[name] === null) return [name];
+            var out = [];
+            for (var i = 0; i < sources[name].length; i++) {
+                var r = trace(sources[name][i], seen.concat([name]));
+                if (!r) return null;
+                out = out.concat(r);
+            }
+            return out;
+        };
+        refs.forEach(function(ref) {
+            var data = ref[0], field = ref[1], roots = trace(data, []);
+            if (byField[field] === false) return;
+            if (!roots) { byField[field] = false; return; }
+            var list = byField[field] = byField[field] || [];
+            if (!list.some(function(r) { return r.data === data && r.field === field; }))
+                list.push({data: data, field: field, roots: roots});
+        });
+        return byField;
     },
 
     // Finalize a plot's current view through vega-embed's own finalize:
@@ -1558,15 +2070,24 @@ window.AoV = window.AoV || {
     // embed still in flight is finalized, and its drawing released, when it
     // resolves.
     dispose: function(id) {
-        var self = this, el = self._els[id];
+        var self = this, el = self._els[id], waiting = self._adopting[id], queued = self._pending[id];
         self._touchReset(id);
         self._hoverEnd(id, null);
         self._frameStop(id);
         self._finalizeView(id);
         if (self._observers && self._observers[id]) self._observers[id].disconnect();
         if (self._scrollFrames[id]) self._scrollFrames[id].disconnect();
+        if (self._refPending[id]) clearTimeout(self._refPending[id]);
         self._perPlotState.forEach(function(k) { if (self[k]) delete self[k][id]; });
         self._releaseDrawing(id, el);
+        // A figure that was waiting to take this drawing over (an app that
+        // disposes what a swap removes) draws its own; what was queued for
+        // it runs on that view.
+        if (waiting) {
+            if (queued) self._pending[id] = queued;
+            waiting.resolve(self._embed(id, self._takeRibbonViews(id, waiting.spec, false), waiting.opts,
+                false, waiting.el));
+        }
     },
 
     // A finalized view stays reachable from the drawing it leaves in the page:
@@ -1605,6 +2126,7 @@ window.AoV = window.AoV || {
             }
         });
         el.querySelectorAll('svg.marks').forEach(function(svg) { svg.replaceWith(svg.cloneNode(true)); });
+        el.querySelectorAll('.aov-zoom-reset').forEach(function(b) { b.remove(); });
         el.querySelectorAll('.vega-actions').forEach(function(menu) {
             var details = menu.closest('details');
             (details && el.contains(details) ? details : menu).remove();
@@ -1623,8 +2145,10 @@ window.AoV = window.AoV || {
     },
 
     whenReady: function(id, fn) {
+        // While a swapped-in figure waits to take the plot over, the view
+        // that will show its rows is not settled yet (_adoptAfterSwap).
         var view = this.views[id];
-        if (view) { fn(view); return; }
+        if (view && !this._adopting[id]) { fn(view); return; }
         this._pending[id] = this._pending[id] || [];
         this._pending[id].push(fn);
     },
@@ -1661,16 +2185,29 @@ window.AoV = window.AoV || {
     // {n, columns: {name: column}}, where a column is an array of values, a
     // scalar shared by every row, {runs, lengths}, or a numeric sequence
     // {start, step, scale?, den?, period?} whose row i holds
-    // ((start + j*step)*scale)/den with j = i % period. Returns the row
+    // ((start + j*step)*scale)/den with j = i % period. Rows whose keys
+    // differ (a faceted figure's merged tables) come as {n, parts: [...]},
+    // consecutive parts of that form (`_wire_rows`). Returns the row
     // objects the row-wise JSON would have parsed to; a row array passes
     // through unchanged. The server picks a sequence only when exactly
     // these double operations reproduce every value.
     _isColumns: function(data) {
         return !!data && typeof data === 'object' && !Array.isArray(data) &&
-            typeof data.n === 'number' && !!data.columns && typeof data.columns === 'object';
+            typeof data.n === 'number' &&
+            (Array.isArray(data.parts) || (!!data.columns && typeof data.columns === 'object'));
     },
     _rowsFromColumns: function(data) {
         if (!this._isColumns(data)) return data;
+        if (Array.isArray(data.parts)) {
+            var all = new Array(data.n), at = 0, that = this;
+            data.parts.forEach(function(part) {
+                var rows = that._rowsFromColumns(part);
+                for (var r = 0; r < rows.length; r++) all[at++] = rows[r];
+            });
+            if (at !== data.n)
+                throw new Error('AoV: a dataset of ' + data.n + ' rows arrived in parts holding ' + at);
+            return all;
+        }
         var n = data.n, names = Object.keys(data.columns), self = this;
         var cols = names.map(function(k) { return self._columnValues(k, data.columns[k], n); });
         var rows = new Array(n);
@@ -1816,7 +2353,8 @@ window.AoV = window.AoV || {
         if (remapped) this._origSpecs[id] = orig;
         return true;
     },
-    // A ribbon layered with other layers (`lineribbon(...) + visual(...)`)
+    // A layered ribbon whose rows are not the plot's top-level data (the
+    // second of two ribbons: `layers_to_vl` hoists only one shared table)
     // keeps its group layers each with its own copy of the rows, which a
     // data change cannot extend: say so when the rows bring a group it lacks.
     _warnUngrownRibbons: function(id, spec, rows) {
@@ -2023,55 +2561,74 @@ window.AoV = window.AoV || {
     // Refresh a plot from a newly lowered spec (`update_spec`), keeping the
     // reader's state. The picker's current channel assignment is re-applied
     // to the new spec. When the result differs from the embedded spec only
-    // in inline data, the view's datasets are swapped in place, so zoom/pan,
+    // in inline data and listed axis tick values, the view's datasets and
+    // tick lists are swapped in place, so zoom/pan,
     // legend selection and the canvas survive; any structural change
     // (panels, layers, encodings, size) re-embeds in place.
     updateSpec: function(id, spec, opts) {
-        var self = this, el = document.getElementById(id);
+        var self = this, el = self._plotElement(id);
         // Not embedded into this element yet (a first render, or a fresh
         // element from an htmx swap): an ordinary embed.
         if (el && self._els[id] !== el) return self.embed(id, spec, opts);
         self.whenReady(id, function(view) {
-            var now = document.getElementById(id);
+            var now = self._elOf(id);
             // Sent while no element had this id: apply to the plot that
             // has since embedded under it (as appendData/updateData do).
             if (!el) { if (now) self.updateSpec(id, spec, opts); return; }
             // Removed, or replaced by a fresh render, meanwhile.
             if (now !== el || self._els[id] !== el) return;
-            // A ribbon keeps the drawing the reader chose.
-            var drawn = self._takeRibbonViews(id, spec, true);
-            var pristine = self._expandSpecData(JSON.parse(JSON.stringify(drawn)));
-            self._refreshLegendSelections(pristine);
-            self._broadcastCrossSource(pristine);
-            var shown = pristine;
-            if (self._mappings[id]) {
-                // The picker builds combo columns from the stored original.
-                self._origSpecs[id] = pristine;
-                var mapping = self._pickers[id] ? self._pickers[id]() : self._mappings[id];
-                shown = (mapping && self._remappedSpec(id, mapping)) || pristine;
-            }
-            var prepared = JSON.parse(JSON.stringify(shown));
-            self._refreshLegendSelections(prepared);
-            self._broadcastCrossSource(prepared);
-            var cur = self._cur[id];
-            // A framed plot's fixed domains come from all its rows: re-embed.
-            if (cur && !self._droppedLegends[id] && !self._framed(prepared) && !self._framed(cur.spec) &&
-                    self._structureKey(prepared) === self._structureKey(cur.spec) &&
-                    self._swapData(id, view, prepared)) {
-                cur.spec = prepared;
+            var p = self._preparedUpdate(id, spec), cur = self._cur[id];
+            if (self._sameStructure(id, p.prepared) && self._swapData(id, view, p.prepared)) {
+                cur.spec = p.prepared;
                 delete self._liveRows[id];
                 self._ribbonViewControls(id, el);
             } else {
-                self._embed(id, shown, opts, false);
+                self._embed(id, p.shown, opts, false);
             }
-            self._origSpecs[id] = pristine;
+            self._origSpecs[id] = p.pristine;
             self._dataChanged(id);
         });
     },
+    // A new spec of plot `id` as the reader would see it: `pristine`, the
+    // spec as sent (with the Ribbons | Intervals drawing the reader chose);
+    // `shown`, with the picker's current channel assignment; `prepared`, a
+    // copy of `shown` ready to compare and swap in.
+    _preparedUpdate: function(id, spec) {
+        var self = this;
+        // A ribbon keeps the drawing the reader chose.
+        var drawn = self._takeRibbonViews(id, spec, true);
+        var pristine = self._expandSpecData(JSON.parse(JSON.stringify(drawn)));
+        self._refreshLegendSelections(pristine);
+        self._broadcastCrossSource(pristine);
+        var shown = pristine;
+        if (self._mappings[id]) {
+            // The picker builds combo columns from the stored original.
+            self._origSpecs[id] = pristine;
+            var mapping = self._pickers[id] ? self._pickers[id]() : self._mappings[id];
+            shown = (mapping && self._remappedSpec(id, mapping)) || pristine;
+        }
+        var prepared = JSON.parse(JSON.stringify(shown));
+        self._refreshLegendSelections(prepared);
+        self._broadcastCrossSource(prepared);
+        return {pristine: pristine, shown: shown, prepared: prepared};
+    },
+    // Whether `prepared` differs from what plot `id` shows only in its
+    // inline rows and the tick values its axes list, so they can be swapped
+    // into its view. A framed plot's fixed domains come from all its rows,
+    // and a dropped empty legend comes back only on an embed: both re-embed.
+    _sameStructure: function(id, prepared) {
+        var cur = this._cur[id];
+        return !!cur && !this._droppedLegends[id] && !this._framed(prepared) && !this._framed(cur.spec) &&
+            this._structureKey(prepared) === this._structureKey(cur.spec);
+    },
 
-    // A spec's JSON with its inline data rows blanked: equal keys mean two
-    // specs compile to the same dataflow, differing only in the rows.
+    // A spec's JSON with its inline data rows, its listed tick values and
+    // its interval dodge's step blanked: equal keys mean two specs compile to
+    // the same dataflow, differing only in the rows, in tick lists and in the
+    // dodge step, which the view holds in signals (_bindTicks, _bindDodge).
     _structureKey: function(spec) {
+        var self = this, dx = spec && spec._aov && spec._aov.dodgeX;
+        var dodged = self._dodgeStep(dx) !== undefined;
         return JSON.stringify(spec, function(k, v) {
             if (k === 'data' && v && typeof v === 'object' && Array.isArray(v.values)) {
                 var shape = Object.assign({}, v);
@@ -2079,25 +2636,165 @@ window.AoV = window.AoV || {
                 return shape;
             }
             if (k === 'datasets' && v && typeof v === 'object') return Object.keys(v).sort();
+            if (k === 'encoding' && v && typeof v === 'object' && !Array.isArray(v)) return self._ticksBlanked(v);
+            // The recipe's field, groups and scale stay: with them, the
+            // expression depends on the step alone.
+            if (dodged && v === dx) return Object.assign({}, v, {span: null});
+            if (dodged && v && typeof v === 'object' && v.as === dx.as && typeof v.calculate === 'string') {
+                return Object.assign({}, v, {calculate: null});
+            }
             return v;
         });
     },
+    // An encoding whose axes that list their tick values are written without
+    // them, and without the tick count beside them.
+    _ticksBlanked: function(enc) {
+        var self = this, out = null;
+        Object.keys(enc).forEach(function(ch) {
+            var def = enc[ch], ax = def && typeof def === 'object' ? def.axis : null;
+            if (!ax || typeof ax !== 'object' || !self._listsTicks(ax.values)) return;
+            var blank = Object.assign({}, ax, {values: null});
+            if (typeof blank.tickCount === 'number') blank.tickCount = null;
+            out = out || Object.assign({}, enc);
+            out[ch] = Object.assign({}, def, {axis: blank});
+        });
+        return out || enc;
+    },
+    // A tick list written out: numbers, strings, booleans or Vega-Lite
+    // DateTime objects, not a list a signal or an expression computes.
+    _listsTicks: function(values) {
+        return Array.isArray(values) && values.every(function(v) {
+            return v === null || typeof v !== 'object' || (!('signal' in v) && !('expr' in v));
+        });
+    },
+
+    // --- Listed tick values follow the rows ---
+    // An axis that lists its tick values (`config(encoding=(; x=(; axis=(;
+    // values=…))))`, or the 1-2-5 values the lowering lists on a log axis)
+    // often lists values its rows hold, such as the doses a figure draws plus
+    // the dose a marker shows. Written into the compiled axes, a new list
+    // would make every new spec with other rows structural: an embed, which
+    // resets zoom and redraws. So each embed holds a scale's list, and the
+    // tick count beside it, in signals of the view (`aov_ticks_<scale>`,
+    // `aov_tick_count_<scale>`) that its axes read, and a swap of rows
+    // (`update_spec`, a same-id swap) sets them to the new spec's list.
+
+    // Per scale of a compiled spec, the tick lists its axes write out: `raw`,
+    // as written, in walk order, and `ticks`, the values and count all of
+    // the scale's axes share (an axis and its grid twin, or every panel's
+    // axis on a shared scale) as a signal holds them; null when the axes
+    // differ or a value cannot be read.
+    _axisTicks: function(vg) {
+        var self = this, out = {};
+        (function walk(g) {
+            (g.axes || []).forEach(function(a) {
+                if (!Array.isArray(a.values)) return;
+                var s = String(a.scale), e = out[s] = out[s] || {raw: [], ticks: undefined};
+                e.raw.push(JSON.stringify([a.values, a.tickCount]));
+                var values = self._tickValues(a.values);
+                var t = values && {values: values, count: typeof a.tickCount === 'number' ? a.tickCount : undefined};
+                if (e.ticks === undefined) e.ticks = t;
+                else if (!t || !e.ticks || JSON.stringify(t) !== JSON.stringify(e.ticks)) e.ticks = null;
+            });
+            (g.marks || []).forEach(function(m) { if (m.type === 'group') walk(m); });
+        })(vg || {});
+        return out;
+    },
+    // The values of a compiled tick list: numbers, strings and booleans as
+    // written, and the `datetime(…)` / `utc(…)` calls Vega-Lite writes for
+    // dates, evaluated as Vega's expressions evaluate them (`new Date(…)`,
+    // `Date.UTC(…)`). null when a value is anything else.
+    _tickValues: function(values) {
+        var out = [];
+        for (var i = 0; i < values.length; i++) {
+            var v = values[i];
+            if (v === null || typeof v !== 'object') { out.push(v); continue; }
+            var m = typeof v.signal === 'string' && /^\s*(datetime|utc)\s*\(([^()]*)\)\s*$/.exec(v.signal);
+            if (!m) return null;
+            var args;
+            try { args = JSON.parse('[' + m[2] + ']'); } catch (e) { return null; }
+            if (!args.length || !args.every(function(a) { return typeof a === 'number' || typeof a === 'string'; })) return null;
+            out.push(m[1] === 'utc' ? Date.UTC.apply(null, args) : Reflect.construct(Date, args));
+        }
+        return out;
+    },
+    _tickSignals: function(scale) {
+        var s = String(scale).replace(/\W/g, '_');
+        return {values: 'aov_ticks_' + s, count: 'aov_tick_count_' + s};
+    },
+    // At embed (_withLiveRows): every scale whose axes share one readable
+    // tick list holds it in signals, which those axes read.
+    _bindTicks: function(vg) {
+        if (!vg) return vg;
+        var self = this, lists = self._axisTicks(vg), bound = {};
+        Object.keys(lists).forEach(function(scale) {
+            var t = lists[scale].ticks;
+            if (!t) return;
+            var n = bound[scale] = self._tickSignals(scale);
+            vg.signals = vg.signals || [];
+            vg.signals.push({name: n.values, value: t.values});
+            if (t.count !== undefined) vg.signals.push({name: n.count, value: t.count});
+        });
+        (function walk(g) {
+            (g.axes || []).forEach(function(a) {
+                var n = bound[a.scale];
+                if (!n || !Array.isArray(a.values)) return;
+                a.values = {signal: n.values};
+                if (typeof a.tickCount === 'number') a.tickCount = {signal: n.count};
+            });
+            (g.marks || []).forEach(function(m) { if (m.type === 'group') walk(m); });
+        })(vg);
+        return vg;
+    },
+    // The new compiled spec `vg`'s tick lists as a swap into plot `id`'s
+    // view sets them: [signal, value] pairs. null when the view cannot show
+    // them without an embed: a list its axes hold as written that changed,
+    // or a list or count it holds no signal for.
+    _swappedTicks: function(id, view, vg) {
+        var self = this, lists = self._axisTicks(vg), sets = [];
+        var held = self._results[id] && self._results[id].vgSpec;
+        var written = held ? self._axisTicks(held) : {};
+        var has = function(name) { try { view.signal(name); return true; } catch (e) { return false; } };
+        var ok = Object.keys(lists).every(function(scale) {
+            var t = lists[scale].ticks, n = self._tickSignals(scale);
+            if (!has(n.values)) {
+                return !!written[scale] && JSON.stringify(written[scale].raw) === JSON.stringify(lists[scale].raw);
+            }
+            if (!t || (t.count !== undefined) !== has(n.count)) return false;
+            sets.push([n.values, t.values]);
+            if (t.count !== undefined) sets.push([n.count, t.count]);
+            return true;
+        });
+        return ok ? sets : null;
+    },
 
     // Insert `spec`'s inline datasets into the live view in place of its
-    // current rows. `spec` matches the embedded one up to data rows, so its
-    // compiled dataset names are the view's. Returns false (the caller then
-    // re-embeds) when that cannot be established or a legend would be left
-    // with an empty domain (handled by the embed-time legend drop).
+    // current rows, and its listed tick values into the view's tick signals
+    // (_bindTicks). `spec` matches the embedded one up to data rows and tick
+    // lists, so its compiled dataset names are the view's. Returns false (the
+    // caller then re-embeds) when that cannot be established or a legend
+    // would be left with an empty domain (handled by the embed-time legend
+    // drop).
     _swapData: function(id, view, spec) {
         var vg, self = this, opts = self._embedOpts[id] || {};
         try {
-            vg = vegaLite.compile(JSON.parse(JSON.stringify(spec)),
+            // Each listing axis states its tick count, as the embed's spec
+            // does (_capTicks).
+            vg = vegaLite.compile(self._listedTicks(JSON.parse(JSON.stringify(spec))),
                 {logger: vega.logger(vega.None)}).spec;
             if (typeof opts.patch === 'function') vg = opts.patch(vg);
         } catch (e) { return false; }
         if (self._emptyLegends(vg).length) return false;
+        var ticks = self._swappedTicks(id, view, vg);
+        if (!ticks) return false;
+        var step = self._dodgeStep(spec._aov && spec._aov.dodgeX);
+        if (step !== undefined) {
+            try { view.signal(self._DODGE_STEP); } catch (e) { return false; }
+            ticks.push([self._DODGE_STEP, step]);
+        }
         var sources = (vg.data || []).filter(function(d) { return Array.isArray(d.values); });
         try { sources.forEach(function(d) { view.data(d.name); }); } catch (e) { return false; }
+        ticks.forEach(function(t) { view.signal(t[0], t[1]); });
         var specRows = self._specRows[id] = self._specRows[id] || {};
         sources.forEach(function(d) {
             var rows = d.format ? vega.read(d.values, d.format) : d.values;
@@ -2113,7 +2810,9 @@ window.AoV = window.AoV || {
     // the rest stale so they render fresh when opened.
     _dataChanged: function(id) {
         var self = this;
+        self._refLabelsSoon(id);
         self.whenReady(id, function() {
+            self._syncCsvEntries(id);
             var sel = '[data-aov-plot-id="' + id + '"]';
             document.querySelectorAll('.aov-data-raw-body' + sel + ', .aov-data-pretty-body' + sel)
                 .forEach(function(body) {
@@ -2193,16 +2892,18 @@ window.AoV = window.AoV || {
     // aov:hover, touch and link groups. Vega-Lite has no mark property for
     // Vega's `interactive`, so the server styles the layer's marks
     // `aov-passive` and each compiled spec gets `interactive: false` on them
-    // here (`_withLiveRows`, the cell charts). LOCKSTEP: `_AOV_PASSIVE`
+    // here (`_withLiveRows`, the cell charts). The readout leaves such a
+    // layer out too (`_readoutPlan`). LOCKSTEP: `_AOV_PASSIVE`
     // (src/to_vegalite.jl) and the bare
     // `to_html(spec)` embed's `_PASSIVE_PATCH_JS` (src/to_html.jl).
+    _isPassiveStyle: function(style) {
+        return style === 'aov-passive' || (Array.isArray(style) && style.indexOf('aov-passive') !== -1);
+    },
     _passiveMarks: function(vg) {
+        var self = this;
         (function walk(marks) {
             (marks || []).forEach(function(m) {
-                var style = m.style;
-                if (style === 'aov-passive' || (Array.isArray(style) && style.indexOf('aov-passive') !== -1)) {
-                    m.interactive = false;
-                }
+                if (self._isPassiveStyle(m.style)) m.interactive = false;
                 walk(m.marks);
             });
         })(vg && vg.marks);
@@ -2228,7 +2929,29 @@ window.AoV = window.AoV || {
     // A layer that authors `clip: true` keeps it: its marks carry
     // `aov-own-clip`. LOCKSTEP: `_AOV_OWN_CLIP` (src/to_vegalite.jl) and the
     // bare `to_html(spec)` embed's `_PAN_ZOOM_CLIP_JS` (src/to_html.jl).
+    //
+    // A map (`aov_zoom`, Julia's `_add_map_zoom!`) is cut the same way at its
+    // whole frame: every mark of a group that draws its areas (the view, or
+    // each facet cell: a geoshape's `shape` marks, a geobox's `rect` marks
+    // with the `aov-geobox` style) is drawn whole until the reader zooms or pans, and
+    // cut at the group's frame from then until the reset. Vega-Lite clips no
+    // map mark of its own, so a mark already clipped was authored so (a
+    // framed RegionExplorer map clips every layer) and stays cut throughout.
     _panZoomClip: function(vg) {
+        if (vg && (vg.signals || []).some(function(s) { return s.name === 'aov_zoom'; })) {
+            var moved = 'aov_zoom.k !== 1 || aov_zoom.x !== 0 || aov_zoom.y !== 0';
+            (function walk(group) {
+                var marks = group.marks || [];
+                var map = marks.some(function(m) {
+                    return m.type === 'shape' || [].concat(m.style || []).indexOf('aov-geobox') !== -1;
+                });
+                marks.forEach(function(m) {
+                    if (m.type === 'group') return walk(m);
+                    if (!map || m.clip) return;
+                    m.clip = {signal: moved};
+                });
+            })(vg);
+        }
         if (!vg || !(vg.signals || []).some(function(s) { return s.name === 'grid'; })) return vg;
         function size(v) {
             return v && typeof v.signal === 'string' ? '(' + v.signal + ')' : typeof v === 'number' ? String(v) : null;
@@ -2264,9 +2987,12 @@ window.AoV = window.AoV || {
             if (typeof patch === 'function') vg = patch(vg);
             self._passiveMarks(vg);
             self._panZoomClip(vg);
+            self._bindTicks(vg);
             // An embed superseded or disposed while compiling still compiles;
             // it must not re-create the plot's state.
             if (self._gens[id] !== gen) return vg;
+            var zoom = self._mapZooms[id];
+            if (zoom) (vg.signals || []).forEach(function(s) { if (s.name === self._AOV_ZOOM) s.value = zoom; });
             var live = self._liveRows[id] || {}, specRows = self._specRows[id] = {};
             (vg.data || []).forEach(function(d) {
                 if (Array.isArray(d.values)) specRows[d.name] = d.values;
@@ -2277,7 +3003,178 @@ window.AoV = window.AoV || {
         }});
     },
 
+    // --- Map pan and zoom (Julia's `_add_map_zoom!`) ---
+    // A map's spec carries its mouse gestures (wheel, drag) as handlers of
+    // its `aov_zoom` signal, so they work in any Vega embed. The runtime adds
+    // what a spec cannot hold:
+    // - touch: two fingers pinch-zoom around their midpoint and move the map
+    //   with them (_mapPinchStart/_mapPinchMove), and one finger still
+    //   scrolls the page. Vega cannot do this from the spec: it cancels every
+    //   view event it listens to except the wheel (its default `events`
+    //   config), so a touch handler there would stop one-finger scrolls and
+    //   taps, and it cancels only once a running redraw has finished, too
+    //   late to hold off the page's own pinch zoom. The runtime cancels a
+    //   two-finger move at once, and nothing else;
+    // - a wheel over the drawing never scrolls the page, also while a heavy
+    //   map is still redrawing the previous step (Vega's own cancel waits for
+    //   that redraw);
+    // - a reset control, shown while the map is zoomed or moved, that brings
+    //   back the fitted view. Not a double-click: on a map every pixel is a
+    //   region, so a double-click is also two `aov:click`s, which a
+    //   click-to-drill map acts on;
+    // - the zoom carried into every re-embed of the same element (container
+    //   resize, fit correction, theme, update_spec, a picker or legend
+    //   restore), set as the compiled signal's starting value (_withLiveRows)
+    //   so the map is never drawn at the fitted view in between. A new
+    //   element (an htmx swap) starts at the fitted view;
+    // - marks cut at the frame once zoomed (_panZoomClip).
+    // LOCKSTEP: `_AOV_ZOOM` and `_MAP_ZOOM_MAX` in src/to_vegalite.jl.
+    _AOV_ZOOM: 'aov_zoom',
+    _MAP_ZOOM_MAX: 1000,
+    _mapZoom: function(id, view, vg) {
+        var self = this, name = self._AOV_ZOOM;
+        var has = vg && (vg.signals || []).some(function(s) { return s.name === name; });
+        if (!has) { delete self._mapZooms[id]; return; }
+        var o = view.origin(), pad = view.padding();
+        self._zoomResetControl(id, self._els[id], o[0] + pad.left, o[1] + pad.top);
+        self._mapZoomElement(id, self._els[id]);
+        // Held by the view, so it may close over it; it reaches the control
+        // by id.
+        view.addSignalListener(name, function(n, value) { self._mapZoomChanged(id, value); });
+        self._mapZoomChanged(id, view.signal(name));
+    },
+    // The live view of a plot that zooms as a map, else null.
+    _mapView: function(id) {
+        var view = this.views[id];
+        if (!view) return null;
+        try { view.signal(this._AOV_ZOOM); } catch (err) { return null; }
+        return view;
+    },
+    // The element's own listeners, attached once per element and kept across
+    // re-embeds; they reach the plot by id and hold no view (R3).
+    _mapZoomElement: function(id, el) {
+        var self = this;
+        if (!el || el._aovMapZoom) return;
+        el._aovMapZoom = true;
+        var mine = function() { return self._els[id] === el; };
+        el.addEventListener('touchstart', function(event) { if (mine()) self._mapPinchStart(id, event); }, {passive: true});
+        el.addEventListener('touchmove', function(event) { if (mine()) self._mapPinchMove(id, event); }, {passive: false});
+        var end = function(event) { if (mine()) self._mapPinchStart(id, event); };
+        el.addEventListener('touchend', end, {passive: true});
+        el.addEventListener('touchcancel', end, {passive: true});
+        el.addEventListener('wheel', function(event) {
+            var t = event.target;
+            if (mine() && t && t.closest && t.closest('canvas.marks, svg.marks') && self._mapView(id)) event.preventDefault();
+        }, {passive: false});
+    },
+    // A point given in client coordinates, in the coordinates of the facet
+    // cell it lies in (the view's own when it is not faceted), with that
+    // cell's offset: the frame Vega's `x(group())` reads for the wheel.
+    _mapPoint: function(id, view, cx, cy) {
+        var el = this._els[id], drawing = el && el.querySelector('canvas.marks, svg.marks');
+        if (!drawing) return null;
+        var r = drawing.getBoundingClientRect(), o = view.origin(), pad = view.padding();
+        var x = cx - r.left - (drawing.clientLeft || 0) - o[0] - pad.left;
+        var y = cy - r.top - (drawing.clientTop || 0) - o[1] - pad.top;
+        var ox = 0, oy = 0, scene = view.scenegraph().root, top = scene && scene.items && scene.items[0];
+        ((top && top.items) || []).forEach(function(mark) {
+            if (mark.marktype !== 'group' || mark.name !== 'cell') return;
+            (mark.items || []).forEach(function(c) {
+                if (x >= c.x && x <= c.x + c.width && y >= c.y && y <= c.y + c.height) { ox = c.x; oy = c.y; }
+            });
+        });
+        return {x: x - ox, y: y - oy, ox: ox, oy: oy};
+    },
+    _touchSpan: function(event) {
+        var a = event.touches[0], b = event.touches[1];
+        return {d: Math.max(Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), 1),
+            x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2};
+    },
+    // Two fingers down start a pinch from the map's zoom at that moment; any
+    // other count of fingers ends it (one finger is the page's, or a tap).
+    _mapPinchStart: function(id, event) {
+        delete this._mapPinches[id];
+        var view = this._mapView(id);
+        if (!view || !event.touches || event.touches.length !== 2) return;
+        var span = this._touchSpan(event), m = this._mapPoint(id, view, span.x, span.y);
+        var z = view.signal(this._AOV_ZOOM);
+        if (m && z) this._mapPinches[id] = {d: span.d, x: m.x, y: m.y, ox: m.ox, oy: m.oy, z: {k: z.k, x: z.x, y: z.y}};
+    },
+    // The point under the first midpoint stays under the current one, and
+    // the zoom follows the fingers' spread.
+    _mapPinchMove: function(id, event) {
+        var p = this._mapPinches[id], view = p && this._mapView(id);
+        if (!view || !event.touches || event.touches.length !== 2) return;
+        if (event.cancelable) event.preventDefault();
+        var span = this._touchSpan(event), m = this._mapPoint(id, view, span.x, span.y);
+        if (!m) return;
+        var mx = m.x + m.ox - p.ox, my = m.y + m.oy - p.oy;
+        var k = Math.min(Math.max(p.z.k * span.d / p.d, 1), this._MAP_ZOOM_MAX);
+        view.signal(this._AOV_ZOOM, {k: k, x: mx - k / p.z.k * (p.x - p.z.x), y: my - k / p.z.k * (p.y - p.z.y)});
+        view.runAsync();
+    },
+    _mapZoomAtRest: function(z) { return !z || (z.k === 1 && z.x === 0 && z.y === 0); },
+    _mapZoomChanged: function(id, value) {
+        var rest = this._mapZoomAtRest(value);
+        if (rest) delete this._mapZooms[id]; else this._mapZooms[id] = {k: value.k, x: value.x, y: value.y};
+        var el = this._els[id], b = el && el.querySelector('.aov-zoom-reset');
+        if (b) b.hidden = rest;
+    },
+    // Public: bring a map back to its fitted view.
+    resetZoom: function(id) {
+        var view = this.views[id];
+        delete this._mapZooms[id];
+        if (!view) return Promise.resolve();
+        try { view.signal(this._AOV_ZOOM, {k: 1, x: 0, y: 0}); } catch (err) { return Promise.resolve(); }
+        return view.runAsync();
+    },
+    // The plot element as the positioned box the reset control is placed in:
+    // vega-embed's stylesheet makes it one (`.vega-embed`), and where that
+    // does not apply the runtime does. An htmx settle can take both away;
+    // _restoreSettled gives them back.
+    _positionedBox: function(el) {
+        if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
+    },
+    // The reset control, over the map's top-left corner (vega-embed empties
+    // the element on every embed, so each embed adds it again). It reads the
+    // plot by id and holds no view (view retention, R3). Its colours are the
+    // page's text on the page's background, like the tooltip's, so it is
+    // readable over any region colour and never takes a theme's primary
+    // colour; aov.css adds the focus ring.
+    _zoomResetControl: function(id, el, left, top) {
+        var self = this;
+        if (!el || el.querySelector('.aov-zoom-reset')) return;
+        self._positionedBox(el);
+        var look = self._surfaceLook(el);
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'aov-zoom-reset';
+        b.hidden = true;
+        b.textContent = self._texts(el)('reset_zoom');
+        var st = b.style;
+        st.position = 'absolute';
+        st.left = (left + 6) + 'px';
+        st.top = (top + 6) + 'px';
+        st.zIndex = '1';
+        st.width = 'auto';
+        st.margin = '0';
+        st.padding = '0.15em 0.6em';
+        st.fontSize = '0.8em';
+        st.lineHeight = '1.3';
+        st.borderRadius = '0.25rem';
+        st.border = '1px solid ' + look.border;
+        st.backgroundColor = look.surface;
+        st.color = look.color;
+        st.cursor = 'pointer';
+        b.addEventListener('click', function(event) {
+            event.stopPropagation();
+            self.resetZoom(id);
+        });
+        el.appendChild(b);
+    },
+
     onSignal: function(id, signal, callback) {
+        this._settleWaiting(id);
         // A plot disposed before its embed resolved (to_node wires signals
         // in the embed's .then) has nothing to listen to. Listeners added
         // before a plot's first embed were already dropped by that embed.
@@ -2716,6 +3613,7 @@ window.AoV = window.AoV || {
         groups.forEach(function(totals, i) {
             if (widths[i] > 0) totals.forEach(function(t) { t.style.minWidth = Math.ceil(widths[i]) + 'px'; });
         });
+        this._cellAlignAxes();
     },
     _takeCell: function(el) {
         if (!this._cellPending.delete(el)) return;
@@ -2761,7 +3659,7 @@ window.AoV = window.AoV || {
         var tkey = JSON.stringify(theme);
         if (col.built[tkey]) return col.built[tkey];
         var s = JSON.parse(JSON.stringify(spec));
-        if (theme) this._hostInk(s, theme);
+        if (theme) this._hostInk(s, theme, el);
         var vg = this._passiveMarks(vegaLite.compile(s, theme ? {config: theme} : {}).spec);
         var own = (spec._aov && spec._aov.cells && spec._aov.cells.own) || [];
         if (plan) (vg.scales || []).forEach(function(sc) {
@@ -2800,6 +3698,135 @@ window.AoV = window.AoV || {
         }
         return this._cellTips[theme];
     },
+    // The handler vega-embed installs for tooltip option `t` (a theme's
+    // options, the default `undefined`, or an app's own handler), obtained as
+    // _cellTooltip does; null when `t` turns tooltips off.
+    _tooltipHandler: function(t) {
+        if (t === false) return Promise.resolve(null);
+        if (typeof t === 'function') return Promise.resolve(t);
+        var opts = t && typeof t === 'object' ? t : {}, key = JSON.stringify(opts);
+        if (!this._tipHandlers[key]) {
+            this._tipHandlers[key] = vegaEmbed(document.createElement('div'), {},
+                    {mode: 'vega', renderer: 'none', actions: false, tooltip: opts})
+                .then(function(r) { var handler = r.view.tooltip(); r.finalize(); return handler; })
+                .catch(function(err) { console.error('AoV: tooltips do not name each panel\'s axis title:', err); return null; });
+        }
+        return this._tipHandlers[key];
+    },
+    // Per-panel axis titles (`config(facet=(; ylabels, xlabels))`,
+    // src/panel_labels.jl): `_aov.panelLabels` maps a channel to the column
+    // whose value titles each panel's axis, the facet fields the panels were
+    // written for, the axis titles they replace and the fields they title.
+    _panelLabelsOf: function(spec) {
+        var labels = spec && spec._aov && spec._aov.panelLabels;
+        return labels && typeof labels === 'object' && Object.keys(labels).length ? labels : null;
+    },
+    // A row's panel title on channel record `L`, or `fallback` where the row
+    // has none.
+    _panelTitle: function(L, d, fallback) {
+        var t = L && d ? d[L.field] : undefined;
+        return t === null || t === undefined || t !== t || t === '' ? fallback : String(t);
+    },
+    // The tooltip of a hovered item, its rows named by the item's panel
+    // title in place of the axis title they were written with: the estimate
+    // row `Level (cm): median (95% interval)` reads `Cmax (ng/mL): median
+    // (95% interval)`, a value row `Level (cm)` reads `Cmax (ng/mL)`. A
+    // Vega-Lite tooltip's row titles are fixed text, and a Vega expression
+    // cannot build an object key, so the rows are renamed here.
+    _panelTooltip: function(base, labels) {
+        var self = this;
+        return function(handler, event, item, value) {
+            return base.call(this, handler, event, item, self._panelTooltipValue(labels, item, value));
+        };
+    },
+    _panelTooltipValue: function(labels, item, value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+        var self = this, d = item && item.datum, renames = [];
+        Object.keys(labels).forEach(function(ch) {
+            var L = labels[ch], t = self._panelTitle(L, d, null);
+            if (t !== null) (L.titles || []).forEach(function(from) { if (from) renames.push([String(from), t]); });
+        });
+        if (!renames.length) return value;
+        var out = {};
+        Object.keys(value).forEach(function(k) {
+            var nk = k;
+            for (var i = 0; i < renames.length; i++) {
+                var from = renames[i][0], to = renames[i][1];
+                if (k === from) { nk = to; break; }
+                if (k.indexOf(from + ': ') === 0) { nk = to + k.slice(from.length); break; }
+            }
+            // A row whose new name another row already has keeps its own.
+            if (nk !== k && (nk in value || nk in out)) nk = k;
+            out[nk] = value[k];
+        });
+        return out;
+    },
+    // After a picker remap: per-panel titles hold while their panels are the
+    // ones they were written for (their facet fields are still facets) and the
+    // axis still shows a field they were written for. Otherwise the axes read
+    // their mapping's title again, and tooltips and the readout no longer
+    // rename: an unfaceted plot has no panel, and another field's axis is not
+    // the quantity the label column names.
+    _fitPanelLabels: function(spec) {
+        var labels = this._panelLabelsOf(spec);
+        if (!labels) return spec;
+        var self = this, facets = self._specFacetFields(spec);
+        Object.keys(labels).forEach(function(ch) {
+            var L = labels[ch], titled = [];
+            self._eachEncoding(spec, ch, function(e) {
+                if (e.axis && e.axis.title && typeof e.axis.title === 'object' && e.axis.title.expr !== undefined) titled.push(e);
+            });
+            var keep = (L.facet || []).every(function(f) { return facets.indexOf(f) !== -1; }) &&
+                titled.every(function(e) { return (L.fields || []).indexOf(e.field) !== -1; });
+            if (keep) return;
+            titled.forEach(function(e) { delete e.axis.title; });
+            delete labels[ch];
+        });
+        if (!Object.keys(labels).length) delete spec._aov.panelLabels;
+        return spec;
+    },
+    // The facet fields of a spec: its facet operator's or facet encodings',
+    // and each per-column-Y child's.
+    _specFacetFields: function(spec) {
+        var out = [];
+        var push = function(d) { if (d && typeof d === 'object' && d.field !== undefined) out.push(String(d.field)); };
+        (function view(v) {
+            if (!v || typeof v !== 'object') return;
+            if (v.facet) { push(v.facet); push(v.facet.row); push(v.facet.column); }
+            else if (v.encoding) { push(v.encoding.facet); push(v.encoding.row); push(v.encoding.column); }
+            (v.hconcat || []).forEach(view);
+        })(spec);
+        // The panels of a per-row-Y stack or per-wrap-Y concat each stand
+        // for a facet value.
+        (this._panelKids(spec) || []).forEach(function(c) {
+            Object.keys(c._aovPanel).forEach(function(f) { if (out.indexOf(f) === -1) out.push(f); });
+        });
+        return out;
+    },
+    // The panels of a facet given per-panel Y scales: a row facet's stack
+    // (`vconcat`, `_per_row_y_vconcat!`) or a wrap's `concat`
+    // (`_per_wrap_y_concat!`, src/to_vegalite.jl), every child recording the
+    // facet value it shows as `_aovPanel`. Null for any other spec.
+    _panelKids: function(spec) {
+        if (!spec) return null;
+        var keys = ['vconcat', 'concat'];
+        for (var i = 0; i < keys.length; i++) {
+            var kids = spec[keys[i]];
+            if (Array.isArray(kids) && kids.length &&
+                kids.every(function(c) { return c && typeof c === 'object' && c._aovPanel; })) return kids;
+        }
+        return null;
+    },
+    // Call f(encoding) on every `ch` encoding of a spec's units.
+    _eachEncoding: function(node, ch, f) {
+        var self = this;
+        if (!node || typeof node !== 'object') return;
+        if (node.encoding && node.encoding[ch] && typeof node.encoding[ch] === 'object') f(node.encoding[ch]);
+        ['layer', 'hconcat', 'vconcat', 'concat'].forEach(function(k) {
+            if (Array.isArray(node[k])) node[k].forEach(function(n) { self._eachEncoding(n, ch, f); });
+        });
+        if (node.spec) self._eachEncoding(node.spec, ch, f);
+    },
     _cellView: function(col, colId, el, key, plan, tooltip) {
         var self = this;
         if (!el.isConnected) return;
@@ -2815,8 +3842,133 @@ window.AoV = window.AoV || {
         col.inline.forEach(function(ds) { view.data(ds.name, (ds.byKey.get(tok) || []).concat(ds.shared)); });
         view.signal(self._FRAME_PARAM, key);
         self._cellViews.set(el, {view: view, colId: colId, theme: built.theme});
-        return view.runAsync().then(function() { return view; })
+        return view.runAsync().then(function() { self._cellAxis(colId, el, view, built.theme); return view; })
             .catch(function(err) { console.error('AoV: a cell of column "' + colId + '" cannot be drawn:', err); });
+    },
+    // The column's value axis in its header cell (`cell_charts(…; axis=true)`):
+    // the x axis every cell shares, drawn once at the bottom of the column's
+    // header and aligned with the cells' plot area (_cellAlign), so the
+    // in-row charts can be read off. Its scale is the one a drawn cell uses
+    // (the frame plan's shared domain after nice/zero), so the ticks sit
+    // where the cells draw those values. Only a continuous x the cells share
+    // gets one: a categorical x, or one the figure unlinks (`own`), has no
+    // single axis. Drawn on a canvas, so the header's text, which the
+    // table's CSV export and sorting read, stays its own; the header keeps
+    // room for it in its bottom padding, below the sort caret.
+    _CELL_AXIS_TYPES: {linear: 1, log: 1, pow: 1, sqrt: 1, symlog: 1, time: 1, utc: 1},
+    _cellAxes: null,
+    _cellAxis: function(colId, el, view, themeKey) {
+        var self = this, col = self._cellCols[colId];
+        if (!col || !el.isConnected) return;
+        var cells = (col.spec._aov && col.spec._aov.cells) || {};
+        if (cells.axis === false || (cells.own || []).indexOf('x') !== -1) return;
+        var td = el.closest ? el.closest('td') : null, th = self._cellHeader(td);
+        if (!th) return;
+        var sc;
+        try { sc = view.scale('x'); } catch (err) { return; }
+        if (!sc || !self._CELL_AXIS_TYPES[sc.type]) return;
+        var domain = sc.domain().map(function(d) { return +d; });
+        var key = JSON.stringify([colId, sc.type, domain, themeKey]);
+        self._cellAxes = self._cellAxes || new Map();
+        var cur = self._cellAxes.get(th);
+        if (cur && cur.key === key && cur.holder.isConnected) { cur.cell = el; return; }
+        if (cur) { cur.view.finalize(); cur.holder.remove(); }
+        var spec = col.spec, enc = self._cellXEncoding(spec);
+        if (!enc) return;
+        var theme = self._themeOn(spec) ? self.hostThemeConfig(el) : null;
+        var cfg = JSON.parse(JSON.stringify(spec.config || {}));
+        cfg.axis = Object.assign({}, cfg.axis || {}, {disable: false});
+        var own = enc.axis && typeof enc.axis === 'object' ? enc.axis : {};
+        var axis = Object.assign({}, own, {orient: 'top', title: null, grid: false, labelFlush: true, domain: true, ticks: true});
+        // A header line of labels: about one per 60 px, unless the figure sets its own.
+        if (own.values === undefined && own.tickCount === undefined) axis.tickCount = Math.max(2, Math.round(spec.width / 60));
+        var vl = {width: spec.width, height: 0, padding: 0, autosize: {type: 'pad'}, data: {values: []},
+            mark: {type: 'point', opacity: 0}, config: cfg, encoding: {x: {field: enc.field, type: enc.type, axis: axis,
+                scale: {type: sc.type, domain: domain, nice: false, zero: false}}}};
+        if (theme) self._hostInk(vl, theme);
+        var holder = document.createElement('span');
+        holder.className = 'aov-cell-axis';
+        holder.setAttribute('aria-hidden', 'true');
+        holder.style.cssText = 'position:absolute;bottom:0;left:0;pointer-events:none;line-height:0';
+        if (getComputedStyle(th).position === 'static') th.style.position = 'relative';
+        if (th.dataset.aovAxisPad === undefined) th.dataset.aovAxisPad = parseFloat(getComputedStyle(th).paddingBottom) || 0;
+        if (self._cellRO) self._cellRO.observe(th);
+        th.appendChild(holder);
+        var axisView;
+        try {
+            var vg = vegaLite.compile(vl, theme ? {config: theme} : {}).spec;
+            axisView = new vega.View(vega.parse(vg), {renderer: 'canvas', container: holder});
+        } catch (err) { holder.remove(); console.error('AoV: the header axis of cell column "' + colId + '" cannot be drawn:', err); return; }
+        var rec = {key: key, holder: holder, view: axisView, cell: el, colId: colId};
+        self._cellAxes.set(th, rec);
+        axisView.runAsync().then(function() { self._cellAlignSoon(); })
+            .catch(function(err) { console.error('AoV: the header axis of cell column "' + colId + '" cannot be drawn:', err); });
+    },
+    // The x encoding a cell column's figure draws (the first unit with a
+    // continuous x): its field, type and authored axis (format, values).
+    _cellXEncoding: function(spec) {
+        var found = null;
+        (function walk(u, top) {
+            if (found || !u || typeof u !== 'object') return;
+            var enc = Object.assign({}, top || {}, u.encoding || {});
+            if (u.mark && enc.x && enc.x.field && (enc.x.type === 'quantitative' || enc.x.type === 'temporal')) { found = enc.x; return; }
+            (u.layer || []).forEach(function(l) { walk(l, enc); });
+        })(spec, null);
+        return found;
+    },
+    // The header cell above table cell `td`: the lowest header cell that
+    // covers td's column alone (column and row spans counted).
+    _cellHeader: function(td) {
+        var table = td && td.closest('table');
+        if (!table || !table.tHead) return null;
+        var tr = td.parentElement, col = 0;
+        for (var i = 0; i < tr.cells.length && tr.cells[i] !== td; i++) col += tr.cells[i].colSpan || 1;
+        var taken = [], found = null;
+        Array.prototype.forEach.call(table.tHead.rows, function(row, r) {
+            var c = 0;
+            Array.prototype.forEach.call(row.cells, function(cell) {
+                while (taken[r] && taken[r][c]) c++;
+                var span = cell.colSpan || 1, rows = cell.rowSpan || 1;
+                for (var rr = r; rr < r + rows; rr++) {
+                    taken[rr] = taken[rr] || [];
+                    for (var cc = c; cc < c + span; cc++) taken[rr][cc] = true;
+                }
+                if (span === 1 && col === c) found = cell;
+                c += span;
+            });
+        });
+        return found;
+    },
+    // Each header axis at its cells' plot area: left where a cell of its
+    // column starts in that table, its height kept free in the header's
+    // bottom padding. Run with the totals' alignment, which moves the cells.
+    _cellAlignAxes: function() {
+        var self = this;
+        if (!self._cellAxes) return;
+        var place = [];
+        self._cellAxes.forEach(function(rec, th) {
+            if (!th.isConnected || !rec.holder.isConnected) {
+                rec.view.finalize(); self._cellAxes.delete(th);
+                if (self._cellRO) self._cellRO.unobserve(th);
+                return;
+            }
+            var cell = rec.cell;
+            if (!cell || !cell.isConnected || cell.closest('table') !== th.closest('table')) {
+                cell = th.closest('table').querySelector('span.aov-cell[data-aov-cells="' + rec.colId + '"]');
+                rec.cell = cell;
+            }
+            if (cell) place.push([rec, th, cell]);
+        });
+        // Read every position, then write: one layout for all axes.
+        var at = place.map(function(p) {
+            var cr = p[2].getBoundingClientRect(), hr = p[1].getBoundingClientRect();
+            return {left: cr.left - hr.left - p[1].clientLeft, height: p[0].holder.offsetHeight, visible: cr.width > 0};
+        });
+        place.forEach(function(p, i) {
+            if (!at[i].visible) return;
+            p[0].holder.style.left = Math.round(at[i].left) + 'px';
+            p[1].style.paddingBottom = (+p[1].dataset.aovAxisPad + at[i].height + 2) + 'px';
+        });
     },
     // Redraw the cells of every column whose host theme changed (refreshTheme).
     _refreshCellThemes: function() {
@@ -2866,10 +4018,31 @@ window.AoV = window.AoV || {
     // of the point under it, whose own datum is the row. On touch input a
     // long press is the click and a tap is not (see _attachTouch), so the
     // click a browser sends after a touch is not reported here.
+    // A press whose pointer moved more than _CLICK_SLOP px (a pen's:
+    // _TOUCH_SLOP) before its release was a drag, not a click, and is not
+    // reported either. Vega sends a click whenever the release lands on the
+    // item the press picked, and a pan (a scale-bound interval, a map's
+    // projection) moves that item along with the pointer, so a drag that
+    // starts on a large mark usually ends on it again.
+    _CLICK_SLOP: 4,
     _attachClick: function(id, view) {
-        var self = this;
+        var self = this, press = null;
+        var moved = function(event) {
+            var dx = event.clientX - press.x, dy = event.clientY - press.y;
+            return dx * dx + dy * dy > press.slop * press.slop;
+        };
+        view.addEventListener('pointerdown', function(event) {
+            press = {x: event.clientX, y: event.clientY, moved: false,
+                slop: event.pointerType === 'pen' ? self._TOUCH_SLOP : self._CLICK_SLOP};
+        });
+        // A drag that wanders off and comes back before release is a drag too.
+        view.addEventListener('pointermove', function(event) {
+            if (press && !press.moved && moved(event)) press.moved = true;
+        });
         view.addEventListener('click', function(event, item) {
-            if (self._fromTouch(id, event)) return;
+            var dragged = press && (press.moved || moved(event));
+            press = null;
+            if (dragged || self._fromTouch(id, event)) return;
             if (!item || !item.mark || item.mark.role !== 'mark') return;
             var datum = item.datum;
             while (datum && datum.mark && datum.mark.marktype && datum.datum) datum = datum.datum;
@@ -2927,7 +4100,8 @@ window.AoV = window.AoV || {
         // Each event carries its own copy of the row, as aov:click does.
         h = this._hovers[id] = {row: row, leaving: false, key: null};
         this._dispatch(id, 'aov:hover', {id: id, datum: Object.assign({}, row), event: event});
-        h.key = this._announce(id, row);
+        // A readout along the link key announces the x it shows itself.
+        h.key = this._readoutOwnsLink(id) ? null : this._announce(id, row);
     },
     _hoverLeave: function(id, event) {
         var self = this, h = self._hovers[id];
@@ -3271,7 +4445,14 @@ window.AoV = window.AoV || {
             } else {
                 return;
             }
-            u.encoding = Object.assign({}, u.encoding, {opacity: next});
+            var extra = {opacity: next};
+            // A heatmap's cells are stroked in their own colour, reaching into
+            // their neighbours (`_heatmap_seams!`, src/to_vegalite.jl). Dimmed,
+            // that overlap would draw a lattice, so a dimmed cell drops it.
+            var style = typeof u.mark === 'object' ? u.mark.style : undefined;
+            if (enc.stroke && [].concat(style || []).indexOf('aov-heatmap') !== -1 && enc.strokeOpacity === undefined)
+                extra.strokeOpacity = {condition: {test: dimmed, value: 0}};
+            u.encoding = Object.assign({}, u.encoding, extra);
         });
         return spec;
     },
@@ -3295,9 +4476,27 @@ window.AoV = window.AoV || {
         var link = this._link(id);
         if (!link || !datum || !Object.prototype.hasOwnProperty.call(datum, link.key) ||
             datum[link.key] === null || datum[link.key] === undefined) return null;
-        var key = String(datum[link.key]);
+        var key = this._linkKeyText(link, datum[link.key]);
         this._announceKey(id, key);
         return key;
+    },
+    // A key value as the group compares it: the text Julia writes the value
+    // as, which is what a table keys its rows by (`string(x)`). Vega holds a
+    // date or date-time field as epoch milliseconds, so a temporal key
+    // (`link.temporal`, set from the key column's type) is written back:
+    // a DateTime as its wall-clock time, `2026-03-15T17:00:00`, the way Vega
+    // parsed it (local time), and a Date as `2026-03-15`, which Vega parses
+    // as UTC midnight. Every other value is its String().
+    _linkKeyText: function(link, v) {
+        var kind = link && link.temporal;
+        if (v instanceof Date) v = +v;
+        if (!kind || typeof v !== 'number' || !isFinite(v)) return String(v);
+        var d = new Date(v), p = function(n, w) { return String(n).padStart(w || 2, '0'); };
+        if (kind === 'date') return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+        var s = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' +
+            p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+        // Julia writes milliseconds without trailing zeros: `…T17:00:00.5`.
+        return d.getMilliseconds() ? s + '.' + p(d.getMilliseconds(), 3).replace(/0+$/, '') : s;
     },
     _announceKey: function(id, key) {
         var link = this._link(id);
@@ -3314,14 +4513,45 @@ window.AoV = window.AoV || {
     // The latest announcement per group, {keys, source}.
     _linkState: {},
     _showLinkKeys: function(id, link, keys) {
+        // A figure whose readout runs along the key (a time series keyed by
+        // its time) shows the announced x with its readout: dimming would
+        // grey out every line and band, whose one mark spans all x values.
+        if (this._readoutOwnsLink(id)) {
+            this.clearHighlight(id);
+            if (keys.length === 1) this._readoutAtKey(id, keys[0]); else this._readoutHide(id, false);
+            if (keys.length < 2) return;
+        }
         if (!keys.length) { this.clearHighlight(id); return; }
-        var m = {};
-        m[link.key] = keys;
-        this.highlight(id, m);
+        var self = this, wanted = new Set(keys);
+        // As `AoV.highlight(id, {key: keys})`, comparing the key as the group
+        // writes it (_linkKeyText): a row without the key field stays bright.
+        this.highlight(id, function(d) {
+            if (!d || !Object.prototype.hasOwnProperty.call(d, link.key)) return true;
+            return wanted.has(self._linkKeyText(link, d[link.key]));
+        });
     },
     _joinLinkState: function(id) {
         var link = this._link(id), st = link && this._linkState[link.group];
         if (st && st.keys.length && st.source !== this._els[id]) this._showLinkKeys(id, link, st.keys);
+    },
+    // --- Rows a page computes in the browser ---
+    // An HTMXObjects `semantic_app` page that computes a property in the
+    // browser raises `htmxo:bound-columns` on each element showing rows of it
+    // (`bound(p; columns)`), with the new columns. `to_node` marks a plot drawn
+    // from such rows on its `.aov-plot-area`, the element that holds the plot
+    // and its embed script (so a static export reads the embedded rows as
+    // bound): `data-aov-bound-for` names the plot, the marker its dataset. The
+    // columns replace that dataset, as `updateData` does.
+    _watchBound: function() {
+        if (this._boundListener) return;
+        var self = this;
+        this._boundListener = function(e) {
+            var area = e.target, id = area && area.getAttribute && area.getAttribute('data-aov-bound-for');
+            if (!id) return;
+            var marker = JSON.parse(area.getAttribute('data-htmxo-bound-columns') || '{}'), d = e.detail || {};
+            self.updateData(id, {n: d.n, columns: d.columns}, marker.dataset);
+        };
+        document.addEventListener('htmxo:bound-columns', this._boundListener);
     },
     _watchLinks: function() {
         if (this._linkListener) return;
@@ -3338,6 +4568,510 @@ window.AoV = window.AoV || {
             });
         };
         document.addEventListener('htmxo:link', this._linkListener);
+    },
+
+    // --- Labels of reference lines and periods (src/ref_labels.jl) ---
+    // `mapping(:t; text=:name) * visual(VLines)` (and VSpan) labels stand
+    // just above the plot area, at their line; labels close together go into
+    // rows so they never overprint, as AP4 stacks them. After every draw that
+    // can move them (the embed, a resize, a data change, a zoom), each
+    // panel's labels are measured as drawn and, from left to right, each
+    // takes the first row where it clears the label before it; a label whose
+    // line is out of view (zoomed away) is hidden (row -1). The rows reach
+    // the labels through the `aov_ref_rows` parameter; they are set only
+    // when they change, so the redraw that follows settles.
+    _REF_ROWS: 'aov_ref_rows',
+    _REF_GAP: 6,
+    _refPending: {},
+    _refLabelsWatch: function(id, view) {
+        var self = this;
+        try { view.signal(self._REF_ROWS); } catch (err) { return; }
+        view.addResizeListener(function() { if (self.views[id] === view) self._refLabelsSoon(id); });
+        // A zoom moves the lines: AoV's zoom parameter `grid` drives one
+        // signal per zoomed field (`grid_<field>`), so follow all of them.
+        var names = ['width', 'height'];
+        try {
+            Object.keys(view.getState({signals: vega.truthy, data: vega.falsy}).signals || {}).forEach(function(n) {
+                if (/^grid(_|$)/.test(n)) names.push(n);
+            });
+        } catch (err) { /* no state: size changes only */ }
+        names.forEach(function(name) {
+            try { view.addSignalListener(name, function() { if (self.views[id] === view) self._refLabelsSoon(id); }); }
+            catch (err) { /* no such signal: nothing to follow */ }
+        });
+        self._refLabelsSoon(id);
+    },
+    _refLabelsSoon: function(id) {
+        var self = this;
+        if (self._refPending[id]) return;
+        self._refPending[id] = setTimeout(function() { delete self._refPending[id]; self._layoutRefLabels(id); }, 0);
+    },
+    _layoutRefLabels: function(id) {
+        var self = this, view = self.views[id];
+        if (!view) return;
+        var current;
+        try { current = view.signal(self._REF_ROWS); } catch (err) { return; }
+        var panels = new Map();
+        (function walk(item) {
+            if (item.mark && item.mark.marktype === 'text' && item.datum && item.datum.__aov_ref_key !== undefined) {
+                var g = item.mark.group;
+                if (!panels.has(g)) panels.set(g, []);
+                panels.get(g).push(item);
+            }
+            (item.items || []).forEach(walk);
+        })(view.scenegraph().root);
+        if (!panels.size) return;
+        var rows = {};
+        panels.forEach(function(items, g) {
+            var width = g && typeof g.width === 'number' ? g.width : view.width();
+            var ends = [];
+            items.slice().sort(function(a, b) { return a.x - b.x; }).forEach(function(it) {
+                var key = it.datum.__aov_ref_key, b = it.bounds;
+                // In view: its line inside the plot (one at the right edge has no room).
+                if (!(it.x >= -0.5 && it.x < width - 0.5)) { if (!(key in rows)) rows[key] = -1; return; }
+                var r = 0;
+                while (r < ends.length && b.x1 < ends[r] + self._REF_GAP) r++;
+                ends[r] = b.x2;
+                rows[key] = Math.max(rows[key] === undefined ? -1 : rows[key], r);
+            });
+        });
+        if (JSON.stringify(rows) === JSON.stringify(current || {})) return;
+        view.signal(self._REF_ROWS, rows);
+        view.resize().runAsync().catch(function(err) { self._console.error.call(console, '[' + id + ']', err); });
+    },
+
+    // --- Readout: every series' value at the pointer's x ---
+    // A figure with a line or area layer on a continuous x (a time series, a
+    // ribbon, a curve over a sample size), and a ribbon's point-interval
+    // drawing, get a readout; `config(readout=false)` turns it off and
+    // `config(readout=true)` gives one to any figure with a continuous x.
+    // While the pointer is over a plot area, a rule marks the nearest x that
+    // has data and one box lists every series there:
+    // - a series with an interval (a ribbon's or band's widest, the rules of
+    //   its interval drawing) as its median with that interval,
+    //   `142 (138–148)`, all three rounded at the second significant digit of
+    //   the interval's width;
+    // - a line or a single point as its value, to four significant digits;
+    // - a cloud of points at one x (single runs) is left out.
+    // A layer drawn with `visual(...; inspectable=false)` (marks styled
+    // `aov-passive`) is left out, as Makie's DataInspector skips such a
+    // plot: a `Band` from 0 to a line's value is a wash under that line, not
+    // its interval, and a figure whose only line is passive gets no readout
+    // unless `config(readout=true)`.
+    // Series are named by their colour field's value, by the layer's
+    // `visual(...; label=…)` (`_aov_label`), or by its y title. In a faceted figure the readout follows the panel under the
+    // pointer. A `vconcat` stack's box lists every panel's series, each
+    // panel's under its y title (_readoutStackPlan). The box stands in for
+    // the mark tooltip while it shows. When
+    // the figure's link key is its x field, the readout's x is announced to
+    // the link group, and another member's announcement of one x (a table
+    // row) shows the rule and box there (_showLinkKeys).
+    // The plan is read from the spec as embedded, the values from the
+    // scenegraph, so picker remaps, data updates and drawings switches are
+    // read as drawn. Listeners on the element look the view up by id (R3).
+    _readouts: {},
+    _READOUT_PATHS: {line: 1, area: 1, trail: 1},
+    _READOUT_MARKS: {line: 1, area: 1, trail: 1, point: 1, circle: 1, square: 1, tick: 1, bar: 1, rule: 1},
+    // The units a readout reads, by the scenegraph name of their marks:
+    // mark type, x field (a ribbon interval drawing's own x, not its dodged
+    // one), y and y2 fields, colour field and y title. Null when the figure
+    // gets no readout.
+    _readoutPlan: function(spec, namePrefix) {
+        var aov = (spec && spec._aov) || {};
+        if (!spec || aov.readout === false || spec.hconcat || spec.repeat) return null;
+        if (spec.concat) return namePrefix === undefined && this._isPanelWrap(spec) ? this._readoutStackPlan(spec, aov) : null;
+        if (spec.vconcat) return namePrefix === undefined ? this._readoutStackPlan(spec, aov) : null;
+        var inner = spec.spec || spec, top = inner.encoding || {};
+        var faceted = !!(spec.facet || spec.spec || top.column || top.row || top.facet);
+        var layered = Array.isArray(inner.layer), units = layered ? inner.layer : [inner];
+        var prefix = (namePrefix || '') + (faceted ? 'child_' : ''), dodge = aov.dodgeX;
+        var plan = {units: {}, order: [], x: null, xType: null, xTitle: null, faceted: faceted, series: null,
+            panel: this._panelLabelsOf(spec)};
+        var paths = false;
+        units.forEach(function(u, i) {
+            if (!u || u.layer) return;
+            var enc = layered ? Object.assign({}, top, u.encoding || {}) : (u.encoding || {});
+            var mark = typeof u.mark === 'string' ? u.mark : (u.mark && u.mark.type);
+            var x = enc.x, y = enc.y;
+            if (!this._READOUT_MARKS[mark] || !x || !x.field || !y || !y.field) return;
+            if (u.mark && this._isPassiveStyle(u.mark.style)) return;
+            if (x.type !== 'quantitative' && x.type !== 'temporal') return;
+            // Bars on a continuous x are placed by edges AoV computes
+            // (`_bar_edges!`, src/layer_to_vl.jl): their x is their own column.
+            var edges = u._aov_edges && u._aov_edges.channel === 'x' && x.field === u._aov_edges.lo ? u._aov_edges : null;
+            var xf = edges ? edges.field : dodge && x.field === dodge.as ? dodge.field : x.field;
+            if (plan.x === null) { plan.x = xf; plan.xType = x.type; plan.xTitle = x.title || xf; }
+            if (xf !== plan.x) return;
+            if (this._READOUT_PATHS[mark]) paths = true;
+            var color = enc.color && enc.color.field;
+            if (color && plan.series === null) plan.series = color;
+            var tip = [].concat(enc.tooltip || []).filter(function(t) { return t && t.field === y.field; })[0];
+            var name = prefix + (layered ? 'layer_' + i + '_marks' : 'marks');
+            plan.units[name] = {mark: mark, x: xf, edges: edges, y: y.field, y2: enc.y2 && enc.y2.field, color: color,
+                title: y.title || (tip && tip.title) || y.field, label: typeof u._aov_label === 'string' ? u._aov_label : null,
+                index: plan.order.length};
+            plan.order.push(name);
+        }, this);
+        if (!plan.order.length || !(paths || dodge || aov.readout === true)) return null;
+        plan.paths = paths;
+        return plan;
+    },
+    // A `vconcat` stack (src/vconcat.jl) reads as one figure: every panel's
+    // units (Vega-Lite names a panel's marks `concat_<k>_…`), the panels as
+    // its scopes, one rule through all of them and one box listing every
+    // panel's series at the x under the pointer. A panel with
+    // `config(readout=false)` is left out (`_aov.panels`). Each unit keeps
+    // its panel `k` and that panel's own colour field: panels show different
+    // quantities, so a name in two panels is two series (_readoutEntries),
+    // listed under each panel's y title (`panelTitles`, _readoutShow).
+    // A per-panel-Y wrap (`concat`, `_per_wrap_y_concat!`) is planned the
+    // same way, but its panels sit side by side in rows, so its readout
+    // follows the hovered panel as a wrap facet's does (`wrapped`): one rule
+    // through that panel and its series only, without a panel heading (its
+    // title above the panel names it).
+    _readoutStackPlan: function(spec, aov) {
+        var self = this, panels = aov.panels || [], paths = false, wrapped = !!spec.concat;
+        var plan = {units: {}, order: [], x: null, xType: null, xTitle: null, faceted: false, stacked: !wrapped,
+            wrapped: wrapped, series: null, panelTitles: {}};
+        (wrapped ? spec.concat : spec.vconcat).forEach(function(child, k) {
+            if ((panels[k] || {}).readout === false) return;
+            var sub = self._readoutPlan(Object.assign({}, child, {_aov: {readout: true}}), 'concat_' + k + '_');
+            if (!sub) return;
+            if (plan.x === null) { plan.x = sub.x; plan.xType = sub.xType; plan.xTitle = sub.xTitle; }
+            paths = paths || sub.paths;
+            // The panel's y title as Vega-Lite writes a layered axis's: its
+            // layers' distinct titles, joined by a comma.
+            var titles = [];
+            sub.order.forEach(function(name) {
+                var t = String(sub.units[name].title);
+                if (titles.indexOf(t) < 0) titles.push(t);
+                plan.units[name] = Object.assign({}, sub.units[name], {index: plan.order.length, panel: k, series: sub.series});
+                plan.order.push(name);
+            });
+            if (!wrapped) plan.panelTitles[k] = titles.join(', ');
+        });
+        if (!plan.order.length || !(paths || aov.readout === true)) return null;
+        return plan;
+    },
+    // The plot area a stack's readout spans: from its top panel's to its
+    // bottom panel's.
+    _readoutSpan: function(scopes) {
+        if (!scopes.length) return null;
+        var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        scopes.forEach(function(s) {
+            x0 = Math.min(x0, s.x); y0 = Math.min(y0, s.y);
+            x1 = Math.max(x1, s.x + s.width); y1 = Math.max(y1, s.y + s.height);
+        });
+        return {group: null, x: x0, y: y0, width: x1 - x0, height: y1 - y0};
+    },
+    _readoutAllItems: function(plan, scopes) {
+        var self = this;
+        return [].concat.apply([], scopes.map(function(s) { return self._readoutItems(plan, s); }));
+    },
+    _readoutState: function(id) {
+        return this._readouts[id] || (this._readouts[id] = {plan: null, box: null, rule: null, key: null, tip: false});
+    },
+    _readoutOwnsLink: function(id) {
+        var st = this._readouts[id], link = this._link(id);
+        return !!(st && st.plan && link && link.key === st.plan.x);
+    },
+    // Called on every embed: the plan for the spec just drawn, and (once per
+    // element) the pointer listeners.
+    _attachReadout: function(id) {
+        var self = this, el = self._els[id], st = self._readoutState(id);
+        var cur = self._cur[id];
+        st.plan = self._readoutPlan(cur && cur.spec);
+        st.box = st.rule = null;     // vega-embed emptied the element
+        if (!el || el._aovReadout) return;
+        el._aovReadout = true;
+        el.addEventListener('pointermove', function(ev) {
+            if (self._els[id] !== el || ev.pointerType === 'touch') return;
+            self._readoutPointer(id, ev);
+        });
+        el.addEventListener('pointerleave', function(ev) {
+            if (self._els[id] === el && ev.pointerType !== 'touch') self._readoutHide(id, true);
+        });
+    },
+    // Where the view's plot coordinates start, in client coordinates: its
+    // drawing's corner plus the view origin and padding, as Vega maps the
+    // pointer (see test/mark_click.js).
+    _readoutFrame: function(view) {
+        var c = view.container(), d = c && (c.querySelector('canvas') || c.querySelector('svg'));
+        if (!d) return null;
+        var r = d.getBoundingClientRect(), o = view.origin(), p = view.padding();
+        return {left: r.left + o[0] + (p.left || 0), top: r.top + o[1] + (p.top || 0)};
+    },
+    // The plot areas a readout can show in: each facet cell, or the one view.
+    _readoutScopes: function(view, plan) {
+        var root = view.scenegraph().root, frame = root && root.items && root.items[0];
+        if (!frame) return [];
+        if (plan.stacked || plan.wrapped) {
+            var panels = [];
+            (frame.items || []).forEach(function(m) {
+                if (m.marktype === 'group' && /^concat_\d+_group$/.test(m.name || '')) (m.items || []).forEach(function(g) {
+                    panels.push({group: g, x: g.x || 0, y: g.y || 0, width: g.width || 0, height: g.height || 0});
+                });
+            });
+            return panels;
+        }
+        if (!plan.faceted) return [{group: frame, x: 0, y: 0, width: view.width(), height: view.height()}];
+        var out = [];
+        (frame.items || []).forEach(function(m) {
+            if (m.marktype === 'group' && m.name === 'cell') (m.items || []).forEach(function(g) {
+                out.push({group: g, x: g.x || 0, y: g.y || 0, width: g.width || 0, height: g.height || 0});
+            });
+        });
+        return out;
+    },
+    // Every drawn item of the plan's units in a scope, with its x in view
+    // coordinates and its row's x value (a number: Vega holds dates as
+    // epoch milliseconds).
+    _readoutItems: function(plan, scope) {
+        var out = [];
+        (function walk(group, dx) {
+            (group.items || []).forEach(function(m) {
+                if (m.marktype === 'group') {
+                    if (m.role === 'scope') (m.items || []).forEach(function(g) { walk(g, dx + (g.x || 0)); });
+                    return;
+                }
+                var u = m.role === 'mark' && plan.units[m.name];
+                if (!u) return;
+                (m.items || []).forEach(function(it) {
+                    var d = it.datum, v = d && d[u.x];
+                    if (v instanceof Date) v = +v;
+                    // An edged bar's time column may be the text written; its
+                    // edges are epoch milliseconds either way.
+                    if (u.edges && d && typeof v !== 'number') v = (+d[u.edges.lo] + +d[u.edges.hi]) / 2;
+                    if (typeof v !== 'number' || !isFinite(v) || typeof it.x !== 'number') return;
+                    // An edged bar stands at its middle, not its left edge.
+                    var ix = it.x + (u.edges && typeof it.width === 'number' ? it.width / 2 : 0);
+                    out.push({unit: u, item: it, datum: d, x: dx + ix, value: v});
+                });
+            });
+        })(scope.group, scope.x);
+        return out;
+    },
+    _readoutPointer: function(id, ev) {
+        var st = this._readouts[id], view = this.views[id];
+        if (!st || !st.plan || !view) return;
+        var f = this._readoutFrame(view);
+        if (!f) return;
+        var px = ev.clientX - f.left, py = ev.clientY - f.top;
+        var inside = function(s) { return px >= s.x && px <= s.x + s.width && py >= s.y && py <= s.y + s.height; };
+        var scopes = this._readoutScopes(view, st.plan), scope, items;
+        if (st.plan.stacked) {
+            scope = this._readoutSpan(scopes);
+            items = scope && inside(scope) ? this._readoutAllItems(st.plan, scopes) : [];
+        } else {
+            scope = scopes.filter(inside)[0];
+            items = scope ? this._readoutItems(st.plan, scope) : [];
+        }
+        if (!items.length) { this._readoutHide(id, true); return; }
+        var best = items[0];
+        items.forEach(function(c) { if (Math.abs(c.x - px) < Math.abs(best.x - px)) best = c; });
+        this._readoutShow(id, view, f, scope, items.filter(function(c) { return c.value === best.value; }), items, true);
+    },
+    // Show the x a link-group member announced: the first panel that has it.
+    _readoutAtKey: function(id, key) {
+        var self = this;
+        self.whenReady(id, function(view) {
+            var st = self._readouts[id], link = self._link(id);
+            if (!st || !st.plan || !link) return;
+            var f = self._readoutFrame(view);
+            if (!f) return;
+            var scopes = self._readoutScopes(view, st.plan);
+            if (st.plan.stacked) {
+                var every = self._readoutAllItems(st.plan, scopes), span = self._readoutSpan(scopes);
+                var hit = every.filter(function(c) { return self._linkKeyText(link, c.value) === key; });
+                if (hit.length && span) self._readoutShow(id, view, f, span, hit, every, false); else self._readoutHide(id, false);
+                return;
+            }
+            for (var i = 0; i < scopes.length; i++) {
+                var all = self._readoutItems(st.plan, scopes[i]);
+                var at = all.filter(function(c) { return self._linkKeyText(link, c.value) === key; });
+                if (at.length) { self._readoutShow(id, view, f, scopes[i], at, all, false); return; }
+            }
+            self._readoutHide(id, false);
+        });
+    },
+    // One entry per series at the shown x, in the colour scale's order (the
+    // legend's), then the uncoloured layers in layer order. In a stack, one
+    // entry per panel and series, panel by panel from the top: a name shared
+    // by two panels (a scenario in each) is two series of two quantities.
+    _readoutEntries: function(view, plan, at) {
+        var self = this, series = {}, list = [], stacked = !!plan.stacked;
+        at.forEach(function(c) {
+            var u = c.unit, d = c.datum, field = stacked || plan.wrapped ? u.series : plan.series;
+            // A panel with its own axis title (`config(facet=(; ylabels))`)
+            // names its uncoloured series by it.
+            var title = self._panelTitle(plan.panel && plan.panel.y, d, u.title);
+            var name = u.color ? d[u.color] : u.label !== null ? u.label :
+                (field && d[field] !== undefined ? d[field] : title);
+            name = String(name);
+            var key = stacked ? u.panel + '\u0000' + name : name;
+            var s = series[key];
+            if (!s) {
+                s = series[key] = {name: name, panel: stacked ? u.panel : null, coloured: name !== String(title),
+                    first: u.index, colour: null, units: {}};
+                list.push(s);
+            }
+            s.first = Math.min(s.first, u.index);
+            (s.units[u.index] = s.units[u.index] || []).push(c);
+            // The series' colour: a line's or rule's stroke, an area's or
+            // bar's fill, else a point's (never the white of a median dot).
+            var it = c.item, rank = {line: 0, trail: 0, rule: 0, area: 1, bar: 1}[u.mark];
+            var col = rank === 0 ? it.stroke : rank === 1 ? it.fill :
+                (it.fill && !/^(#fff(fff)?|white)$/i.test(it.fill) ? it.fill : it.stroke);
+            if (rank === undefined) rank = 2;
+            if (col && (s.rank === undefined || rank < s.rank)) { s.colour = col; s.rank = rank; }
+        });
+        list.forEach(function(s) {
+            s.median = null; s.lo = null; s.hi = null; s.single = [];
+            Object.keys(s.units).forEach(function(k) {
+                var cs = s.units[k], u = cs[0].unit;
+                cs.forEach(function(c) {
+                    var a = +c.datum[u.y], b = u.y2 ? +c.datum[u.y2] : NaN;
+                    if (isFinite(a) && isFinite(b)) {
+                        var lo = Math.min(a, b), hi = Math.max(a, b);
+                        if (s.lo === null || hi - lo > s.hi - s.lo) { s.lo = lo; s.hi = hi; }
+                    }
+                });
+                // A line's value is its median; one point of a layer is a
+                // value, a cloud of them (single runs) is not read out.
+                if (u.y2) return;
+                if (this._READOUT_PATHS[u.mark]) s.median = +cs[0].datum[u.y];
+                else if (cs.length === 1) s.single.push(+cs[0].datum[u.y]);
+            }, this);
+            if (s.median === null && s.single.length) s.median = s.single[0];
+        }, this);
+        var domain = [];
+        try { domain = view.scale('color').domain().map(String); } catch (e) { domain = []; }
+        return list.filter(function(s) { return s.median !== null || s.lo !== null; }).sort(function(a, b) {
+            if (a.panel !== b.panel) return a.panel - b.panel;
+            var ia = domain.indexOf(a.name), ib = domain.indexOf(b.name);
+            if ((ia < 0) !== (ib < 0)) return ia < 0 ? 1 : -1;
+            return ia !== ib ? ia - ib : a.first - b.first;
+        });
+    },
+    // A value and its interval at the precision the interval supports: the
+    // second significant digit of its width; a lone value to four
+    // significant digits. In the plot's locale (`locale_config`).
+    _readoutText: function(view, s) {
+        var loc = view.locale ? view.locale() : null;
+        var fmt = function(spec) { return loc && loc.format ? loc.format(spec) : function(v) { return String(v); }; };
+        if (s.lo === null) return fmt('.4~r')(s.median);
+        var w = s.hi - s.lo, digits = w > 0 ? Math.min(10, Math.max(0, 1 - Math.floor(Math.log10(w)))) : 2;
+        var f = fmt(',.' + digits + 'f'), sep = s.lo < 0 || s.hi < 0 ? ' – ' : '–';
+        var range = f(s.lo) + sep + f(s.hi);
+        return s.median === null ? range : f(s.median) + ' (' + range + ')';
+    },
+    // The shown x: a date as `2026-03-15` when every x of the panel is a
+    // date (Vega reads a Julia Date as UTC midnight), else a time as
+    // `2026-03-15 17:00` in the local time Vega read it in; a number with
+    // the x axis title.
+    _readoutHeading: function(view, plan, v, dateOnly, datum) {
+        var loc = view.locale ? view.locale() : null;
+        if (loc && !loc.format) loc = null;
+        if (plan.xType === 'temporal') {
+            var d = new Date(v);
+            if (dateOnly) return loc ? loc.utcFormat('%Y-%m-%d')(d) : d.toISOString().slice(0, 10);
+            var spec = d.getSeconds() ? '%Y-%m-%d %H:%M:%S' : '%Y-%m-%d %H:%M';
+            return loc ? loc.timeFormat(spec)(d) : d.toString();
+        }
+        return this._panelTitle(plan.panel && plan.panel.x, datum, plan.xTitle) + ': ' + (loc ? loc.format('.4~r')(v) : String(v));
+    },
+    _readoutShow: function(id, view, f, scope, at, all, fromPointer) {
+        var self = this, st = self._readouts[id], el = self._els[id];
+        if (!st || !el || !at.length) return;
+        var entries = self._readoutEntries(view, st.plan, at);
+        if (!entries.length) { self._readoutHide(id, fromPointer); return; }
+        self._positionedBox(el);
+        var look = self._surfaceLook(el), er = el.getBoundingClientRect();
+        if (!st.rule || !st.rule.isConnected) {
+            st.rule = document.createElement('div');
+            st.rule.className = 'aov-readout-rule';
+            st.box = document.createElement('div');
+            st.box.className = 'aov-readout';
+            st.box.setAttribute('role', 'status');
+            el.appendChild(st.rule);
+            el.appendChild(st.box);
+        }
+        // The rule at the shown x: the drawn x of a series' mark (a ribbon's
+        // interval drawing dodges its series around it, so their middle).
+        var xs = at.map(function(c) { return c.x; });
+        var x = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2;
+        var left = f.left - er.left + x, top = f.top - er.top + scope.y;
+        var rs = st.rule.style;
+        rs.cssText = 'position:absolute;pointer-events:none;z-index:2;width:0;border-left:1px solid ' + look.key +
+            ';opacity:0.6;left:' + left + 'px;top:' + top + 'px;height:' + scope.height + 'px';
+        var box = st.box;
+        box.textContent = '';
+        var head = document.createElement('div');
+        head.style.fontWeight = '600';
+        var link = self._link(id), DAY = 86400000;
+        var dateOnly = link && link.key === st.plan.x && link.temporal ? link.temporal === 'date' :
+            all.every(function(c) { return c.value % DAY === 0; });
+        head.textContent = self._readoutHeading(view, st.plan, at[0].value, dateOnly, at[0].datum);
+        box.appendChild(head);
+        // A stack's panels, top to bottom: a panel's rows sit indented under
+        // its y title, unless that title already names every row (one
+        // uncoloured series), which then reads as it does alone.
+        var titles = st.plan.panelTitles || {}, groups = [];
+        entries.forEach(function(s) {
+            var g = groups[groups.length - 1];
+            if (!g || g.panel !== s.panel) groups.push(g = {panel: s.panel, rows: []});
+            g.rows.push(s);
+        });
+        groups.forEach(function(g) {
+            var title = g.panel === null ? undefined : titles[g.panel];
+            var headed = title !== undefined && !g.rows.every(function(s) { return s.name === title; });
+            if (headed) {
+                var ph = document.createElement('div');
+                ph.className = 'aov-readout-panel';
+                ph.style.cssText = 'white-space:nowrap;color:' + look.key;
+                ph.textContent = title;
+                box.appendChild(ph);
+            }
+            g.rows.forEach(function(s) {
+                var row = document.createElement('div');
+                row.style.whiteSpace = 'nowrap';
+                if (headed) row.style.paddingLeft = '0.9em';
+                var sw = document.createElement('span');
+                sw.style.cssText = 'display:inline-block;width:0.6em;height:0.6em;border-radius:50%;margin-right:0.4em;' +
+                    'vertical-align:baseline;background:' + (s.colour || look.key);
+                row.appendChild(sw);
+                row.appendChild(document.createTextNode(s.name + ': ' + self._readoutText(view, s)));
+                box.appendChild(row);
+            });
+        });
+        var bs = box.style;
+        bs.cssText = 'position:absolute;pointer-events:none;z-index:3;padding:0.3em 0.55em;border-radius:4px;' +
+            'font-size:12px;line-height:1.45;font-variant-numeric:tabular-nums;box-shadow:0 1px 3px rgba(0,0,0,0.15);' +
+            'background:' + look.surface + ';color:' + look.color + ';border:1px solid ' + look.border + ';' +
+            'top:' + (top + 4) + 'px;left:' + (left + 10) + 'px';
+        // Keep the box inside the plot element: to the left of the rule
+        // when it would run past the right edge.
+        if (left + 10 + box.offsetWidth > el.clientWidth) bs.left = Math.max(0, left - 10 - box.offsetWidth) + 'px';
+        var tip = document.getElementById('vg-tooltip-element');
+        if (fromPointer && tip) { tip.style.visibility = 'hidden'; st.tip = true; }
+        if (fromPointer && self._readoutOwnsLink(id)) {
+            var key = self._linkKeyText(self._link(id), at[0].value);
+            if (key !== st.key) { st.key = key; self._announceKey(id, key); }
+        }
+    },
+    // Hide the rule and box; `fromPointer` when the pointer left, which also
+    // ends the readout's link announcement and gives the tooltip back.
+    _readoutHide: function(id, fromPointer) {
+        var st = this._readouts[id];
+        if (!st) return;
+        if (st.rule) st.rule.style.display = 'none';
+        if (st.box) st.box.style.display = 'none';
+        if (fromPointer && st.tip) {
+            var tip = document.getElementById('vg-tooltip-element');
+            if (tip) tip.style.visibility = '';
+            st.tip = false;
+        }
+        if (fromPointer && st.key !== null) { st.key = null; this._announceKey(id, null); }
     },
 
     // --- Plot data download / inline preview ---
@@ -3520,6 +5254,8 @@ window.AoV = window.AoV || {
     _downloadMenuToggle: function(menu, event) {
         if (menu._aovMenuDone) menu._aovMenuDone();
         if (event.newState !== 'open') return;
+        var csv = menu.querySelector('[data-aov-csv]');
+        if (csv) this._syncCsvEntries(csv.getAttribute('data-aov-csv'));
         var button = menu.previousElementSibling;
         var place = function() {
             if (!menu.isConnected) { menu._aovMenuDone(); return; }
@@ -3547,13 +5283,67 @@ window.AoV = window.AoV || {
         };
     },
 
-    // Public: download the plot's data as CSV, one file per group (`_plotGroups`).
+    // A captioned figure's ⬇ CSV starts one download per click. When its plot
+    // draws several datasets (`_plotGroups`), the menu, or the caption row with
+    // `download_menu=false`, holds one "⬇ CSV · <name>" entry per dataset, each
+    // giving that dataset's file. One click starting a download per dataset lost
+    // files: Chromium drops every download a page starts after the tenth within
+    // a second (Blink's kBurstDownloadLimit), and desktop Chrome asks before a
+    // second download from one click (snag intermittent-csv-4399311c). The
+    // server marks the CSV button `data-aov-csv` (the plot id), with
+    // `data-aov-csv-base` and `data-aov-labels`; the entries are rebuilt after
+    // each embed and data change and when the menu opens, so a script that
+    // clicks them in a closed menu finds them too. An entry carries its
+    // dataset's name in `data-aov-csv-part`, and its words without the name in
+    // `data-aov-csv-text`, so a saved page rebuilds them the same way.
+    _syncCsvEntries: function(id) {
+        var esc = window.CSS && CSS.escape ? CSS.escape(id) : String(id).replace(/["\\]/g, '\\$&');
+        var buttons = document.querySelectorAll('button[data-aov-csv="' + esc + '"]');
+        if (!buttons.length || !this.views[id]) return;
+        var groups = this._plotGroups(id);
+        if (!groups) return;
+        var parts = groups.length > 1 ? groups.map(function(g) { return g.label; }) : [null];
+        var have = [].map.call(buttons, function(b) {
+            return b.hasAttribute('data-aov-csv-part') ? b.getAttribute('data-aov-csv-part') : null;
+        });
+        if (JSON.stringify(have) === JSON.stringify(parts)) return;
+        var model = buttons[0];
+        var word = model.hasAttribute('data-aov-csv-text') ? model.getAttribute('data-aov-csv-text') : model.textContent;
+        var base = model.getAttribute('data-aov-csv-base') || id, labels = {};
+        try { labels = JSON.parse(model.getAttribute('data-aov-labels') || '{}'); } catch (e) { /* none */ }
+        var args = [id, base, labels].map(function(a) { return JSON.stringify(a); }).join(', ');
+        parts.forEach(function(part) {
+            var b = model.cloneNode(false);
+            b.setAttribute('data-aov-csv-text', word);
+            if (part === null) {
+                b.removeAttribute('data-aov-csv-part');
+                b.textContent = word;
+                b.setAttribute('onclick', 'AoV.downloadPlotData(' + args + ')');
+            } else {
+                b.setAttribute('data-aov-csv-part', part);
+                b.textContent = word + ' · ' + (labels[part] || part);
+                b.setAttribute('onclick', 'AoV.downloadPlotData(' + args + ', ' + JSON.stringify(part) + ')');
+            }
+            model.parentNode.insertBefore(b, model);
+        });
+        [].forEach.call(buttons, function(b) { b.remove(); });
+    },
+
+    // Public: download the plot's data as CSV (`_plotGroups`). With `part`, the
+    // name of one of its datasets (`_s1`, `_s2`, … or a merged dataset's source,
+    // as a CSV entry carries it), that dataset's file only; without it, one file
+    // per dataset, as before.
     // labels: optional {srcValue: humanLabel} override map.
-    downloadPlotData: function(id, filenameBase, labels) {
+    downloadPlotData: function(id, filenameBase, labels, part) {
         filenameBase = filenameBase || id;
         labels = labels || {};
         var groups = this._plotGroups(id);
         if (!groups) { console.warn('AoV.downloadPlotData: no data for', id); return; }
+        if (part !== undefined && part !== null) {
+            var one = groups.filter(function(g) { return g.label === part; })[0];
+            if (!one) { console.warn('AoV.downloadPlotData: no dataset', part, 'in', id); return; }
+            groups = [one];
+        }
         var self = this;
         groups.forEach(function(g) {
             var label = g.label === null ? '' : '_' + (labels[g.label] || g.label).replace(/[^A-Za-z0-9_-]+/g, '_');
@@ -3585,7 +5375,7 @@ window.AoV = window.AoV || {
         if (!view) return Promise.reject(new Error('AoV.plotImageURL: no view for ' + id));
         if (!(id in this._themeKeys)) return view.toImageURL(format || 'png');
         var prev = view.background();
-        view.background(this.hostBackground(this._els[id]));
+        view.background(this._solidBackground(prev, this._els[id]));
         var restore = function() { view.background(prev); return view.runAsync(); };
         return view.toImageURL(format || 'png').then(function(url) {
             return restore().then(function() { return url; });
@@ -3623,7 +5413,7 @@ window.AoV = window.AoV || {
     // promise that settles once the file is handed to the browser.
     downloadPlotHtml: function(id, filenameBase) {
         filenameBase = filenameBase || id;
-        var anchor = document.getElementById(id);
+        var anchor = this._elOf(id);
         if (!anchor) { console.warn('AoV.downloadPlotHtml: no element for', id); return; }
         var root = anchor.closest('[data-aov-fragment]') || anchor.closest('figure');
         if (!root) { console.warn('AoV.downloadPlotHtml: no card root for', id); return; }
@@ -3645,7 +5435,7 @@ window.AoV = window.AoV || {
         }
         // Frame players and ribbon switches: the fresh page's embed builds
         // its own controls.
-        clone.querySelectorAll('[data-aov-frame-for], [data-aov-ribbon-view-for], .aov-ribbon-view').forEach(function(c) { c.remove(); });
+        clone.querySelectorAll('[data-aov-frame-for], [data-aov-ribbon-view-for], .aov-ribbon-view, .aov-zoom-reset').forEach(function(c) { c.remove(); });
         // A download menu's place is set whenever it opens.
         clone.querySelectorAll('.aov-download-menu').forEach(function(m) { m.removeAttribute('style'); });
         // Lazy data shells: drop rendered bodies; the fresh page re-renders lazily.
@@ -3743,7 +5533,7 @@ window.AoV = window.AoV || {
     // (`plot_texts`, src/plot_texts.jl); without that attribute they are
     // English. LOCKSTEP: `_TEXTS_EN` is the English set of
     // `_RUNTIME_TEXT_NAMES` in src/plot_texts.jl; test/plot_texts.jl pins them.
-    _TEXTS_EN: {"no_data": "(no data available)", "no_summary": "(no summary data available)", "median": "Median", "interval": "{point} [{width} credible interval]", "value": "value", "untitled": "AoV plot", "lang": "en", "play": "Play", "pause": "Pause", "ribbons": "Ribbons", "intervals": "Intervals", "ribbon_view": "Drawing", "overlap": "Bands overlap {score} of the y range", "overlap_auto": "Bands overlap {score} of the y range; intervals above {threshold}", "scrollable": "Scrollable plot", "scrollable_table": "Scrollable table"},
+    _TEXTS_EN: {"no_data": "(no data available)", "no_summary": "(no summary data available)", "median": "Median", "mean": "Mean", "interval": "{point} [{width} credible interval]", "value": "value", "untitled": "AoV plot", "lang": "en", "play": "Play", "pause": "Pause", "ribbons": "Ribbons", "intervals": "Intervals", "ribbon_view": "Drawing", "overlap": "Bands overlap {score} of the y range", "overlap_auto": "Bands overlap {score} of the y range; intervals above {threshold}", "scrollable": "Scrollable plot", "scrollable_table": "Scrollable table", "reset_zoom": "Reset zoom", "table_rows": "Rows {from}–{to} of {total}", "table_pages": "Table pages", "previous_page": "Previous", "next_page": "Next", "table_page": "Page {page}", "table_sorts_all": "A click on a column heading sorts all {total} rows.", "table_csv": "{csv} holds every row."},
     _texts: function(el) {
         var host = el && el.closest ? el.closest('[data-aov-texts]') : null;
         var texts = host ? JSON.parse(host.dataset.aovTexts) : {};
@@ -3772,7 +5562,7 @@ window.AoV = window.AoV || {
                 h.style.margin = '0.5rem 0 0.25rem';
                 container.appendChild(h);
             }
-            container.appendChild(self._buildSortableTable(g.rows));
+            container.appendChild(self._buildSortableTable(g.rows, null, container));
         });
         this._frameTables(container);
         container.dataset.aovRendered = '1';
@@ -3824,7 +5614,14 @@ window.AoV = window.AoV || {
         });
     },
 
-    _buildSortableTable: function(rows, cols) {
+    // A data table of up to this many rows is built whole; a longer one shows
+    // them a page at a time (`_pagedTable`).
+    _TABLE_PAGE: 1000,
+
+    // The rows as a table, sortable by a click on a column heading. `host` is
+    // the element the table goes into, for the words of a paged table's pager
+    // (`_texts`); without it they are English.
+    _buildSortableTable: function(rows, cols, host) {
         var table = document.createElement('table');
         table.className = 'striped';
         table.setAttribute('role', 'grid');
@@ -3849,19 +5646,27 @@ window.AoV = window.AoV || {
             numericCols.sort();
             cols = stringCols.concat(numericCols);
         }
+        if (rows.length > this._TABLE_PAGE) return this._pagedTable(table, rows, cols, host);
+        table.appendChild(this._tableHead(cols, function(i, th) {
+            if (typeof window.sortTable === 'function') window.sortTable(i, th);
+        }));
+        table.appendChild(this._tableBody(rows, cols));
+        return table;
+    },
+    _tableHead: function(cols, sort) {
         var thead = document.createElement('thead');
         var trh = document.createElement('tr');
         cols.forEach(function(c, i) {
             var th = document.createElement('th');
             th.textContent = c;
             th.style.cursor = 'pointer';
-            th.onclick = function() {
-                if (typeof window.sortTable === 'function') window.sortTable(i, th);
-            };
+            th.onclick = function() { sort(i, th); };
             trh.appendChild(th);
         });
         thead.appendChild(trh);
-        table.appendChild(thead);
+        return thead;
+    },
+    _tableBody: function(rows, cols) {
         var tbody = document.createElement('tbody');
         rows.forEach(function(r) {
             var tr = document.createElement('tr');
@@ -3873,8 +5678,155 @@ window.AoV = window.AoV || {
             });
             tbody.appendChild(tr);
         });
-        table.appendChild(tbody);
-        return table;
+        return tbody;
+    },
+
+    // A table of more than `_TABLE_PAGE` rows: building a row per data row
+    // took a 120,802-row map's tab from 0.4 to 7.1 GiB and 20 s (snag
+    // large-captioned-ce633d40). The rows stay a JavaScript array, and the
+    // table holds one page of them, with a pager above and below it. A click
+    // on a column heading sorts the whole array, in the order HTMXObjects'
+    // `sortTable` gives a table it holds whole (`_sortPages`), and shows the
+    // first page. The table goes into its scroll frame as any other
+    // (`_frameTables`); the pagers stay outside it, in reach. The pages
+    // state lives on the wrapper (`_aovPages`): a saved page (⬇ HTML) drops
+    // the rendered preview and builds it again.
+    _pagedTable: function(table, rows, cols, host) {
+        var self = this, wrap = document.createElement('div');
+        wrap.className = 'aov-table-pages';
+        var text = this._texts(host), lang = text('lang');
+        var figure = host && host.closest ? host.closest('figure') : null;
+        var csv = figure && figure.querySelector('button[data-aov-csv]');
+        // `rows` belongs to the caller: sorting works on a copy.
+        wrap._aovPages = {rows: rows, view: rows.slice(), cols: cols, page: 0, text: text,
+            number: function(n) { return Number(n).toLocaleString(lang); }};
+        table.appendChild(this._tableHead(cols, function(i, th) { self._sortPages(wrap, i, th); }));
+        table.appendChild(document.createElement('tbody'));
+        var pager = function(live) {
+            var nav = document.createElement('nav');
+            nav.className = 'aov-table-pager';
+            nav.setAttribute('aria-label', text('table_pages'));
+            nav.addEventListener('click', function(e) {
+                var b = e.target.closest('button[data-aov-page]');
+                if (b && !b.disabled) self._turnPage(wrap, b);
+            });
+            if (live) nav.dataset.aovLive = '1';
+            return nav;
+        };
+        var note = document.createElement('p');
+        note.className = 'aov-table-pages-note';
+        var total = wrap._aovPages.number(rows.length);
+        note.textContent = text('table_sorts_all', {total: total}) + (csv ?
+            ' ' + text('table_csv', {csv: csv.getAttribute('data-aov-csv-text') || csv.textContent}) : '');
+        wrap.appendChild(pager(true));
+        wrap.appendChild(table);
+        wrap.appendChild(note);
+        wrap.appendChild(pager(false));
+        this._showPage(wrap);
+        return wrap;
+    },
+    // Fills the table with the current page and both pagers with the pages:
+    // the first and the last, two either side of the current one, and "…"
+    // for the rest. The frame scrolls back to the page's first row.
+    _showPage: function(wrap) {
+        var st = wrap._aovPages, size = this._TABLE_PAGE, text = st.text;
+        var pages = Math.ceil(st.view.length / size);
+        st.page = Math.max(0, Math.min(st.page, pages - 1));
+        var from = st.page * size, to = Math.min(from + size, st.view.length);
+        var table = wrap.querySelector('table');
+        table.replaceChild(this._tableBody(st.view.slice(from, to), st.cols), table.tBodies[0]);
+        var frame = table.closest('.aov-table-frame');
+        if (frame) frame.scrollTop = 0;
+        var shown = [];
+        for (var p = 0; p < pages; p++) {
+            if (p === 0 || p === pages - 1 || Math.abs(p - st.page) <= 2) shown.push(p);
+        }
+        wrap.querySelectorAll('.aov-table-pager').forEach(function(nav) {
+            nav.textContent = '';
+            var range = document.createElement('span');
+            range.className = 'aov-table-pager-range';
+            if (nav.dataset.aovLive) range.setAttribute('aria-live', 'polite');
+            range.textContent = text('table_rows', {from: st.number(from + 1), to: st.number(to), total: st.number(st.view.length)});
+            nav.appendChild(range);
+            var button = function(key, label, disabled) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.dataset.aovPage = key;
+                b.disabled = disabled;
+                label(b);
+                nav.appendChild(b);
+                return b;
+            };
+            var arrow = function(b, glyph, before) {
+                var s = document.createElement('span');
+                s.setAttribute('aria-hidden', 'true');
+                s.textContent = glyph;
+                if (before) b.insertBefore(s, b.firstChild); else b.appendChild(s);
+            };
+            button('prev', function(b) { b.textContent = text('previous_page'); arrow(b, '‹ ', true); }, st.page === 0);
+            shown.forEach(function(p, k) {
+                if (k > 0 && p > shown[k - 1] + 1) {
+                    var gap = document.createElement('span');
+                    gap.setAttribute('aria-hidden', 'true');
+                    gap.textContent = '…';
+                    nav.appendChild(gap);
+                }
+                var b = button(String(p), function(b) {
+                    b.textContent = st.number(p + 1);
+                    b.setAttribute('aria-label', text('table_page', {page: st.number(p + 1)}));
+                }, false);
+                if (p === st.page) b.setAttribute('aria-current', 'page');
+            });
+            button('next', function(b) { b.textContent = text('next_page'); arrow(b, ' ›', false); }, st.page === pages - 1);
+        });
+    },
+    // A pager button: its page, or the one before or after. The focus stays on
+    // the same button of the same pager, or on the current page's when that
+    // button is now disabled.
+    _turnPage: function(wrap, b) {
+        var st = wrap._aovPages, key = b.dataset.aovPage;
+        var navs = Array.prototype.slice.call(wrap.querySelectorAll('.aov-table-pager'));
+        var which = navs.indexOf(b.closest('.aov-table-pager'));
+        var focused = document.activeElement === b;
+        st.page = key === 'prev' ? st.page - 1 : key === 'next' ? st.page + 1 : Number(key);
+        this._showPage(wrap);
+        if (!focused) return;
+        var nav = wrap.querySelectorAll('.aov-table-pager')[which];
+        var again = nav.querySelector('button[data-aov-page="' + key + '"]');
+        if (!again || again.disabled) again = nav.querySelector('button[aria-current="page"]');
+        again.focus();
+    },
+    // Sorts every row by column `col` and shows the first page. The order is
+    // HTMXObjects' `sortTable`'s on the text a cell shows: two texts that read
+    // as numbers by their number (an equal number by the texts, numbers in
+    // them read whole), else the texts in the reader's language; a second
+    // click reverses it. LOCKSTEP: `sortTable` in HTMXObjects, which sorts a
+    // table of up to `_TABLE_PAGE` rows.
+    _sortPages: function(wrap, col, th) {
+        var st = wrap._aovPages, c = st.cols[col];
+        var asc = th.dataset.sortDir !== 'asc';
+        th.dataset.sortDir = asc ? 'asc' : 'desc';
+        th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
+        th.closest('thead').querySelectorAll('th').forEach(function(h) {
+            if (h !== th) { delete h.dataset.sortDir; h.removeAttribute('aria-sort'); }
+        });
+        var words = new Intl.Collator().compare;
+        var natural = new Intl.Collator(undefined, {numeric: true}).compare;
+        var keyed = st.rows.map(function(r) {
+            var v = r[c], s = ((v === null || v === undefined) ? '' : String(v)).trim();
+            return {row: r, text: s, number: parseFloat(s)};
+        });
+        keyed.sort(function(a, b) {
+            var d;
+            if (!isNaN(a.number) && !isNaN(b.number)) {
+                d = a.number < b.number ? -1 : a.number > b.number ? 1 : 0;
+                if (!d) d = natural(a.text, b.text);
+            } else d = words(a.text, b.text);
+            return asc ? d : -d;
+        });
+        st.view = keyed.map(function(k) { return k.row; });
+        st.page = 0;
+        this._showPage(wrap);
     },
 
     // Public: toggle between Pretty and Raw views inside a captioned plot's
@@ -3921,13 +5873,15 @@ window.AoV = window.AoV || {
     //   1. Auto-detect: looks for __point__ or __median__ as the central col,
     //      and lo_<prob>_ / hi_<prob>_ pairs for the intervals (used by
     //      pointinterval/gradient/dot/lineribbon).
-    //   2. Explicit (opts.bands): caller passes [[loCol, hiCol, label], ...]
-    //      and opts.point_col (used by lineribbon(bands=...) precomputed).
+    //   2. Explicit (opts.bands): caller passes [[loCol, hiCol, width, prob?], ...]
+    //      and opts.point_col (the bands= forms). `width` is the stated central
+    //      mass (`95%`, `prob` its number) or the bound columns (`q025–q975`).
     //
     //   opts.ci: 'outer' (default, widest band) | 'inner' | Number (closest prob)
     //   opts.sigfigs: significant figures for numeric formatting (default 2)
     //   opts.value_label: header for the formatted value column (default 'value')
-    //   opts.point_label: 'Median' (default) | 'Mean' | custom — used in caption
+    //   opts.point: 'mean' when the point is the mean (default: the median)
+    //   opts.point_label: a caption word replacing the median/mean text
     renderPrettySummary: function(id, container, opts) {
         opts = opts || {};
         if (container.dataset.aovRendered === '1') return;
@@ -3950,7 +5904,7 @@ window.AoV = window.AoV || {
             }
             var built = self._buildPrettyRows(g.rows, opts, text);
             if (!built) {
-                container.appendChild(self._buildSortableTable(g.rows));
+                container.appendChild(self._buildSortableTable(g.rows, null, container));
                 return;
             }
             if (built.caption) {
@@ -3959,7 +5913,7 @@ window.AoV = window.AoV || {
                 cap.style.cssText = 'font-size:0.85em;opacity:0.75;margin:0 0 0.25rem';
                 container.appendChild(cap);
             }
-            container.appendChild(self._buildSortableTable(built.rows, built.cols));
+            container.appendChild(self._buildSortableTable(built.rows, built.cols, container));
         });
         this._frameTables(container);
         container.dataset.aovRendered = '1';
@@ -3998,7 +5952,9 @@ window.AoV = window.AoV || {
             // AoV passes explicit bands outermost-first (lineribbon convention);
             // internal representation is inner→outer to match the auto-detect path.
             bands = opts.bands.slice().reverse().map(function(b) {
-                return {lo: b[0], hi: b[1], label: b[2] || (b[0] + ' / ' + b[1])};
+                var band = {lo: b[0], hi: b[1], label: b[2] || (b[0] + '–' + b[1])};
+                if (typeof b[3] === 'number') band.prob = b[3];
+                return band;
             });
         } else {
             var probMap = {};
@@ -4042,7 +5998,7 @@ window.AoV = window.AoV || {
             return parseFloat(x.toPrecision(sigfigs)).toString();
         };
         var label = opts.value_label || text('value');
-        var pointLabel = opts.point_label || text('median');
+        var pointLabel = opts.point_label || text(opts.point === 'mean' ? 'mean' : 'median');
 
         var hidden = {};
         hidden[pointCol] = 1;
@@ -4093,9 +6049,7 @@ window.AoV = window.AoV || {
             return out;
         });
 
-        var caption = pick.prob !== undefined ?
-            text('interval', {point: pointLabel, width: pick.label}) :
-            pointLabel + ' [' + pick.label + ']';
+        var caption = text('interval', {point: pointLabel, width: pick.label});
         return {rows: built, cols: orderedCols, caption: caption};
     },
 
@@ -4124,6 +6078,7 @@ window.AoV = window.AoV || {
     // (minus its data copy) so update_spec can re-apply it to a refreshed
     // spec when no picker builder is registered for the plot.
     remapEncoding: function(id, mapping) {
+        this._settleWaiting(id);
         var spec = this._remappedSpec(id, mapping);
         if (!spec) return;
         // Ribbon groups that rows sent since the first render brought.
@@ -4152,19 +6107,147 @@ window.AoV = window.AoV || {
         return enc;
     },
 
+    // Explicit domains and category orders belong to the authored field.
+    // Each remap starts from the original spec, so choosing that field again
+    // restores them. Keep other scale settings and non-array sort policies.
+    _clearRemappedAxisDomain: function(enc, field) {
+        if (enc.field === field) return;
+        if (enc.scale && typeof enc.scale === 'object') {
+            delete enc.scale.domain;
+            if (Object.keys(enc.scale).length === 0) delete enc.scale;
+        }
+        if (Array.isArray(enc.sort)) delete enc.sort;
+        // Tick values belong to the field too (a log axis's 1-2-5 values,
+        // `_apply_log_ticks!`, are read from its rows), and with them the
+        // count the lowering states for a listed set (`_apply_listed_ticks!`).
+        if (enc.axis && typeof enc.axis === 'object') {
+            var count = this._listedCount(enc.axis.values);
+            if (count !== undefined && JSON.stringify(enc.axis.tickCount) === JSON.stringify(count)) delete enc.axis.tickCount;
+            delete enc.axis.values;
+        }
+    },
+
+    // The count of a listed set of tick values: its length, or for a list a
+    // signal computes, that length as a signal (`null`, no count, while the
+    // signal holds no list). The same as `_listed_tick_count`
+    // (src/to_vegalite.jl).
+    _listedCount: function(values) {
+        if (Array.isArray(values)) return values.length ? values.length : undefined;
+        if (values && typeof values === 'object' && typeof values.signal === 'string') {
+            return {signal: 'isArray(' + values.signal + ') ? length(' + values.signal + ') : null'};
+        }
+        return undefined;
+    },
+
+    // An axis that lists its tick `values` draws each of them. Vega halves
+    // a listed set until it fits the axis's tick count (twelve monthly
+    // values under a count of 7 leave six), and a count reaches an axis from
+    // `config`: the cap below or an authored `config.axisX`. So a listing
+    // axis states the count of its own values, which Vega takes before any
+    // `config` count; a `tickCount` written beside the values stays. The
+    // lowering states it for its own specs (`_apply_listed_ticks!`,
+    // src/to_vegalite.jl); this covers a spec that was not lowered there.
+    _listedTicks: function(node) {
+        if (!node || typeof node !== 'object') return node;
+        var self = this, enc = node.encoding;
+        if (enc && typeof enc === 'object') ['x', 'y'].forEach(function(ch) {
+            var ax = enc[ch] && enc[ch].axis;
+            var count = ax && typeof ax === 'object' && ax.tickCount === undefined ? self._listedCount(ax.values) : undefined;
+            if (count !== undefined) ax.tickCount = count;
+        });
+        ['layer', 'hconcat', 'vconcat', 'concat'].forEach(function(key) {
+            if (Array.isArray(node[key])) node[key].forEach(function(sub) { self._listedTicks(sub); });
+        });
+        self._listedTicks(node.spec);
+        return node;
+    },
+
+    // Vega-Lite asks for one axis tick per 40 px (ceil(size / 40)), so a plot
+    // 1,400 px wide gets 35 ticks and grid lines. Ask for 7 on x and 5 on y
+    // (Vega rounds to a nice step: 0–100 gets 6),
+    // from the panel size this embed draws at, unless the spec sets a tick
+    // count (`config.axis`, `config.axisX`/`axisY`). A binned axis keeps
+    // Vega-Lite's ticks at its bin edges, and an axis that lists its tick
+    // values keeps each of them (`_listedTicks`). The lowering caps an
+    // authored size the same way (`_apply_tick_cap!`, src/to_vegalite.jl).
+    _TICK_CAP: {x: 7, y: 5},
+    _capTicks: function(id, s) {
+        if (!s || typeof s !== 'object') return s;
+        this._listedTicks(s);
+        if (s.hconcat || s.concat) return s;
+        var self = this, el = self._els[id] || self._plotElement(id);
+        // A `vconcat` stack's panels share one width; its tallest panel decides y.
+        var views = s.vconcat ? s.vconcat.filter(function(c) { return c && typeof c === 'object'; }) : [s.spec || s];
+        if (!views.length) return s;
+        var size = {x: views[0].width, y: s.vconcat ? Math.max.apply(null, views.map(function(c) {
+            return typeof c.height === 'number' ? c.height : 0; })) : views[0].height};
+        if (size.x === 'container') size.x = el ? el.clientWidth : null;
+        var binned = {x: false, y: false};
+        views.forEach(function(inner) {
+            (Array.isArray(inner.layer) ? inner.layer : [inner]).forEach(function(u) {
+                var enc = Object.assign({}, inner.encoding || {}, (u && u.encoding) || {});
+                ['x', 'y'].forEach(function(ch) { if (enc[ch] && enc[ch].bin) binned[ch] = true; });
+            });
+        });
+        var cfg = s.config = s.config || {};
+        if (cfg.axis && cfg.axis.tickCount !== undefined) return s;
+        [['x', 'axisX'], ['y', 'axisY']].forEach(function(p) {
+            var n = size[p[0]], cap = self._TICK_CAP[p[0]];
+            if (binned[p[0]] || typeof n !== 'number' || Math.ceil(n / 40) <= cap) return;
+            if (cfg[p[1]] && cfg[p[1]].tickCount !== undefined) return;
+            cfg[p[1]] = Object.assign({}, cfg[p[1]] || {}, {tickCount: cap});
+        });
+        return s;
+    },
+
     // The `calculate` expression of a ribbon interval drawing's dodge on
     // the ribbon's own x axis: `field` moved by the step of the row's
     // `by` group in `domain`, added on a linear axis, multiplied in as
     // `exp` of a log step on a log one. The same formula as
     // `_ribbon_dodge_expr` (src/ribbon_view.jl); a row outside `domain`
-    // stays at its x.
-    _dodgeXExpr: function(field, by, domain, span, scale) {
+    // stays at its x. With `stepSignal`, the step between groups (span / n)
+    // is read from that signal (_bindDodge).
+    _dodgeXExpr: function(field, by, domain, span, scale, stepSignal) {
         var f = 'datum[' + JSON.stringify(field) + ']';
         var n = domain.length;
         if (!by || n < 2) return 'isValid(' + f + ') ? ' + f + ' : null';
         var k = 'indexof(' + JSON.stringify(domain) + ', datum[' + JSON.stringify(by) + '])';
-        var d = '(' + k + ' < 0 ? 0 : (' + k + ' - ' + (n - 1) / 2 + ') * ' + span / n + ')';
+        var d = '(' + k + ' < 0 ? 0 : (' + k + ' - ' + (n - 1) / 2 + ') * ' + (stepSignal || span / n) + ')';
         return 'isValid(' + f + ') ? ' + (scale === 'log' ? f + ' * exp(' + d + ')' : f + ' + ' + d) + ' : null';
+    },
+
+    // The dodge of a ribbon's interval drawing follows its x values too: its
+    // step is a share of the smallest gap between them (`_aov.dodgeX.span`),
+    // so a new dose ladder brings another step. Each embed reads the step
+    // from a signal (a top-level param of the spec it compiles), which a
+    // swap of rows sets (_swapData), and the structure key leaves the span
+    // and the expression built from it out (_structureKey).
+    _DODGE_STEP: 'aov_dodge_step',
+    // The step between dodged groups of a dodge recipe; undefined when the
+    // recipe dodges nothing (no colour, or one group).
+    _dodgeStep: function(dx) {
+        return dx && typeof dx === 'object' && dx.by && Array.isArray(dx.domain) && dx.domain.length >= 2 &&
+            typeof dx.span === 'number' ? dx.span / dx.domain.length : undefined;
+    },
+    // The spec an embed compiles (a copy), with its dodge expressions reading
+    // the step from the signal.
+    _bindDodge: function(s) {
+        var self = this, dx = s && s._aov && s._aov.dodgeX, step = self._dodgeStep(dx), found = false;
+        if (step === undefined) return s;
+        (function walk(node) {
+            if (!node || typeof node !== 'object') return;
+            (Array.isArray(node.transform) ? node.transform : []).forEach(function(t) {
+                if (!t || t.as !== dx.as || typeof t.calculate !== 'string') return;
+                t.calculate = self._dodgeXExpr(dx.field, dx.by, dx.domain, dx.span, dx.scale, self._DODGE_STEP);
+                found = true;
+            });
+            ['layer', 'hconcat', 'vconcat', 'concat'].forEach(function(key) {
+                if (Array.isArray(node[key])) node[key].forEach(walk);
+            });
+            walk(node.spec);
+        })(s);
+        if (found) s.params = (Array.isArray(s.params) ? s.params : []).concat([{name: self._DODGE_STEP, value: step}]);
+        return s;
     },
 
     // Whether a layer was given a fixed colour (`visual(...; color=...)`):
@@ -4177,7 +6260,8 @@ window.AoV = window.AoV || {
         if (!mark || typeof mark !== 'object') return false;
         var ink = function(m) {
             var style = m && typeof m === 'object' ? m.style : undefined;
-            return style === 'aov-ink' || (Array.isArray(style) && style.indexOf('aov-ink') !== -1);
+            return style === 'aov-ink' || style === 'aov-background' ||
+                (Array.isArray(style) && (style.indexOf('aov-ink') !== -1 || style.indexOf('aov-background') !== -1));
         };
         return !!mark.color || ink(mark) ||
             Object.keys(mark).some(function(k) { return ink(mark[k]); });
@@ -4198,26 +6282,43 @@ window.AoV = window.AoV || {
             else if (spec.spec && spec.spec.data) spec.spec.data = mapping._comboData;
         }
 
-        // Per-column-Y concat (`hconcat` of per-column facet views —
-        // `scales(Y=(; scale=Dict(...)))`): remap color/row/detail/axes in
-        // EVERY child, preserving each child's Y scale type and column
-        // filter. Column remapping is not supported — the per-column scale
-        // keys bind to the authored column field — so it logs and no-ops
-        // (the picker should pin the column channel on these figures).
-        if (spec.hconcat && Array.isArray(spec.hconcat)) {
+        // Per-panel-Y concat (`scales(Y=(; scale=Dict(...)))`): an `hconcat`
+        // of per-column facet views, or the panels of a row facet's stack
+        // (`vconcat`) or a wrap's `concat`, whose children record
+        // `_aovPanel` (`_per_row_y_vconcat!`, `_per_wrap_y_concat!`). Remap
+        // color/detail/axes in EVERY child (and rows of the hconcat),
+        // preserving each child's Y scale type and filter. The channel the
+        // scale keys are bound to (the column, or the panels' row or wrap)
+        // is not remappable, so it logs and no-ops (the picker should pin
+        // it); nor is a column on panels, which are not facets.
+        var panelsC = (spec.hconcat && Array.isArray(spec.hconcat)) ? null : this._panelKids(spec);
+        var stackC = !!panelsC;
+        var kidsC = (spec.hconcat && Array.isArray(spec.hconcat)) ? spec.hconcat : panelsC;
+        if (kidsC) {
             // Local title lookup — the shared `_titles`/`_fieldTitle` pair is
             // declared further down, so at this point the hoisted `var` is
             // still undefined (proven live: `_titles[f]` TypeError).
             var _titlesC = mapping._comboTitles || {};
             function _fieldTitleC(f) { return _titlesC[f] || f; }
+            // A child's layers: a facet view's inner ones, a stack panel's own.
+            function _kidLayersC(child) {
+                var layersC = child && (stackC ? child.layer : child.spec && child.spec.layer);
+                return Array.isArray(layersC) ? layersC : null;
+            }
             if ('column' in mapping) {
-                console.info('AoV.remapEncoding: column remap is not supported on per-column-scale (hconcat) figures; keeping the authored column field.');
+                console.info(stackC ?
+                    'AoV.remapEncoding: column remap is not supported on per-panel-scale (stacked or wrapped) figures; keeping the authored panels.' :
+                    'AoV.remapEncoding: column remap is not supported on per-column-scale (hconcat) figures; keeping the authored column field.');
+            }
+            if (stackC && 'row' in mapping) {
+                console.info('AoV.remapEncoding: row remap is not supported on per-panel-scale (stacked or wrapped) figures; keeping the authored panels.');
             }
             if ('color' in mapping) {
                 var cfC = mapping.color;
-                spec.hconcat.forEach(function(child) {
-                    if (!child || !child.spec || !Array.isArray(child.spec.layer)) return;
-                    child.spec.layer.forEach(function(l) {
+                kidsC.forEach(function(child) {
+                    var layersC = _kidLayersC(child);
+                    if (!layersC) return;
+                    layersC.forEach(function(l) {
                         if (!l || !l.encoding || l._keep_color || self._fixedMarkColor(l)) return;
                         if (cfC) {
                             l.encoding.color = self._remappedColor(l.encoding.color, cfC, _fieldTitleC(cfC));
@@ -4227,7 +6328,7 @@ window.AoV = window.AoV || {
                     });
                 });
             }
-            if ('row' in mapping) {
+            if (!stackC && 'row' in mapping) {
                 var rfC = mapping.row;
                 spec.hconcat.forEach(function(child) {
                     if (!child || !child.facet) return;
@@ -4240,9 +6341,10 @@ window.AoV = window.AoV || {
             }
             if (mapping._dimensions) {
                 var detailFieldsC = mapping._dimensions;
-                spec.hconcat.forEach(function(child) {
-                    if (!child || !child.spec || !Array.isArray(child.spec.layer)) return;
-                    child.spec.layer.forEach(function(l) {
+                kidsC.forEach(function(child) {
+                    var layersC = _kidLayersC(child);
+                    if (!layersC) return;
+                    layersC.forEach(function(l) {
                         if (!l || !l.encoding) return;
                         if (detailFieldsC.length > 0) {
                             l.encoding.detail = detailFieldsC.length === 1 ?
@@ -4266,14 +6368,14 @@ window.AoV = window.AoV || {
                     }
                 }
                 var newTypeC = sampleC !== null ? _inferType(sampleC) : null;
-                spec.hconcat.forEach(function(child) {
-                    if (!child || !child.spec || !Array.isArray(child.spec.layer)) return;
-                    child.spec.layer.forEach(function(l) {
+                kidsC.forEach(function(child) {
+                    var layersC = _kidLayersC(child);
+                    if (!layersC) return;
+                    layersC.forEach(function(l) {
                         if (!l || l._no_axis_remap || !l.encoding) return;
                         var encC = l.encoding[axis];
                         if (!encC || typeof encC !== 'object' || encC.field === undefined) return;
                         var oldField = encC.field;
-                        encC.field = newField;
                         if (newTypeC) {
                             encC.type = newTypeC;
                             if (newTypeC !== 'quantitative' && encC.scale && encC.scale.type) {
@@ -4281,6 +6383,8 @@ window.AoV = window.AoV || {
                                 if (stC === 'log' || stC === 'sqrt' || stC === 'pow') delete encC.scale.type;
                             }
                         }
+                        self._clearRemappedAxisDomain(encC, newField);
+                        encC.field = newField;
                         encC.title = _fieldTitleC(newField);
                         if (Array.isArray(encC.tooltip)) {
                             encC.tooltip.forEach(function(t) {
@@ -4297,10 +6401,11 @@ window.AoV = window.AoV || {
             _remapConcatAxis('x');
             _remapConcatAxis('y');
 
-            // Re-broadcast cross-source layers after row mutations
-            this._broadcastCrossSource(spec);
+            // Re-broadcast cross-source layers after row mutations (a stack's
+            // panel filters keep rows without the row field themselves).
+            if (!stackC) this._broadcastCrossSource(spec);
 
-            return spec;
+            return this._fitPanelLabels(spec);
         }
 
         // Find layers in either simple or faceted structure
@@ -4412,6 +6517,13 @@ window.AoV = window.AoV || {
                     if (dodged === null && c && typeof c.field === 'string' && !l._keep_color &&
                             !self._fixedMarkColor(l)) dodged = c.field;
                 });
+                // A ribbon without a colour mapping has its interval drawing
+                // on slots tagged `_undodged` (src/ribbon_view.jl): a new
+                // colour dodges it.
+                if (dodged === null && cf) layers.forEach(function(l) {
+                    if (l && l.encoding && l._undodged && !l.encoding.xOffset)
+                        l.encoding.xOffset = {field: cf, type: 'nominal'};
+                });
                 layers.forEach(function(l) {
                     if (!l || !l.encoding || dodged === null || dodged === cf) return;
                     ['xOffset', 'yOffset'].forEach(function(ch) {
@@ -4423,9 +6535,11 @@ window.AoV = window.AoV || {
                 // A ribbon's interval drawing on the ribbon's own x axis
                 // dodges with a `calculate` (`_aov.dodgeX`,
                 // src/ribbon_view.jl): rebuilt for the new colour's groups,
-                // or undone without a colour.
+                // or undone without a colour. A ribbon without a colour
+                // mapping has an undodged recipe (`by` null), which a new
+                // colour dodges.
                 var dx = spec._aov && spec._aov.dodgeX;
-                if (dx && dodged !== null && dodged === dx.by && dodged !== cf) {
+                if (dx && dodged === (dx.by || null) && dodged !== (cf || null)) {
                     var dxRows = (spec.data && spec.data.values) || [];
                     var dxDomain = null;
                     layers.forEach(function(l) {
@@ -4463,7 +6577,8 @@ window.AoV = window.AoV || {
                             return t.type !== 'nominal' || t.field === (spec.facet && spec.facet.row && spec.facet.row.field) ||
                                    t.field === (spec.facet && spec.facet.column && spec.facet.column.field);
                         });
-                        if (cf) l.encoding.tooltip.push({field: cf, type: 'nominal'});
+                        // Named by its picker label, as the axis remap below names its row.
+                        if (cf) l.encoding.tooltip.push({field: cf, type: 'nominal', title: _fieldTitle(cf)});
                     }
                 });
             }
@@ -4563,11 +6678,13 @@ window.AoV = window.AoV || {
             facetResolve(false);
             if (!spec.layer) {
                 if (spec._aov && spec._aov.fitWidth) {
-                    // Single-view: use VL native responsive width
+                    // Single-view: use VL native responsive width. Only the
+                    // width is fitted ("fit-x"), as `_embed_spec` does: the
+                    // authored height stays the plot area's.
                     spec.width = 'container';
-                    spec.autosize = {type: 'fit', contains: 'padding'};
+                    spec.autosize = {type: 'fit-x', contains: 'padding'};
                     var kept = {};
-                    ['frame', 'link'].forEach(function(k) { if (spec._aov[k]) kept[k] = spec._aov[k]; });
+                    ['frame', 'link', 'readout'].forEach(function(k) { if (spec._aov[k] !== undefined) kept[k] = spec._aov[k]; });
                     delete spec._aov;
                     if (Object.keys(kept).length) spec._aov = kept;
                 }
@@ -4671,7 +6788,6 @@ window.AoV = window.AoV || {
                 if (!enc || !enc[axis] || typeof enc[axis] !== 'object') return;
                 var oldField = enc[axis].field;
                 if (oldField === undefined) return;
-                enc[axis].field = newField;
                 if (newType) {
                     enc[axis].type = newType;
                     // When the axis type flips from quantitative to nominal, a log/sqrt
@@ -4684,6 +6800,8 @@ window.AoV = window.AoV || {
                         }
                     }
                 }
+                self._clearRemappedAxisDomain(enc[axis], newField);
+                enc[axis].field = newField;
                 enc[axis].title = _fieldTitle(newField);
                 var tt = enc.tooltip;
                 if (Array.isArray(tt)) {
@@ -4704,6 +6822,6 @@ window.AoV = window.AoV || {
         // (color mutations need no broadcast — see _broadcastCrossSource).
         this._broadcastCrossSource(spec);
 
-        return spec;
+        return this._fitPanelLabels(spec);
     }
 };

@@ -54,6 +54,13 @@
         box-shadow: var(--pico-box-shadow);
     }
     input.aov-frame-slider:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+    /* A zoomed map's reset button (the runtime's _zoomResetControl), over the
+       map's top-left corner. The runtime sets its colours inline (the page's
+       text on its background); these rules keep Pico's azure focus ring and
+       shadow off it and give it a text-colour ring instead. */
+    button.aov-zoom-reset,
+    button.aov-zoom-reset:is(:hover, :active, :focus) { --pico-box-shadow: none; box-shadow: none; }
+    button.aov-zoom-reset:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
     /* A focused or dragged Pico thumb keeps Pico's idle slate. */
     input.aov-frame-slider {
         color: inherit; accent-color: currentColor;
@@ -179,3 +186,25 @@
     .aov-table-frame { width: 100%; max-height: 70vh; overflow: auto; contain: inline-size; }
     .aov-table-frame:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
     @media print { .aov-table-frame { max-height: none; overflow: visible; contain: none; } }
+    /* A data table longer than 1,000 rows shows a page of them, with a pager
+       above and below its frame (the runtime's `_pagedTable`). Pico lays a
+       `nav` out with space between its children and fills every `button`;
+       these rules outrank both and keep the pager one quiet line of the
+       page's colours. */
+    .aov-table-pager {
+        display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start;
+        gap: 0.25rem 0.35rem; margin: 0.35rem 0; font-size: 0.85em;
+    }
+    .aov-table-pager-range { margin-right: 0.4rem; }
+    .aov-table-pager > button {
+        width: auto; margin: 0; padding: 0.1rem 0.45rem; font-size: inherit; line-height: 1.4;
+        border: 1px solid var(--pico-muted-border-color, color-mix(in srgb, currentColor 30%, transparent));
+        border-radius: 0.2rem; box-shadow: none; background-color: transparent; color: inherit;
+    }
+    .aov-table-pager > button:is(:hover, :focus-visible):not(:disabled) {
+        background-color: color-mix(in srgb, currentColor 12%, transparent);
+    }
+    .aov-table-pager > button:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+    .aov-table-pager > button[aria-current="page"] { font-weight: bold; border-color: currentColor; }
+    .aov-table-pager > button:disabled { opacity: 0.45; cursor: default; }
+    .aov-table-pages-note { margin: 0.25rem 0 0; font-size: 0.85em; color: var(--pico-muted-color, inherit); }
