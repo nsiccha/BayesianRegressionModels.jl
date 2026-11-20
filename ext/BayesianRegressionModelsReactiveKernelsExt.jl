@@ -955,16 +955,17 @@ function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions,
     layout_query = ReactiveKernels.prepare(rk.model.spec; have=Tuple(keys(bound)),
         want=name(:conditional_layout), bound)
     layout = Base.invokelatest(layout_query)
-    built, plan = rk.model, _rk_translated(rk)
-    target = indexed_value(name(:conditional_factor))
-    selection = (; base, coordinates=positions, locality=:error)
-    row = prepare_query(built, plan, target; selection...)
+    factor = name(:conditional_factor)
     if isempty(positions)
-        # With fixed hyperparameters each pattern and channel has one immutable row.
+        # With every hyperparameter fixed the rows read data alone. RKPPL then
+        # binds the whole value frozen, and the graph has no plate left to index.
+        # Each pattern and channel has one immutable row.
+        table = haskey(bound, factor) ? bound[factor] :
+            only(values(BRM._rk_value_reader(rk, (factor,))(base)))
         constant_rows = Dict{Tuple{Int,Int},Matrix{Float64}}()
         rows = map(eachindex(layout.inputs)) do k
             get!(constant_rows, (layout.pattern[k], layout.channel[k])) do
-                values = reshape(copy(row(Float64[], k)), :, 1)
+                values = reshape(collect(Float64, table[k]), :, 1)
                 values[end, 1] = log(values[end, 1])
                 values
             end
@@ -972,6 +973,10 @@ function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions,
         return (; layout, coefficients=(hyper, k, derivatives) -> rows[k])
     end
 
+    built, plan = rk.model, _rk_translated(rk)
+    target = indexed_value(factor)
+    selection = (; base, coordinates=positions, locality=:error)
+    row = prepare_query(built, plan, target; selection...)
     sample = base[positions]
     # Prepare on a long row; one preparation serves rows of every length.
     k = argmax(length.(layout.inputs))
