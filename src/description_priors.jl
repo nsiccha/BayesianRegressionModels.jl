@@ -55,8 +55,19 @@ _brmd_support(::typeof(StanBlocks.stan.builtin.vcat),blocks,mod) = _brmd_shared_
     for b in blocks)
 
 function _brmd_population_priors!(priors,d,anchors,notation,texts)
-    overrides = _sb_effect_prior_overrides(d.plan.parent; frozen_preproc=d.plan.preproc,provenance=true)
     totals = Dict(t.binding.logical => t for t in _brmd_total_bindings(d))
+    # The source formula retains data-only assignments. Use the fitted design
+    # to address priors without evaluating those assignments again. A binding
+    # with a population_columns subset only describes its part of a split
+    # design. Exact totals record the complete order separately.
+    design_labels = Dict(b.logical => Symbol[c.label for c in b.design_columns]
+        for b in values(d.plan.bindings) if b.role === :population_effect &&
+            haskey(b, :design_columns) && !haskey(b, :population_columns))
+    for (lp, total) in totals
+        design_labels[lp] = collect(Symbol, total.binding.design_labels)
+    end
+    overrides = _sb_effect_prior_overrides(d.plan.parent; frozen_preproc=d.plan.preproc,
+        provenance=true, design_labels)
     for entry in _brm_population_effect_entries(d.plan.parent)
         total = get(totals,entry.logical,nothing)
         # Selector settings follow the complete design order. An exact-total
