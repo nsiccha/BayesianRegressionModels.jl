@@ -3,7 +3,8 @@
 # starts the next; rung 2 is a stationary maximum of the marginal; rung 3 is
 # skipped and named without units (test/nlme_integrated.jl runs it); rung 4's
 # draws keep the point; rung 5a's curvature is
-# negative definite there and labelled a diagnostic; rungs 5b and 6 run with a
+# negative definite there and labelled a diagnostic; rung 5c integrates the
+# marginal over a design and its draws are the fit's; rungs 5b and 6 run with a
 # sampler (WarmupHMC here) and are named without one; a later call continues
 # from an earlier fit; `:auto` re-measures the plan at rung 2's point.
 # RUN: julia --project=test test/laplace_ladder.jl
@@ -31,8 +32,8 @@ end
     end)
     fit = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=5, draws=50, rng=Xoshiro(3))
     p = fit.problem
-    @test [r.rung for r in fit.rungs] == [1, 2, 3, 4, 5, 5]
-    @test [c.rung for c in fit.ladder] == [1, 2, 3, 4, 5, 5]
+    @test [r.rung for r in fit.rungs] == [1, 2, 3, 4, 5, 5, 5]
+    @test [c.rung for c in fit.ladder] == [1, 2, 3, 4, 5, 5, 5]
     @test fit.plan isa BRMLaplacePlan && p.plan === fit.plan
     # rung 1: the modes at the prior medians, a complete packed point
     r1 = fit.rungs[1]
@@ -57,9 +58,29 @@ end
     @test all(>(0), c.standard_errors)
     r5 = only(r for r in fit.rungs if r.name === :population_curvature)
     @test r5.covariance ≈ inv(-Symmetric(r5.hessian)) rtol=1e-8
-    @test fit.draws === r4.draws
+    # 5c: a CCD over the five population coordinates, standardized by 5a
+    r5c = only(r for r in fit.rungs if r.name === :population_integration)
+    c5c = fit.ladder[6]
+    @test c5c.name === :population_integration && c5c.design === :ccd
+    @test length(p.population) == 5 && c5c.points == 1 + 10 + 16
+    @test r5c.integration.standardization.hessian == r5.hessian
+    @test r5c.integration.point == fit.point
+    @test sum(r5c.integration.weights) ≈ 1 && c5c.nonfinite == 0
+    @test size(r5c.draws) == (length(p.u), 50)
+    @test all(>(0), vec(std(r5c.draws[p.population, :]; dims=2)))
+    @test fit.draws === r5c.draws
     # 5b needs a sampler, and is named without one
-    @test fit.ladder[6].name === :population_sampling && fit.ladder[6].skipped
+    @test fit.ladder[7].name === :population_sampling && fit.ladder[7].skipped
+    # integration = nothing skips 5c and keeps rung 4's draws
+    off = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=5, draws=10, rng=Xoshiro(3),
+        integration=nothing)
+    @test only(c for c in off.ladder if c.name === :population_integration).skipped
+    @test off.draws === only(r for r in off.rungs if r.rung == 4).draws
+    # above the design bound 5c is skipped with its reason
+    bounded = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=5, draws=10, rng=Xoshiro(3),
+        integration=(; max_dimension=4))
+    c = only(c for c in bounded.ladder if c.name === :population_integration)
+    @test c.skipped && occursin("max_dimension = 4", c.reason)
 
     # Supplying a sampler later runs both skipped sampling rungs, preserving
     # the old result and passing the marginal draw to the exact sampler.
@@ -75,7 +96,7 @@ end
     @test more.draws === exact.draws && size(more.draws, 2) == 3
     @test only(r for r in missing.rungs if r.name === :exact).skipped
     @test only(r for r in fit.rungs if r.name === :population_sampling).skipped
-    @test length(more.rungs) == length(more.ladder) == 7
+    @test length(more.rungs) == length(more.ladder) == 8
 end
 
 @stestset "rungs 5b and 6 with a sampler" begin
@@ -102,6 +123,12 @@ end
         (comparison.mean .- fit.point) ./ curvature.standard_errors
     @test comparison.standard_deviation_ratio ≈
         comparison.standard_deviations ./ curvature.standard_errors
+    integration = only(r for r in fit.rungs if r.name === :population_integration).integration
+    @test comparison.integration_mean_shift ≈
+        (comparison.mean .- integration.mean) ./ integration.sd
+    @test comparison.integration_sd_ratio ≈ comparison.standard_deviations ./ integration.sd
+    # a Normal model, so 5c and 5b sample the same marginal
+    @test maximum(abs, comparison.integration_mean_shift) < 0.5
     exact = only(r for r in fit.rungs if r.rung == 6)
     @test size(exact.draws, 1) == length(p.u) && size(exact.draws, 2) >= 100
     @test fit.ladder[end].started_from == 5

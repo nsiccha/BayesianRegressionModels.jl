@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.345
+
+- `brm_laplace_integration(problem)` integrates a sparse Laplace problem's
+  marginal over its population coordinates deterministically, as R-INLA
+  does. It evaluates the marginal on a design around the mode, standardized
+  by the curvature there: a grid for up to two coordinates, a central
+  composite design for three or more. It weights each point by the Laplace
+  marginal and returns the weighted points and each coordinate's marginal
+  density table. On a grid it also returns the log evidence. Its packed draws
+  resample the design points by weight and draw the integrated effects
+  jointly at each point through the factor. It refuses above
+  `max_dimension = 10` coordinates.
+- `brm_ladder_fit(...; upto = 5)` runs it as rung 5c after the curvature
+  diagnostic when the population has at most 10 coordinates. Pass keywords
+  through `integration = (; ...)`. Rung 5b's comparison adds
+  `integration_mean_shift` and `integration_sd_ratio`. **Breaking:** without
+  a `sampler`, `fit.draws` at `upto = 5` are rung 5c's draws instead of rung
+  4's. Pass `integration = nothing` for the previous result.
+
 ## 0.2.344
 
 - RKBRMI uses one emitted and lowered program across category counts for
