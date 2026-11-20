@@ -271,6 +271,18 @@ lint_fd(f, x; h=1e-5) = [(f(x .+ h .* (1:length(x) .== j)) - f(x .- h .* (1:leng
     m = lint_model()
     @test_throws "no population coefficient" brm_laplace_problem(m.rk; ad_backend=NLME_AD,
         integrate=(:field, :coefficients))
+    # a lone intercept is a scalar coefficient (its record has no index)
+    rl = RKBRMI(@brm (; d.a, y=d.count) begin
+        log(mu) ~ 1 + (1 | a)
+        y ~ Poisson(mu)
+    end)
+    pl = brm_laplace_problem(rl; ad_backend=NLME_AD, integrate=(:a, :coefficients))
+    @test length(pl.population) == 1
+    @test only(b.declaration for b in pl.blocks if b.group === :coefficients) in
+        BRM._rk_layout_coordinate_names(rl)
+    vl, gl = LogDensityProblems.logdensity_and_gradient(pl, [0.1])
+    @test isfinite(vl)
+    @test gl ≈ lint_fd(x -> LogDensityProblems.logdensity(pl, x), [0.1]) atol=1e-6
     # 5c's target integrates them: the integration agrees with the outer-coefficient one
     point = brm_laplace_mode(p).draws[p.population, 1]
     out = brm_laplace_integration(p; point, draws=2000, rng=Xoshiro(4))

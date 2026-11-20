@@ -228,8 +228,10 @@ _brm_spl_record_declaration(r) =
     r.kind === :population ? _brm_spl_coefficient_name(r) : r.declaration
 const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector, :gmrf, :cell_gmrf)
 
-# A formula coefficient's packed coordinate: its declaration, then its index.
-_brm_spl_coefficient_name(r) = Symbol(join((string(r.declaration), string.(r.index)...), "."))
+# A formula coefficient's packed coordinate: its declaration, then its index
+# (a scalar coefficient, such as a lone intercept, has no index).
+_brm_spl_coefficient_name(r) =
+    Symbol(join((string(r.declaration), string.(get(r, :index, ()))...), "."))
 
 # A formula coefficient's Normal prior as constant (mean, scale), or `nothing`
 # for any other law or a prior argument that is not a number.
