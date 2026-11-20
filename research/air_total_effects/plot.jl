@@ -1,4 +1,5 @@
-using AlgebraOfVega, CairoMakie, CSV, JSON
+using AlgebraOfVega, CSV, JSON
+using CairoMakie: Figure, Label, save
 import AlgebraOfGraphics
 out=ARGS[1]
 case=ARGS[2]

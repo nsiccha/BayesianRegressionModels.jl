@@ -1,4 +1,5 @@
 using Statistics
+import CairoMakie
 
 """Central marginal display limits, without modifying or filtering observations.
 
@@ -27,12 +28,12 @@ function zoom_scatter_axes!(grid; mass=0.975)
         entries = cell.entries
         length(entries) == 1 || error("Expected exactly one scatter layer per facet")
         entry = only(entries)
-        entry.plottype <: Scatter || error("Display zoom is only for scatter plots")
+        entry.plottype <: CairoMakie.Scatter || error("Display zoom is only for scatter plots")
         x, y = entry.positional
         length(x) == length(y) || error("Scatter coordinates are not paired")
         xlim = scatter_display_limits(x; mass)
         ylim = scatter_display_limits(y; mass)
-        limits!(cell.axis, xlim, ylim)
+        CairoMakie.limits!(cell.axis, xlim, ylim)
         inrange(v, range) = isnothing(range) || first(range) <= v <= last(range)
         visible = count(i -> inrange(x[i], xlim) && inrange(y[i], ylim), eachindex(x))
         push!(receipts, (; row=index[1], column=index[2], points=length(x), visible,

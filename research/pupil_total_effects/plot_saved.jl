@@ -1,5 +1,6 @@
 # Uses the existing research/adaptive_centering/plots environment.
-using AlgebraOfVega, CairoMakie, CSV, JSON
+using AlgebraOfVega, CSV, JSON
+import AlgebraOfGraphics, CairoMakie # sdraw_file draws through AoG and a Makie backend
 
 function plot_saved(output)
     rows = CSV.File(joinpath(output,"pairs.tsv");delim='\t')

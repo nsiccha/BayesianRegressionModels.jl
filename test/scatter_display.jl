@@ -1,5 +1,7 @@
 # Run with --project=research/adaptive_centering/plots.
-using Test, BayesianRegressionModels, AlgebraOfVega, CairoMakie, Statistics
+using Test, BayesianRegressionModels, AlgebraOfVega, Statistics
+using CairoMakie: Figure
+import AlgebraOfGraphics # with CairoMakie, loads AoV's sdraw!
 include("../research/adaptive_centering/plots/scatter_display.jl")
 
 @testset "central marginal scatter display, not posterior filtering" begin

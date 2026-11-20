@@ -1,4 +1,6 @@
-using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, SHA, TOML, CairoMakie
+using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, SHA, TOML
+using CairoMakie: Figure, Label, save
+import AlgebraOfGraphics
 include("scatter_display.jl")
 
 # Display subset requested by the user; all draws remain in the diagnostics.

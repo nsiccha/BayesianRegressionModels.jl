@@ -5,7 +5,7 @@ const SOURCE_SEED = 1
 using AlgebraOfVega
 using CSV
 using Tables
-using CairoMakie
+using CairoMakie: Figure, Label, save
 import AlgebraOfGraphics
 using Serialization
 using SHA

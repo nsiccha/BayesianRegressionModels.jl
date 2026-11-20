@@ -1,4 +1,5 @@
-using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, TOML, CairoMakie
+using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, TOML
+using CairoMakie: Figure, Label, save
 import AlgebraOfGraphics
 
 """Plot the exported native WarmupHMC query, not a reconstructed loss formula."""

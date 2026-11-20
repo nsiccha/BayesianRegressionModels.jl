@@ -1,17 +1,16 @@
 # Wren.jl PR #16 in native @brm — the figures, from the saved summaries that wren16.jl writes.
 #
 # Inputs are research/epi_renewal/results/*.json only (quantile rows: q025 q10 q25 q50 q75 q90 q975
-# + truth + keys). Every figure is an AlgebraOfVega spec built with AlgebraOfGraphics' algebra and
+# + truth + keys). Every figure is an AlgebraOfVega spec built with AoV's data * mapping * visual algebra and
 # pre-aggregated bands (`lineribbon(bands=...)`, `pointinterval(bands=...)`), lowered with
 # `to_vegalite(spec; interactive=false)` and written as results/<name>.aov.json for the brief's
 # `kb-aov/v1` fences (no transforms, no params — the envelope forbids them). A static PNG is also
-# written when CairoMakie is loadable, for inspection only.
+# written when AlgebraOfGraphics and CairoMakie are loadable, for inspection only.
 #
 # Run in an environment that resolves AlgebraOfVega (it is unregistered), e.g. BRM's web-macro env:
 #   julia --project=web-macro research/epi_renewal/plots.jl
 
-using AlgebraOfVega, AlgebraOfGraphics, JSON, Statistics
-import AlgebraOfGraphics as AoG
+using AlgebraOfVega, JSON, Statistics
 
 const RESULTS = joinpath(@__DIR__, "results")
 load(name) = [(; (Symbol(k) => v for (k, v) in row)...) for row in JSON.parsefile(joinpath(RESULTS, name))]
@@ -19,7 +18,7 @@ columns(rows) = (; (k => [r[k] for r in rows] for k in keys(first(rows)))...)
 const BANDS = [:q025 => :q975, :q10 => :q90, :q25 => :q75]        # 95 / 80 / 50 % central intervals
 
 const HAS_CAIRO = try
-    @eval using CairoMakie
+    @eval import AlgebraOfGraphics, CairoMakie # sdraw_file draws through AoG and a Makie backend
     true
 catch
     false

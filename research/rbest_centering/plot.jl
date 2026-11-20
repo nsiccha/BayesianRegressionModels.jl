@@ -1,5 +1,6 @@
 # Figures for one case: OUT CASE   (reads efficiency_plot.tsv and the pairs tables written by assemble.py / pairs.jl)
-using AlgebraOfVega, CairoMakie, CSV, JSON
+using AlgebraOfVega, CSV, JSON
+using CairoMakie: Figure, Label, save
 import AlgebraOfGraphics
 out = ARGS[1]; case = ARGS[2]
 titles = Dict("AS" => "RBesT AS: ankylosing spondylitis, 8 binomial trials", "crohn" => "RBesT crohn: CDAI change, 6 Gaussian trials")

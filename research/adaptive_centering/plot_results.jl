@@ -1,7 +1,8 @@
 # Recreate the case-study figures from saved full-fit exports, using Julia/AoV.
 # No fitting or posterior subsampling occurs here. Makie provides figure layout;
 # all data marks are AlgebraOfVega specifications. HSGP coordinate changes use BRM.
-using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, CairoMakie
+using BayesianRegressionModels, AlgebraOfVega, CSV, Tables
+using CairoMakie: Figure, GridLayout, Label, Legend, save
 import AlgebraOfGraphics
 include("plots/scatter_display.jl")
 

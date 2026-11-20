@@ -2,13 +2,13 @@
 # summaries that renewal.jl writes to results/renewal/*.json (quantile rows q025 q10 q25 q50 q75 q90 q975
 # next to the simulation truth).
 #
-# Every figure is an AlgebraOfVega spec (AlgebraOfGraphics' algebra, pre-aggregated bands), lowered to
+# Every figure is an AlgebraOfVega spec (AoV's data * mapping * visual algebra, pre-aggregated bands), lowered to
 # Vega-Lite and rendered to results/figures/<name>.png with the `vl-convert` command-line tool.
 #
 #   Run:  julia --project=<env with AlgebraOfVega> research/epi_renewal/renewal_figures.jl [name ...]
 #         (VL_CONVERT=/path/to/vl-convert overrides the renderer)
 
-using AlgebraOfVega, AlgebraOfGraphics, JSON
+using AlgebraOfVega, JSON
 
 const RESULTS = joinpath(@__DIR__, "results", "renewal")
 const ASSETS = joinpath(@__DIR__, "results", "figures")
