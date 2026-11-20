@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.354
+
+- `brm_laplace_problem(rk; integrate = (..., :coefficients))`, `brm_laplace_plan`
+  and rung 5c of `brm_ladder_fit` integrate a formula coefficient whose Normal
+  prior reads its mean or scale from a scalar data field
+  (`effect(p, :) ~ Normal(0.0, fixed_sd)`) or a `name = constant(expr)`, as
+  they integrate its literal twin. Earlier only literal numbers were admitted,
+  and such a prior was refused as "not a Normal of constant mean and scale".
+- `:coefficients` now also integrates a factor block with per-level priors
+  (`effect(lp, g) .~ Normal.(0.0, w_scale)`), one block per level. Earlier
+  such a block stayed a population coordinate without notice, although the
+  name promises every population coefficient. **Breaking:** a per-level prior
+  of another family (`.~ Cauchy.(…)`) under `:coefficients` is now refused by
+  name, as any coefficient's is; such a model previously built with the block
+  sampled. Leave `:coefficients` out to sample it.
+
 ## 0.2.353
 
 - **Breaking:** KLU, Krylov, KrylovKit, LimitedLDLFactorizations,

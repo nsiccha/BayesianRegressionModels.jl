@@ -40,7 +40,7 @@ function _brm_spl_gaussian_prior(p, records, u0)
     mean = zeros(length(p.integrated))
     precision = ones(length(p.integrated))
     for r in coefficients
-        m, s = _brm_spl_coefficient_prior(r)
+        m, s = _brm_spl_coefficient_prior(p.backend, r)
         name = _brm_spl_coefficient_name(r)
         z = vec(only(b for b in p.blocks if b.declaration === name).z)
         mean[z] .= m

@@ -242,14 +242,39 @@ _brm_spl_coefficient_name(r) =
     Symbol(join((string(r.declaration), string.(get(r, :index, ()))...), "."))
 
 # A formula coefficient's Normal prior as constant (mean, scale), or `nothing`
-# for any other law or a prior argument that is not a number.
-function _brm_spl_coefficient_prior(r)
+# for any other law or an argument whose value is not a constant number.
+# RKBRMI's coefficient prior arguments are literals, scalar data fields or
+# `name = constant(expr)` values (brm-use priors.md; `v[k]` reaches the record
+# as its literal value), so a name is read once from the backend's bound inputs.
+function _brm_spl_coefficient_prior(backend, r)
     prior = r.prior
     (prior isa Expr && prior.head === :call && prior.args[1] === :Normal &&
-        length(prior.args) == 3 && all(a -> a isa Real, prior.args[2:3])) || return nothing
-    m, s = Float64(prior.args[2]), Float64(prior.args[3])
+        length(prior.args) == 3) || return nothing
+    data = rk_bound_data(backend)
+    value(a) = a isa Symbol ? get(data, a, nothing) : a
+    m, s = value(prior.args[2]), value(prior.args[3])
+    m isa Real && s isa Real || return nothing
+    m, s = Float64(m), Float64(s)
     isfinite(m) && isfinite(s) && s > 0 ? (m, s) : nothing
 end
+
+# The formula's population coefficients a record holds, one `:population`
+# record each: itself, or each level of a factor block with per-level priors
+# (`effect(lp, g) .~ Normal.(m, s)`, a `:population_block` whose prior
+# arguments hold one value per level or one shared value); none otherwise.
+_brm_spl_coefficient_records(r) = r.kind === :population ? [r] :
+    r.kind === :population_block ? [(; kind=:population, r.declaration, index=(k,),
+        r.predictor, coefficient=label, prior=_brm_spl_level_prior(r.prior, k))
+        for (k, label) in enumerate(r.labels)] : NamedTuple[]
+_brm_spl_coefficient_records(backend::RKBRMI) =
+    [c for r in _rk_coordinate_records(backend) for c in _brm_spl_coefficient_records(r)]
+_brm_spl_level_prior(prior::Expr, k) = Meta.isexpr(prior, :call) ?
+    Expr(:call, prior.args[1], (_brm_spl_level_argument(a, k) for a in prior.args[2:end])...) :
+    prior
+_brm_spl_level_prior(prior, _k) = prior
+_brm_spl_level_argument(a::AbstractVector, k) = a[k]
+_brm_spl_level_argument(a::Expr, k) = Meta.isexpr(a, :vect) ? a.args[k] : a
+_brm_spl_level_argument(a, _k) = a
 
 # The model's latent blocks over the named grouping columns. `:coefficients`
 # names the formula's population coefficients (decision `0r49iwd`): each one
@@ -257,8 +282,8 @@ end
 # as INLA keeps fixed effects in the latent Gaussian field.
 function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
     coefficients = :coefficients in integrate
-    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT ||
-        (coefficients && r.kind === :population)]
+    records = [c for r in _rk_coordinate_records(backend) for c in
+        (r.kind in _BRM_SPL_LATENT ? [r] : coefficients ? _brm_spl_coefficient_records(r) : [])]
     available = unique(Symbol[_brm_spl_record_group(r) for r in records])
     coefficients && any(r -> r.kind !== :population &&
             _brm_spl_record_group(r) === :coefficients, records) &&
@@ -289,7 +314,7 @@ function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
             "brm_laplace_problem: the `car($(r.area))` field is lowered with " *
             "`car_units`, whose draws the sparse Laplace does not integrate; build the " *
             "RKBRMI without `car_units` to integrate the field whole")
-        r.kind === :population && _brm_spl_coefficient_prior(r) === nothing &&
+        r.kind === :population && _brm_spl_coefficient_prior(backend, r) === nothing &&
             _brm_nlme_error("brm_laplace_problem: integrate names `:coefficients`, but " *
                 "the coefficient `$(r.coefficient)` of `$(r.predictor)` has the prior " *
                 "`$(r.prior)`; only coefficients with a Normal prior of constant mean and " *
