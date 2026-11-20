@@ -58,8 +58,8 @@ re-evaluates retained draws for finite densities and gradients. Its short fit
 does not establish convergence or reproduce the paper's analysis.
 `seal_joint_support.jl` checks both authored helper sets against the original
 joint density, finite-difference coordinate Jacobians and native gradients
-across four age counts. The test environment pins StanBlocks `c3912742`
-(0.2.53), which includes differentiable algebraic roots and native evaluation
+across four age counts. The test environment pins StanBlocks `c83e3c4e`
+(0.2.57), which includes differentiable algebraic roots and native evaluation
 of the data-only support bound during descriptor construction.
 
 `rk_distribution_statistics.jl` checks native LogNormal moments and log tails:
@@ -301,6 +301,13 @@ guards, keyed replay, independent time grids and fitted smooths.
 blocks with explicit models. `component_collection_observations.jl` checks
 Gaussian, Student-t and censored readings of a shared subject trajectory,
 including readings indexed into each instrument's fitted curve.
+
+`component_collection_named_returns.jl` checks record components whose named
+return holds a per-member vector: a curve beside a fitted scale, and a margin
+of the parent's correlated block beside two scalars. It prepares the native
+program under `type_stability = :error` and compares densities and gradients
+with a hand-written density, an explicit model without components and compiled
+Stan. It needs StanBlocks 0.2.57 and MutatingFunctions 0.1.2.
 
 `component_cell_returns.jl` checks returned plate collections through direct,
 aliased and nested component calls. It

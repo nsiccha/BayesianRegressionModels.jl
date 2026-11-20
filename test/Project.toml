@@ -171,7 +171,7 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # dcabd24f (0.2.40) evaluates data-only algebraic bounds in native descriptors.
 
 # 0.2.53 retains cell-specific sorted indices for repeated grouped time smooths.
-rev = "c391274249b1e3fe6e516318330729658249b322"
+rev = "c83e3c4ee7b92d8e3c2ab6c27ac8c41af46afc97"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -200,8 +200,9 @@ rev = "f971381f760e91986b3a728a719341e7e7761f55"
 
 [sources.MutatingFunctions]
 url = "https://github.com/nsiccha/MutatingFunctions.jl.git"
-# ReactiveKernelsPPL's own `[sources]` revision (RKPPL >= 0.1.133).
-rev = "02eb981b9770e767f47a7fda287fcbfb9531d587"
+# MutatingFunctions 0.1.2, ahead of ReactiveKernelsPPL's own `[sources]` revision:
+# `apply!!` compiles for its call's concrete types (setup_env.jl).
+rev = "be3971ba5b768208f36a9edf6ec9b150057fa35a"
 
 [sources.ReactiveKernels]
 # RKPPL 0.1.89: read-only constrained parameter metadata for brm_model_view.

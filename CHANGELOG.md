@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.350
+
+- A component repeated over records can return a per-member vector beside
+  other named values, such as `return (; curve, scale)`, read in its
+  `@observe` clause as `member.curve[entry.read_index[s]]` and `member.scale`.
+  SBBRMI now lowers it; before, `stan_code` refused the member's returned
+  values. This needs StanBlocks 0.2.57.
+- A member that returns its `parentblock` margin as a vector prepares under
+  the ReactiveKernels preference `type_stability = "error"` with
+  MutatingFunctions 0.1.2 or later. BRM's test environment pins it.
+
 ## 0.2.349
 
 - `using BayesianRegressionModels` no longer loads the packages only fitting
