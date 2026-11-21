@@ -168,6 +168,7 @@ include("nlme_view.jl")
 include("nlme_connected.jl")
 include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
+include("fixed_hyper.jl")
 include("nlme_start.jl")
 include("nlme_laplace_coloring.jl")
 include("nlme_laplace.jl")
@@ -377,6 +378,8 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_two_stage_fit,
        BRMNLMEConditionalProblem, brm_nlme_conditional_problem,
        brm_nlme_conditional_point,
+       brm_hyperparameters, BRMFixedHyperProblem, brm_fixed_hyper_problem,
+       brm_fixed_hyper_point, brm_fixed_hyper_fit,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,

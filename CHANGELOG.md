@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.357
+
+- `brm_hyperparameters(rk)`, `brm_fixed_hyper_problem(rk, start; ad_backend,
+  fixed)`, `brm_fixed_hyper_point` and `brm_fixed_hyper_fit(sampler, rk, start;
+  ad_backend, fixed)`: MCMC over every latent of an RKBRMI model with only its
+  hyperparameters held at a point, such as a `brm_svi_fit` result (read as the
+  mean of its draws). The hyperparameters are read from the RK coordinate
+  records: random-effect scales and correlation factors, a structured term's
+  own parameters (an `hsgp`'s amplitude and length scales, a `cdar`'s scale
+  and AR coefficient, an `rw`'s or `car`'s scale, a `gmrf`'s scale and
+  lengths), LKJ factors and constrained declared scalars. Random-effect
+  draws, basis weights (shared ones included), innovations, fields,
+  coefficients, declared vectors and matrices and real-line scalars stay free.
+  `fixed=` edits the set; `fixed = ()` samples the full model from the start.
+  The draws are complete packed RK points (snag `mixed-membership-1a1930a6`,
+  design decision `0b9jgl5`).
+
 ## 0.2.356
 
 - SBBRMI takes `Dirichlet(K, a)` with both `K` and `a` read from data fields,
