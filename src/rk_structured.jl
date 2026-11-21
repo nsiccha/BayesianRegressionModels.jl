@@ -99,6 +99,24 @@ function _rk_ast_hsgp_hyper!(block, options, hyper, prior, floor, G)
     value, ranef, beta
 end
 
+# The value a grouped HSGP's per-level rows are sized by: a collection cell's
+# fitted level table, or the term's in-graph level set (`g_fit_levels`, the
+# level set its group index reads). `nothing` for a coordinate multigroup
+# field, whose weights have one row per point, and an ungrouped term.
+_rk_hsgp_level_set(options) = get(options, :collection_levels, get(options, :level_set, nothing))
+
+# A grouped HSGP term with the level set its group index reads (`level_sets`,
+# by index), unless a collection cell supplies its own or its weights are a
+# coordinate field's.
+function _rk_hsgp_with_level_set(term, level_sets)
+    options = term.options
+    haskey(options, :group_fit_source) && !haskey(options, :collection_levels) &&
+        !(get(options, :level_cor, nothing) isa _BRMMultigroupCoordinates) || return term
+    level_set = level_sets[options.group_index]
+    _RKTermSpec(term.kind, term.columns, merge(options, (; level_set)), term.addressee,
+        term.label)
+end
+
 # Grouped or hyper-predicted HSGP: one block allocating the hyperparameters,
 # their group-level effects and the basis weights, returning the summand. Also
 # returns the block's sampled locals that its coordinate record names: the
@@ -109,6 +127,7 @@ end
 function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, bindings)
     options = term.options
     G = get(options, :n_groups, 1)
+    level_set = _rk_hsgp_level_set(options)
     rho_priors = options.iso ?
         [_rk_ast_hsgp_hyper_prior(options, :length_scale, bindings, taken)] :
         [_rk_ast_hsgp_rho_prior(options, floors, j, bindings, taken)
@@ -121,16 +140,19 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     sigma_prior = _rk_ast_hsgp_hyper_prior(options, :sd, bindings, taken)
     grouped = haskey(options, :group_index)
     block = _rk_block_body(rho_priors..., sigma_prior)
+    # The level set comes first, and the block reads only its length: a design
+    # binder replaces it with the fit's to keep a draw of the fit's
+    # coordinates (`_rk_sizes_only`).
+    if level_set !== nothing
+        levels = _rk_block_argument!(block, :fitted_levels, level_set)
+        G = :(length($levels))
+    end
     arguments = Pair{Symbol,Any}[formal => _rk_block_argument!(block, formal, value)
         for (formal, value) in inputs]
     floor = floors === nothing || floor_named ? nothing :
         _rk_block_argument!(block, :floor, floors)
     group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
         nothing
-    if haskey(options, :collection_levels)
-        levels = _rk_block_argument!(block, :fitted_levels, options.collection_levels)
-        G = :(length($levels))
-    end
     rho, rho_effects, rho_sampled = _rk_ast_hsgp_lengths!(block, options,
         rho_priors, floor, G, Val(options.iso))
     sigma, sigma_effects, sigma_sampled = _rk_ast_hsgp_hyper!(block, options, :sd,
