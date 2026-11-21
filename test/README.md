@@ -318,6 +318,12 @@ whose intercept sits beside its margin in the parent's block, addressed by
 unconstrained and constrained names. `component_collection_observations.jl` checks
 Gaussian, Student-t and censored readings of a shared subject trajectory,
 including readings indexed into each instrument's fitted curve.
+`component_length_scale_floor.jl` checks `length_scale_floor` in a record
+member's own `length_scale(trend, hsgp(config.time))` prior, with and without
+a declaration guard: each member against the same smooth fitted alone
+(compiled Stan density and gradient, the floor read back with
+`brm_length_scale_floor(...; submodel)`), native RK against compiled Stan, a
+member beside a `parentblock` margin, and the name's refusals elsewhere.
 
 `component_collection_named_returns.jl` checks record components whose named
 return holds a per-member vector: a curve beside a fitted scale, and a margin
