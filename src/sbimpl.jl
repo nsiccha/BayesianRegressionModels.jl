@@ -6890,6 +6890,21 @@ function _sb_resample_group_set(groups)
     Set{Symbol}(collected)
 end
 
+# A parentblock margin groups its member rows through a generated column.
+# Select all projections of an authored field, as well as the model-scope
+# column if the fit also uses one under that name. Preserve unknown selectors
+# so the ordinary replay validation can report them.
+function _sb_member_resample_groups(groups, sources, preproc)
+    selected = setdiff(groups, values(sources))
+    for (column, source) in sources
+        source in groups && push!(selected, column)
+    end
+    for e in values(preproc)
+        e.kind === :group_index && e.raw_ref in groups && push!(selected, e.raw_ref)
+    end
+    union!(selected, intersect(groups, _sb_cdar_by_columns(preproc)))
+end
+
 _sb_same_raw_ref(a, b) = isequal(a, b)
 _sb_same_raw_ref(::DataColumn, ::DataColumn) = true
 _sb_same_raw_ref(a::JointResponseColumn, b::JointResponseColumn) =
@@ -8012,6 +8027,9 @@ concurrent calls and keep mutable scratch private to the call.
   `freeze_constants=false`, the formula rebuilt on `new_df`), derives those
   groups' levels from `new_df`, and marks their indices so their standardized
   effects are re-drawn in generated quantities from the fitted covariance.
+  A record component's `(1 | parentblock(:p) | entry.subject)` follows
+  `:subject` along with the parent model's own subject effects. Select a
+  differently named shared field such as `entry.reader` with `:reader`.
   Predictor constants remain frozen unless `freeze_constants=false` is also
   requested.
   This changes Stan source by construction; it is the new-population/CV twin
@@ -8078,9 +8096,13 @@ refused); drawing new levels of one (`resample_groups`) is not supported.
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                    resample_groups=(),resample_covariates=(),
                    held_out=sb.held_out)
-    new_df = _brm_collection_replay_data(brm_source(sb), new_df)
-    new_df = _sb_replay_data(sb, new_df, freeze_constants)
     groups = _sb_resample_group_set(resample_groups)
+    group_sources = isempty(groups) ? nothing : Dict{Symbol,Symbol}()
+    new_df = _brm_collection_replay_data(brm_source(sb), new_df; group_sources)
+    if !isnothing(group_sources) && !isempty(group_sources)
+        groups = _sb_member_resample_groups(groups, group_sources, sb.preproc)
+    end
+    new_df = _sb_replay_data(sb, new_df, freeze_constants)
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
     isempty(covariates) || union!(groups,_sb_covariate_resample_groups(sb.preproc))
@@ -14660,7 +14682,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         per_target_ranges = Pair{Symbol,UnitRange{Int}}[]
         for (brmi_key, terms) in _sb_bucket_target_terms(bucket)
             if any(t -> t isa _SBCellMeansTerm && _sb_cat_levels(t.term) isa _BRMMemberCodes, terms)
-                push!(get!(Set{Symbol}, data, :__brm_collection_buckets__), bucket_name)
+                push!(get!(Set{Symbol}, data, :__brm_collection_buckets__), suffix)
             end
             ncols = sum(_sb_ranef_term_ncols(t, data) for t in terms; init=0)
             ncols > 0 || error("sbimpl: `|$id_sym|` bucket sees empty term list for target `$brmi_key`")
@@ -15619,7 +15641,7 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
         error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
     if length(cols) == 1
         col_idx = first(cols)
-        if bucket_name in get(data, :__brm_collection_buckets__, ())
+        if suffix in get(data, :__brm_collection_buckets__, ())
             index = Symbol(:col_idx_, target, :_, suffix)
             data[index] = col_idx
             _sb_record_static!(data, index)

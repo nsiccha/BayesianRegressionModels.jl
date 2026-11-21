@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.371
+
+- On SBBRMI, `reprocess(fit, rows; resample_groups=[:site])` jointly
+  redraws effects grouped by `site` in the parent and by `entry.site` in
+  record components sharing its block through `parentblock`. A shared
+  margin grouped by `entry.reader` can be selected separately with `:reader`.
+
 ## 0.2.370
 
 - In a model-scope assignment, `eta = X * b` now contracts a rectangular
