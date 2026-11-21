@@ -17,6 +17,8 @@ instead of failing at run time.
 - RKBRMI's JAX export supports a Dirichlet simplex inside a `@plate`,
   with scalar or vector concentrations. It uses the same isometric
   coordinates, log Jacobian and normalized density as native RKBRMI.
+  Cells can have different sizes. A one-component cell has weight one
+  and uses no free coordinates.
 
 ## 0.2.374
 

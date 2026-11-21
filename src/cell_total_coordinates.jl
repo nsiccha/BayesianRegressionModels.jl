@@ -180,7 +180,9 @@ function _brm_sum_to_zero_free(z::AbstractVector)
 end
 @_brm_traceable function _brm_sum_to_zero_values(y::AbstractVector)
     j = 1:length(y)
-    w = y ./ sqrt.(j .* (j .+ 1))
+    # A padded empty JAX row has index zero. Keep its unused division finite
+    # so reverse mode cannot carry a NaN into another cell's coordinates.
+    w = y ./ sqrt.(max.(j .* (j .+ 1), 1))
     backwards = length(y) + 1 .- j
     # Accumulate from the empty tail upwards, then read the tails in coordinate order.
     tails = cumsum(vcat(0.0, w[backwards]))
