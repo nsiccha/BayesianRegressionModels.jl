@@ -59,7 +59,8 @@ _sb_julia_stan_builtin(::typeof(LogExpFunctions.logsumexp), args) = (:log_sum_ex
 _sb_julia_stan_builtin(::typeof(StatsFuns.normcdf), args) = (:Phi, args)
 _sb_julia_stan_builtin(::typeof(StatsFuns.norminvcdf), args) = (:inv_Phi, args)
 _sb_julia_stan_builtin(::typeof(cumsum), args) = (:cumulative_sum, args)
-_sb_julia_stan_builtin(::typeof(_brm_matvec), args) = (:*, args)
+_sb_julia_stan_builtin(::_BRMMatrixProduct, args) = (:*, args)
+_sb_julia_stan_builtin(::typeof(_brm_dotted_product), args) = (:.*, args)
 _sb_julia_stan_builtin(::_BRMRowScale, args) = (brm_scale_matrix_rows, args)
 
 # Julia broadcasts the vector along the first matrix axis. Singleton axes

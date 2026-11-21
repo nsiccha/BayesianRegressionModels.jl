@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.372
+
+- A rectangular matrix product can supply a likelihood argument directly.
+  With three rows in `X` and two coefficients in `b`, both
+  `y ~ Normal(X * b, 1)` and `y .~ Normal.(X * b, 1)` give one Normal
+  observation per row. The dotted observation uses ordinary multiplication
+  even for a square design. Existing undotted likelihoods keep the 0.2.x
+  row-scaling interpretation wherever their inputs already broadcast.
+
 ## 0.2.371
 
 - `brm_start(sb, stan_model)` now names the imports needed to compute a

@@ -838,7 +838,7 @@ _brm_parse_info(groupings) = (; alllocals=OrderedDict{Symbol,Symbol}(),
 # interprets: the `__df__ -> BRMI` builder body, the authored source, and, for
 # an unnamed builder, the expression of its column inventory.
 function _brm_builder_code(x::Expr; df=nothing)
-    (x.head == :block || x.head == :(=) || isxcall(x, :~) || _brm_is_doc(x) ||
+    (x.head == :block || x.head == :(=) || _brm_sampling_statement(x) || _brm_is_doc(x) ||
      _is_brm_plate(x)) || error(
         "@brm: a standalone predictor fragment such as `@brm(1 + x)` is " *
         "not implemented. Use nested `@brm(1 + x)` inside an outer `@brm` " *
@@ -1008,10 +1008,15 @@ elseif isxcall(x, :.~) && _is_optional_prior_lhs(x.args[2])
                    info, optional=true)
 elseif isxcall(x, :.~) && _is_effect_lhs(x.args[2])
     _parse_effect!(x.args[2], _brm_elementwise_law(x); info)
-elseif isxcall(x, :.~)
+elseif isxcall(x, :.~) && !(x.args[2] isa Symbol)
     parse!(_brm_vector_declaration(x); info)
-elseif isxcall(x, :~)
-    _, lhs, rhs = x.args
+elseif _brm_sampling_statement(x)
+    head, lhs, rhs = x.args
+    if head === :.~
+        _brm_is_broadcast_call(rhs) || throw(ArgumentError(
+            "@brm: write an elementwise observation as `$lhs .~ Family.(args...)`"))
+        rhs = Expr(:call, rhs.args[1], rhs.args[2].args...)
+    end
     legacy_kernel_doblock = _is_brm_legacy_kernel_doblock(rhs)
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
     # ID symbol doesn't get registered as a data-column name. Left-associative
@@ -1029,7 +1034,8 @@ elseif isxcall(x, :~)
     parselocals!(response; info, val=:maybelocal)
     hasproperty(info, :inventory) &&
         _brm_inventory_statement!(info.inventory, response, rhs, legacy_kernel_doblock, read_before)
-    parsed = :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
+    operation = head === :.~ ? _brm_broadcast_observation : :~
+    parsed = :(@n $lhs = @x $(Expr(:call, operation, lhs, rhs)))
     legacy_kernel_doblock ?
         Expr(:block, :($_brm_depwarn_kernel_doblock()), parsed) : parsed
 else
@@ -2872,9 +2878,9 @@ function _parse_constant!(lhs, rhs; info)
     :(@n $lhs = $ExprColumn($assign, $(QuoteNode(lhs)), $ExprColumn($constant, $spec, $(bound...))))
 end
 
-_x(x, assignment=false) = x
+_x(x, owner=nothing) = x
 # The dotted head itself is not a binding. Look up its scalar operator and
-# keep the spelling for shape-dependent multiplication in an assignment.
+# keep the spelling for shape-dependent multiplication in a value expression.
 const _BRM_DOTTED_ARITHMETIC = (:+, :-, :*, :/, :^)
 function _brm_formula_call_head(x::Expr)
     head = first(x.args)
@@ -2942,13 +2948,39 @@ function _brm_formula_callee_message(name, @nospecialize(f), mod)
         " Rename the variable, or bind `$shown` to the function or type the formula calls."
     "@brm: the formula calls `$shown(...)`, but $bound, which cannot be called.$remedy"
 end
-_x(x::Expr, assignment=false) = if x.head == :call
+# A sampling RHS can also be a predictor formula. Resolve its callable in
+# the builder's scope before choosing how to interpret products in its arguments.
+_brm_contains_product(x) = false
+_brm_contains_product(x::Expr) = isxcall(x, :*) || isxcall(x, :.*) ||
+    any(_brm_contains_product, x.args)
+
+function _x_sampling_rhs(rhs, explicit)
+    Meta.isexpr(rhs, :call) || return _x(rhs)
+    explicit && return _x(rhs, _brm_broadcast_observation)
+    operands = rhs.args[2:end]
+    if !any(_brm_contains_product, operands)
+        return _x(rhs)
+    end
+    family = gensym(:family)
+    callee = _brm_formula_callee_expr(_x(_brm_formula_call_head(rhs)))
+    args = map(arg -> _x(arg, family), operands)
+    call = fixcall(Expr(:call, ExprColumn, family, args...))
+    Expr(:let, Expr(:(=), family, callee), call)
+end
+
+_x(x::Expr, owner=nothing) = if isxcall(x, :~) || isxcall(x, _brm_broadcast_observation)
+    op, lhs, rhs = x.args
+    explicit = op === _brm_broadcast_observation
+    law = _x_sampling_rhs(rhs, explicit)
+    explicit ? Expr(:call, op, _x(lhs), law) :
+        Expr(:call, ExprColumn, _brm_formula_callee_expr(op), _x(lhs), law)
+elseif x.head == :call
     head = first(x.args)
     callee = _brm_formula_callee_expr(_x(_brm_formula_call_head(x)))
-    args = _x.(x.args[2:end], assignment || head === assign)
-    if assignment && head in (:*, :.*) && length(args) == 2 &&
+    args = map(arg -> _x(arg, head === assign ? assign : owner), x.args[2:end])
+    if owner !== nothing && head in (:*, :.*) && length(args) == 2 &&
             !any(a -> Meta.isexpr(a, (:kw, :parameters)), args)
-        Expr(:call, _brm_assignment_product, callee, head === :.*, args...)
+        Expr(:call, _brm_value_product, owner, callee, head === :.*, args...)
     else
         fixcall(Expr(:call, ExprColumn, callee, args...))
     end
@@ -2966,7 +2998,7 @@ elseif x.head == :do
         newargs = copy(call.args)
         pos = (length(newargs) >= 2 && Meta.isexpr(newargs[2], :parameters)) ? 3 : 2
         insert!(newargs, pos, lambda)
-        _x(Expr(:call, newargs...), assignment)
+        _x(Expr(:call, newargs...), owner)
     else
         Expr(x.head, _x.(x.args)...)
     end
@@ -2977,7 +3009,7 @@ elseif x.head == :->
     Expr(:call, _BRMInlineBody, Meta.quot(x),
         Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0)))
 else
-    Expr(x.head, _x.(x.args, assignment)...)
+    Expr(x.head, map(arg -> _x(arg, owner), x.args)...)
 end
 """
     Data(df)
@@ -3784,7 +3816,7 @@ function _expand_nested_top!(key, value, pending, occupied)
         "@brm: nested `@brm(...)` is only valid inside an observed likelihood " *
         "argument, not the linear predictor `$key ~ ...`.")
     new_rhs = _nested_rewrite_likelihood!(key, lhs, rhs, pending, occupied)
-    NamedColumn(name(value), ExprColumn(~, lhs, new_rhs))
+    NamedColumn(name(value), ExprColumn(~, lhs, new_rhs; getkwargs(op)...))
 end
 
 # Builder finalization runs once per model. Merging do-block captures and
@@ -3979,6 +4011,12 @@ _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begi
         _show_bare(io, only(getargs(last(args))))
         return
     end
+    if get(getkwargs(op), :broadcast_observation, false)
+        _show_bare(io, first(args))
+        print(io, " .~ ")
+        _brm_show_call(io, last(args); dotted=true)
+        return
+    end
     # A declared vector parameter prints as written: `phi[1:n] .~ Normal.(...)`.
     if getf(op) === (~) && last(args) isa ExprColumn{typeof(_brm_vector_prior)}
         len, law = getargs(last(args))
@@ -4055,8 +4093,8 @@ _brm_infix_symbol(_) = nothing
 function _brm_infix_symbol(x::ExprColumn)
     f = getf(x)
     f === doublepipe && return :||
-    (f === _brm_matvec || f === _brm_legacy_matvec) && return :*
-    f === _brm_broadcast_matvec && return :.*
+    (f isa _BRMMatrixProduct || f === _brm_legacy_matvec) && return :*
+    (f === _brm_broadcast_matvec || f === _brm_dotted_product) && return :.*
     f isa Function && length(getargs(x)) >= 2 && isempty(getkwargs(x)) || return nothing
     # A range `1:n` lowers to a call of `Colon()`, whose name is `Colon`.
     op = f isa Colon ? :(:) : nameof(f)
@@ -4179,8 +4217,12 @@ Base.show(io::IO, x::ExprColumn) = begin
     isnothing(op) || return _brm_show_infix(io, x, op, typemax(Int))
     prefix = _brm_prefix_symbol(x)
     isnothing(prefix) || return _brm_show_prefix(io, x, prefix, 0)
+    _brm_show_call(io, x)
+end
+
+function _brm_show_call(io::IO, x::ExprColumn; dotted=false)
     _show_call_head(io, getf(x))
-    print(io, "(", )
+    print(io, dotted ? ".(" : "(")
     for (i, arg) in enumerate(getargs(x))
         i == 1 || print(io, ", ")
         _brm_show_operand(io, arg, 0)

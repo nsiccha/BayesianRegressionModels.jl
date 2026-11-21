@@ -17,9 +17,37 @@ _brm_legacy_matvec(X, b) = X .* b
 
 const _BRMRowScale = Union{typeof(_brm_broadcast_matvec),typeof(_brm_legacy_matvec)}
 
-function _brm_assignment_product(f, dotted, x, b)
-    if f === (*) && x isa NamedColumn && parent(x) isa DataColumn &&
-            parent(parent(x)) isa AbstractMatrix{<:Real}
+function _brm_broadcast_observation(lhs, law::ExprColumn)
+    shape = _brm_distribution_shape(law)
+    isnothing(shape) && throw(ArgumentError(
+        "@brm: `$(name(lhs)) .~` needs a constructor with a known scalar distribution type"))
+    first(shape) === Distributions.Univariate || throw(ArgumentError(
+        "@brm: `$law` is a joint law. Write `$(name(lhs)) ~ $law` for one event."))
+    # A scalar event alone does not make each constructor argument scalar:
+    # Categorical takes a whole probability vector. Add families here only
+    # with their broadcast argument roles and both backend lowerings.
+    family = getf(law)
+    family isa Type && family <: Normal || throw(ArgumentError(
+        "@brm: model-scope `$(name(lhs)) .~` currently supports `Normal.(mean, scale)`; " *
+        "the broadcast argument roles of `$family` are not implemented here"))
+    ExprColumn(~, lhs, law; broadcast_observation=true)
+end
+
+_brm_dotted_product(x, y) = x .* y
+_brm_julia_product(x, y) = x * y
+const _BRMMatrixProduct = Union{typeof(_brm_matvec),typeof(_brm_julia_product)}
+
+_brm_assignment_product(f, dotted, x, b) = _brm_value_product(assign, f, dotted, x, b)
+
+function _brm_value_product(owner, f, dotted, x, b)
+    explicit = owner === _brm_broadcast_observation
+    f === (*) || return ExprColumn(f, x, b)
+    # The new dotted likelihood has no legacy meaning to preserve, even
+    # when a square design would also allow a row broadcast.
+    explicit && !dotted && return ExprColumn(_brm_julia_product, x, b)
+    if x isa NamedColumn && parent(x) isa DataColumn &&
+            parent(parent(x)) isa AbstractMatrix{<:Real} &&
+            (explicit || owner === assign || _brm_prior_constructor(owner))
         if b isa NamedColumn && parent(b) isa MissingColumn
             # A vector declaration can follow the assignment or come from
             # another model fragment. Keep the spelling until it is bound.
@@ -36,7 +64,7 @@ function _brm_assignment_product(f, dotted, x, b)
             return ExprColumn(_brm_legacy_matvec, x, b)
         end
     end
-    ExprColumn(f, x, b)
+    ExprColumn(explicit && dotted ? _brm_dotted_product : f, x, b)
 end
 
 _brm_operand_vector_length(x) = nothing

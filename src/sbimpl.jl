@@ -19449,7 +19449,7 @@ _sb_scalar_expr(x::NamedColumn, data) = begin
 end
 _record_scalar_data!(data, sym, d::DataColumn) = (data[sym] = parent(d); nothing)
 _record_scalar_data!(args...) = nothing
-function _sb_scalar_expr(x::ExprColumn{F}, data) where {F<:Union{typeof(_brm_matvec),_BRMRowScale}}
+function _sb_scalar_expr(x::ExprColumn{F}, data) where {F<:Union{_BRMMatrixProduct,_BRMRowScale}}
     matrix, vector = getargs(x)
     left = _sb_scalar_expr(matrix, data)
     right = _sb_scalar_expr(vector, data)
