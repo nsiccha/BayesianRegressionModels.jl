@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.370
+
+- In a model-scope assignment, `eta = X * b` now contracts a rectangular
+  data matrix with a coefficient vector when their inner dimensions match
+  and their row axes cannot broadcast. For example, a 3-by-2 matrix times
+  two coefficients gives three means on both backends. Existing
+  broadcastable products retain their 0.2.x meaning, including square
+  matrices. `X .* b` explicitly scales the rows.
+
 ## 0.2.369
 
 - A numeric matrix in `eta ~ 1 + offset(log_area) + X` contributes one slope

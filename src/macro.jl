@@ -2872,13 +2872,9 @@ function _parse_constant!(lhs, rhs; info)
     :(@n $lhs = $ExprColumn($assign, $(QuoteNode(lhs)), $ExprColumn($constant, $spec, $(bound...))))
 end
 
-_x(x) = x
-_x(x::Symbol) = x
-# Formula arithmetic applies per row, so the dotted arithmetic operators are
-# exact aliases of the plain ones: `a .* b` builds the `ExprColumn` of `a * b`
-# and every backend emits the same program (decision `0iefgns`). Evaluating a
-# dotted head itself fails, because broadcast syntax is not a binding; any
-# other dotted operator is refused with the admitted set.
+_x(x, assignment=false) = x
+# The dotted head itself is not a binding. Look up its scalar operator and
+# keep the spelling for shape-dependent multiplication in an assignment.
 const _BRM_DOTTED_ARITHMETIC = (:+, :-, :*, :/, :^)
 function _brm_formula_call_head(x::Expr)
     head = first(x.args)
@@ -2887,7 +2883,7 @@ function _brm_formula_call_head(x::Expr)
     plain in _BRM_DOTTED_ARITHMETIC || error(
         "@brm: `$(sprint(Base.show_unquoted, x))`: the dotted operator `$head` is not " *
         "admitted in a formula. The dotted arithmetic operators `.* ./ .+ .- .^` " *
-        "mean exactly the plain ones, because formula arithmetic applies per row.")
+        "are supported.")
     plain
 end
 # A formula call's head resolves as any Julia call's does: a local of the
@@ -2946,9 +2942,16 @@ function _brm_formula_callee_message(name, @nospecialize(f), mod)
         " Rename the variable, or bind `$shown` to the function or type the formula calls."
     "@brm: the formula calls `$shown(...)`, but $bound, which cannot be called.$remedy"
 end
-_x(x::Expr) = if x.head == :call
-    Expr(:call, ExprColumn, _brm_formula_callee_expr(_x(_brm_formula_call_head(x))),
-         _x.(x.args[2:end])...) |> fixcall
+_x(x::Expr, assignment=false) = if x.head == :call
+    head = first(x.args)
+    callee = _brm_formula_callee_expr(_x(_brm_formula_call_head(x)))
+    args = _x.(x.args[2:end], assignment || head === assign)
+    if assignment && head in (:*, :.*) && length(args) == 2 &&
+            !any(a -> Meta.isexpr(a, (:kw, :parameters)), args)
+        Expr(:call, _brm_assignment_product, callee, head === :.*, args...)
+    else
+        fixcall(Expr(:call, ExprColumn, callee, args...))
+    end
 elseif _is_nested_brm(x)
     Expr(:call, NestedPredictorFormula, _x(_nested_brm_payload(x)))
 elseif x.head ==  :||
@@ -2963,7 +2966,7 @@ elseif x.head == :do
         newargs = copy(call.args)
         pos = (length(newargs) >= 2 && Meta.isexpr(newargs[2], :parameters)) ? 3 : 2
         insert!(newargs, pos, lambda)
-        _x(Expr(:call, newargs...))
+        _x(Expr(:call, newargs...), assignment)
     else
         Expr(x.head, _x.(x.args)...)
     end
@@ -2974,7 +2977,7 @@ elseif x.head == :->
     Expr(:call, _BRMInlineBody, Meta.quot(x),
         Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0)))
 else
-    Expr(x.head, _x.(x.args)...)
+    Expr(x.head, _x.(x.args, assignment)...)
 end
 """
     Data(df)
@@ -4052,6 +4055,8 @@ _brm_infix_symbol(_) = nothing
 function _brm_infix_symbol(x::ExprColumn)
     f = getf(x)
     f === doublepipe && return :||
+    (f === _brm_matvec || f === _brm_legacy_matvec) && return :*
+    f === _brm_broadcast_matvec && return :.*
     f isa Function && length(getargs(x)) >= 2 && isempty(getkwargs(x)) || return nothing
     # A range `1:n` lowers to a call of `Colon()`, whose name is `Colon`.
     op = f isa Colon ? :(:) : nameof(f)

@@ -10666,21 +10666,26 @@ _sb_population_columns(data) = (term; cellmeans::Bool=false) ->
 # fitted width. A generated real matrix also permits an integer-valued input
 # to keep its original integer meaning elsewhere in the model.
 function _sb_matrix_operand!(data, ref::_BRMMatrixColumn)
-    key = Symbol("brm_matrix_", ref.source)
-    rec = PreprocEntry(:matrix_predictor, ref.width, ref.source, false)
-    frozen = _sb_frozen_preproc_entry(data, key, rec.kind, ref.source)
-    raw = _brm_check_matrix_width(data[ref.source], ref.source,
-        frozen === nothing ? ref.width : frozen.const_)
+    key = _sb_real_matrix_input!(data, ref.source, ref.width)
+    _BRMMatrixColumn(key, ref.index, ref.width)
+end
+
+function _sb_real_matrix_input!(data, source, width)
+    key = Symbol("brm_matrix_", source)
+    rec = PreprocEntry(:matrix_predictor, width, source, false)
+    frozen = _sb_frozen_preproc_entry(data, key, rec.kind, source)
+    raw = _brm_check_matrix_width(data[source], source,
+        frozen === nothing ? width : frozen.const_)
     recorded = get(data, _SB_PREPROC_KEY, nothing)
     records = recorded isa _SBPreprocContext ? recorded.recorded : recorded
     if haskey(data, key)
         records !== nothing && haskey(records, key) && records[key].kind === rec.kind ||
-            throw(ArgumentError("matrix predictor `$(ref.source)` collides with data field `$key`"))
+            throw(ArgumentError("matrix predictor `$source` collides with data field `$key`"))
     else
         data[key] = raw isa Matrix{Float64} ? raw : Matrix{Float64}(raw)
         _sb_record_preproc!(data, key, rec)
     end
-    _BRMMatrixColumn(key, ref.index, ref.width)
+    key
 end
 
 function _sb_shared_population_column!(data, column)
@@ -19444,6 +19449,18 @@ _sb_scalar_expr(x::NamedColumn, data) = begin
 end
 _record_scalar_data!(data, sym, d::DataColumn) = (data[sym] = parent(d); nothing)
 _record_scalar_data!(args...) = nothing
+function _sb_scalar_expr(x::ExprColumn{F}, data) where {F<:Union{typeof(_brm_matvec),_BRMRowScale}}
+    matrix, vector = getargs(x)
+    left = _sb_scalar_expr(matrix, data)
+    right = _sb_scalar_expr(vector, data)
+    # Stan represents integer matrices as two-dimensional integer arrays.
+    # Share the real-valued input used by numeric matrix predictor terms.
+    if matrix isa NamedColumn && parent(matrix) isa DataColumn &&
+            parent(parent(matrix)) isa AbstractMatrix{<:Integer}
+        left = _sb_real_matrix_input!(data, name(matrix), size(parent(parent(matrix)), 2))
+    end
+    _sb_julia_stan_call(getf(x), (left, right))
+end
 # Formula arithmetic is element-wise by intent -- `loc = loc_loc + loc_slope * cdslope`
 # on two length-n vectors means Stan's `.*`, not matrix/dot product. Translate `*`
 # and `/` to their dotted variants so Stan's typechecker accepts vector-vector
