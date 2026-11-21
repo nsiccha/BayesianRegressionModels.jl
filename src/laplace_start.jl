@@ -41,8 +41,10 @@ RKBRMI built from `parent(sb)`.
 Initial values for some addresses go on top of a start through `base`:
 `brm_start(sb, model, inits; base = brm_start(sb, model))`.
 
-Needs Pathfinder loaded (WarmupHMC loads it) and, for the default
+Both forms use the ReactiveKernels backend (`import ReactiveKernels,
+ReactiveKernelsPPL`), Pathfinder (WarmupHMC loads it) and, for the default
 `ad_backend` (reverse-mode `AutoEnzyme`), Enzyme and DifferentiationInterface.
+Load the fitting packages for the Laplace solver used by the model.
 The units are those of [`brm_nlme_view`](@ref) (`subject_group`,
 `nested_groups`, `shared_groups`); a model it does not partition into units,
 one with no random-effect block among them, is refused with the view's
@@ -67,7 +69,18 @@ function brm_start(sb::SBBRMI, stan_model; chains::Union{Nothing,Integer}=nothin
         rng::AbstractRNG=Random.default_rng(), rk=nothing, ad_backend=nothing,
         subject_group=nothing, nested_groups=NamedTuple(), shared_groups=(),
         integrate=nothing)
-    rk = rk === nothing ? RKBRMI(parent(sb)) : rk
+    if rk === nothing
+        Base.get_extension(@__MODULE__, :BayesianRegressionModelsReactiveKernelsExt) === nothing &&
+            throw(ArgumentError("brm_start(sb, stan_model) computes the start from the data " *
+                "on the ReactiveKernels backend. Add its packages to your environment and " *
+                "run `import ReactiveKernels, ReactiveKernelsPPL` to load " *
+                "BayesianRegressionModelsReactiveKernelsExt. For the default start, also run " *
+                "`import Enzyme, DifferentiationInterface` and load Pathfinder " *
+                "(`using WarmupHMC` loads it). " *
+                "For the full set of fitting packages, run " *
+                "`import $(join(keys(_BRM_FITTING_EXTENSIONS), ", "))`."))
+        rk = RKBRMI(parent(sb))
+    end
     t = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan_model))
     U = _brm_laplace_start_draws(rk, _brm_start_count(chains); rng, ad_backend,
         subject_group, nested_groups, shared_groups, integrate)
