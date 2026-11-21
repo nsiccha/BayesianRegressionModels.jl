@@ -59,6 +59,21 @@ _sb_julia_stan_builtin(::typeof(LogExpFunctions.logsumexp), args) = (:log_sum_ex
 _sb_julia_stan_builtin(::typeof(StatsFuns.normcdf), args) = (:Phi, args)
 _sb_julia_stan_builtin(::typeof(StatsFuns.norminvcdf), args) = (:inv_Phi, args)
 _sb_julia_stan_builtin(::typeof(cumsum), args) = (:cumulative_sum, args)
+_sb_julia_stan_builtin(::typeof(_brm_matvec), args) = (:*, args)
+_sb_julia_stan_builtin(::_BRMRowScale, args) = (brm_scale_matrix_rows, args)
+
+# Julia broadcasts the vector along the first matrix axis. Singleton axes
+# can expand on either input, including when the other axis is empty.
+StanBlocks.@deffun begin
+    brm_scale_matrix_rows(X::matrix[n,k], b::vector[m])::matrix[(n == 1 ? m : n),k] = begin
+        if n == 1
+            return b * X[1, :]
+        elseif m == 1
+            return X * b[1]
+        end
+        return diag_pre_multiply(b, X)
+    end
+end
 
 # The Stan call for a Julia call, or `nothing` to keep the authored call.
 function _sb_julia_stan_call(callable, args)

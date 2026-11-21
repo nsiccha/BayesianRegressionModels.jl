@@ -1314,6 +1314,8 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         _rk_value_expr!(bindings, assignment.expression, taken)))
 end
 
+_rk_value_callee!(bindings, ::typeof(_brm_matvec), taken) = :*
+_rk_value_callee!(bindings, ::_BRMRowScale, taken) = :.*
 function _rk_value_callee!(bindings, callable, taken)
     # Surface-owned heads use the same canonical names as the GLM emitter.
     # Distribution constructors also need an exact binding: a family outside

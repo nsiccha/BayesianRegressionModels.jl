@@ -2,14 +2,10 @@
 #
 # Run: julia --project=test test/dotted_operators.jl   (no sampling)
 #
-# Model-scope arithmetic applies per row: plain `*` already lowers to Stan's
-# `.*`. Decision `0iefgns` (snag brm-broadcast-in-e3c18ba8, revisiting the
-# parked `1jr1f6x`) admits the dotted spellings `.* ./ .+ .- .^` as exact
-# aliases of the plain operators in `=` assignments and `~` arguments, so
-# `a .* b` builds the `ExprColumn` of `a * b` and every backend emits the same
-# program. Before it a dotted head failed when the builder was applied, with
-# ``UndefVarError: `.*` not defined``. Any other dotted operator is refused at
-# parse time with the admitted set.
+# Arithmetic on row-aligned vectors keeps the 0.2.x elementwise behavior.
+# Decision `0iefgns` admitted the dotted spellings `.* ./ .+ .- .^` for
+# these operands in assignments and likelihoods. Matrix-vector assignments
+# have separate coverage in matrix_vector_assignment.jl.
 
 using Test
 using BayesianRegressionModels, StanBlocks

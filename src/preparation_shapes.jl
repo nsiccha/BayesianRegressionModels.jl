@@ -8,6 +8,53 @@ function _brm_parameter_reference_axis(_constructor, prior)
 end
 _brm_parameter_reference_axis(::typeof(LKJCovarianceFactor), _prior) = :whole
 
+# Resolve a direct matrix/vector pair when the builder binds its operands.
+# A previously valid bare broadcast keeps its 0.2.x meaning. Replay keeps
+# the chosen operation even when the number of prediction rows changes.
+_brm_matvec(X, b) = X * b
+_brm_broadcast_matvec(X, b) = X .* b
+_brm_legacy_matvec(X, b) = X .* b
+
+const _BRMRowScale = Union{typeof(_brm_broadcast_matvec),typeof(_brm_legacy_matvec)}
+
+function _brm_assignment_product(f, dotted, x, b)
+    if f === (*) && x isa NamedColumn && parent(x) isa DataColumn &&
+            parent(parent(x)) isa AbstractMatrix{<:Real}
+        if b isa NamedColumn && parent(b) isa MissingColumn
+            # A vector declaration can follow the assignment or come from
+            # another model fragment. Keep the spelling until it is bound.
+            return ExprColumn(dotted ? _brm_broadcast_matvec : _brm_matvec, x, b)
+        end
+        width = _brm_operand_vector_length(b)
+        if width !== nothing
+            dotted && return ExprColumn(_brm_broadcast_matvec, x, b)
+            rows, cols = size(parent(parent(x)))
+            broadcasts = rows == width || rows == 1 || width == 1
+            if cols == width && !broadcasts
+                return ExprColumn(_brm_matvec, x, b)
+            end
+            return ExprColumn(_brm_legacy_matvec, x, b)
+        end
+    end
+    ExprColumn(f, x, b)
+end
+
+_brm_operand_vector_length(x) = nothing
+_brm_operand_vector_length(x::AbstractVector{<:Real}) = length(x)
+function _brm_operand_vector_length(x::NamedColumn)
+    backing = parent(x)
+    backing isa DataColumn && return _brm_operand_vector_length(parent(backing))
+    backing isa _BRMComponentInput && return _brm_operand_vector_length(backing.value)
+    backing isa ExprColumn{typeof(assign)} && return _brm_operand_vector_length(last(getargs(backing)))
+    _brm_parameter_length(x)
+end
+
+function _brm_rebind_value(x::ExprColumn{F}, reads::_BRMForwardReads) where
+        {F<:Union{typeof(_brm_matvec),_BRMRowScale}}
+    a, b = map(arg -> _brm_rebind_value(arg, reads), getargs(x))
+    _brm_assignment_product(*, getf(x) === _brm_broadcast_matvec, a, b)
+end
+
 _brm_distribution_shape(::typeof(truncated), args) =
     _brm_distribution_shape(first(args))
 _brm_distribution_shape(::typeof(restricted), args) =
