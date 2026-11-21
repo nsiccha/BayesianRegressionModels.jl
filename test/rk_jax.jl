@@ -166,6 +166,19 @@ function check_module(rk; anchors)
     src
 end
 
+@testset "explicit cell vector width in JAX" begin
+    data = (; y=[0.3, -0.2], K=3, mu=[[0.4], [-0.7]])
+    model = @brm data begin
+        @plate for i in eachindex(y)
+            z[1:K] .~ Normal.(mu[i], 1)
+            y[i] ~ Normal(sum(z), 1)
+        end
+    end
+    rk = RKBRMI(model)
+    @test rk.model.layout.total == 6
+    check_module(rk; anchors=false)
+end
+
 @testset "bound anchors and level codes: the fit and a replay" begin
     rk = RKBRMI(JM.grouped(TRAIN))
     # Fit-role rows reach prepare_data, which computes zscale/center anchors

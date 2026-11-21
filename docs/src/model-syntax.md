@@ -82,7 +82,7 @@ decay = @brm begin
     rows = groups(observation_unit => unit)
     @plate for i in eachindex(rate)
         mean_y = amplitude * exp.(-rate[i] .* time[rows[i]])
-        y[rows[i]] ~ Normal(mean_y, noise)
+        y[rows[i]] .~ Normal.(mean_y, noise)
     end
 
     amplitude ~ LogNormal(0, 0.5)
@@ -98,9 +98,15 @@ model = decay((; unit=["a", "b"],
 
 The loop follows the unit-level `rate` vector. Inside the cell, `rate[i]` is a unit's value, `time[rows[i]]` its observations,
 and bare `amplitude` is shared. Cell code uses Julia broadcasting explicitly.
-A bare left-hand name is local; an indexed left-hand name exposes a model
-output. Observe the response slice directly: an assignment that aliases it
-does not become a new observation.
+An assignment to a bare name is local. An assignment to `name[i]` exposes a
+model output. Observe the response slice directly, as in `y[rows[i]]` above.
+
+For four independent standard-normal draws in each cell, write
+`z[1:4] .~ Normal.(0, 1)` and read the vector as `z` inside the cell.
+Use `z[1:K]` when an integer data field sets the width. When the location
+is a vector, `z .~ Normal.(mu[i], s)` follows its length in each cell,
+including when cells differ in length. A scalar draw uses `a ~ Normal(0, 1)`.
+A single joint draw also uses `~`, as in `p ~ Dirichlet(alpha[i])`.
 
 For long-format series, `@plate for p in groups(unit; order=time)` iterates
 each unit's ordered row indices. An `@scan` within the cell states a recurrence;
