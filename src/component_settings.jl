@@ -9,6 +9,18 @@ end
 
 _brm_declaration_guard(stmt) = Meta.isexpr(_brm_undoc(stmt), (:if, :elseif))
 
+# A collection binds record fields to column names before lowering its plates.
+# At component definition time the record is still a formal argument.
+function _brm_plate_slices_input_field(stmt, inputs)
+    plate = _brm_undoc(stmt)
+    _is_brm_plate(plate) || return false
+    index, range, body = _brm_plate_loop(plate)
+    field(x) = Meta.isexpr(x, :., 2) && x.args[1] in inputs && x.args[2] isa QuoteNode
+    slices(x) = x isa Expr && ((_brm_plate_indexed(x, index) && field(first(x.args))) ||
+        any(slices, x.args))
+    (Meta.isexpr(range, :call) && any(field, range.args[2:end])) || slices(body)
+end
+
 function _brm_guard_input(input, value)
     value isa NamedColumn && (value = parent(value))
     value isa DataColumn && return parent(value)

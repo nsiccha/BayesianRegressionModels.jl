@@ -101,4 +101,56 @@ end
         end
     end
 end
+
+@brm function reading_sensor(record, signal)
+    offset ~ Normal(0, 1)
+    @plate for s in eachindex(record.y)
+        loc[s] = signal[s][record.picks[s]] .+ offset
+        record.y[s] .~ Normal.(loc[s], record.scale)
+    end
+    return (; loc)
+end
+
+const observed_collection = @brm begin
+    gain ~ Normal(0, 1)
+    @plate for s in eachindex(x)
+        signal[s] = gain .* x[s]
+    end
+    for record in records
+        sensors[record.id] ~ reading_sensor(record, signal)
+    end
+end
+
+@stestset "Repeated sensors score and return their own readings on replay" begin
+    a = (; id=:a, picks=[[2, 1], Int[]], y=[[.3, -.2], Float64[]], scale=.7)
+    b = (; id=:b, picks=[[1], [2]], y=[[.4], [.8]], scale=1.2)
+    data = (; x=[[.5, 1.], [-.3, .7]], records=[b, a])
+    empty_b = (; b..., picks=[Int[], Int[]], y=[Float64[], Float64[]])
+    changed = (; x=reverse.(data.x), records=[a, empty_b])
+    fit = RKBRMI(observed_collection(data))
+    U = [.5 -.25; .1 -.4; .25 .7] # gain, offset for a, offset for b
+    for (design, rk) in ((data, fit), (changed, reprocess(fit, changed)))
+        problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        @test LogDensityProblems.dimension(problem) == size(U, 1)
+        draws = Dict(rec.id => rk_draw_values(rk, U, (:loc,); submodel=(:sensors, rec.id)).loc
+            for rec in design.records)
+        location(rec, s, u) = u[1] .* design.x[s][rec.picks[s]] .+ u[rec.id === :a ? 2 : 3]
+        function oracle(u)
+            value = sum(logpdf.(Normal(), u))
+            for rec in design.records, s in eachindex(rec.y)
+                for (y, loc) in zip(rec.y[s], location(rec, s, u))
+                    value += logpdf(Normal(loc, rec.scale), y)
+                end
+            end
+            value
+        end
+        for (j, u) in enumerate(eachcol(U))
+            check_consumer_point(problem, collect(u), oracle)
+            for rec in design.records
+                expected = reduce(vcat, (location(rec, s, u) for s in eachindex(rec.y)); init=Float64[])
+                @test draws[rec.id][j] ≈ expected
+            end
+        end
+    end
+end
 end
