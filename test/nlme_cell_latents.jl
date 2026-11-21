@@ -426,9 +426,10 @@ end
     m = brm_nlme_model(backend; ad_backend=NLME_AD, subject_group=:series)
     @test length(m.view.levels) == 4 && isempty(m.view.families)
     t = BRM._brm_svi_target(m)
-    # Each unit owns its mean; the simplexes are still globals (ReactiveKernels
-    # snag joint-cell-laten-9a3ad461, test/cell_latent_dirichlet.jl).
-    @test all(c -> Symbol("m.", c) in m.view.coordinates[t.units[c]], 1:4)
-    @test count(j -> startswith(String(m.view.coordinates[j]), "theta"), t.globals) == 4
+    for c in 1:4
+        coords = m.view.coordinates[t.units[c]]
+        @test Symbol("m.", c) in coords
+        @test Symbol("theta.", c, ".1") in coords
+    end
     check_cell_split(t)
 end

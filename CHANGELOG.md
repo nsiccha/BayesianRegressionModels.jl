@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.368
+
+- On RKBRMI, `theta ~ Dirichlet(alpha)` in an `@plate` cell accepts a shared
+  data vector. Each cell uses the whole vector, including when the number of
+  cells equals the number of concentrations.
+- In `brm_svi_fit`, each unit's variational factor holds its own Dirichlet
+  simplex coordinates when only that unit reads them. These changes require
+  ReactiveKernelsPPL 0.1.249 or later.
+
 ## 0.2.367
 
 - An `@plate` cell can declare independent draws as `z[1:K] .~ Normal.(0, 1)`
