@@ -1,6 +1,7 @@
 using Test, Distributions, BayesianRegressionModels, StanBlocks
 import BridgeStan, ReactiveKernels, ReactiveKernelsPPL, Enzyme, LogDensityProblems
 using DifferentiationInterface: AutoEnzyme
+using Statistics: mean
 
 const matvec_builder = @brm begin
     b[1:K] .~ Normal.(0, 1)
@@ -127,4 +128,102 @@ end
         y ~ Normal(eta, 1)
     end
     @test popcoefnames(predictor, :eta) == [:Intercept, :X_col_1, :X_col_2]
+end
+
+const inline_matvec = @brm begin
+    b[1:K] .~ Normal.(0, 1)
+    y ~ Normal(X * b, 1)
+end
+const explicit_matvec = @brm begin
+    b[1:K] .~ Normal.(0, 1)
+    y .~ Normal.(X * b, 1)
+end
+
+@brm function inline_normal_map(design, coef, response)
+    response ~ Normal(design * coef, 1)
+    return coef
+end
+
+@brm function observed_linear_map(design, coef, response)
+    response .~ Normal.(design * coef, 1)
+    return coef
+end
+
+@testset "matrix-vector products in likelihood arguments" begin
+    data = (; X=[1. 2.; 3. 4.; 5. 6.], K=2, y=[-1., 0.5, 2.])
+    square = (; X=[2. -1.; 0.5 3.], K=2, y=[-0.2, 1.])
+    b = [0.25, -0.4]
+    function verify(sb, rk, rows, path)
+        residual = rows.y - rows.X * b
+        lp = sum(logpdf.(Normal(), residual)) + sum(logpdf.(Normal(), b))
+        check_product(sb, rk, b, lp, rows.X' * residual - b, path)
+    end
+    mktempdir() do dir
+        for (builder, spelling) in ((inline_matvec, "y ~ Normal(X * b, 1)"),
+                (explicit_matvec, "y .~ Normal.(X * b, 1)"))
+            for make in (builder, brm(builder.source; mod=@__MODULE__))
+                model = make(data)
+                @test occursin(spelling, string(model))
+                sb, rk = SBBRMI(model; mod=@__MODULE__), RKBRMI(model)
+                @test occursin("X * b", stan_code(sb))
+                @test occursin("X * b", string(BayesianRegressionModels._rk_emit_ast(rk.plan).main))
+                path = joinpath(dir, "inline.stan")
+                verify(sb, rk, data, path)
+                verify(reprocess(sb, square), reprocess(rk, square), square, path)
+            end
+        end
+        # The new observation spelling gives bare * Julia's product even
+        # when the row and coefficient counts happen to agree at training.
+        model = explicit_matvec(square)
+        verify(SBBRMI(model; mod=@__MODULE__), RKBRMI(model), square,
+            joinpath(dir, "inline.stan"))
+
+        direct_component = @brm data begin
+            b[1:K] .~ Normal.(0, 1)
+            result ~ inline_normal_map(X, b, y)
+        end
+        dotted_component = @brm data begin
+            b[1:K] .~ Normal.(0, 1)
+            result ~ observed_linear_map(X, b, y)
+        end
+        for component in (direct_component, dotted_component)
+            verify(SBBRMI(component; mod=@__MODULE__), RKBRMI(component), data,
+                joinpath(dir, "component.stan"))
+        end
+
+        # The two spellings use the existing omitted-response route. They
+        # keep the response separate from the declared coefficient vector.
+        unobserved = (; data.X, data.K)
+        for builder in (inline_matvec, explicit_matvec)
+            omitted = builder(unobserved)
+            sb = SBBRMI(omitted; mod=@__MODULE__)
+            @test any(d -> d.target === :y && d.role === :observation,
+                generative_plan(sb).declarations)
+            @test StanBlocks.stanc_check(stan_code(sb); warn_pedantic=false).ok
+
+            replay = reprocess(RKBRMI(builder(data)), (; square.X, square.K))
+            predicted = ReactiveKernelsPPL.prepare_predictive(replay.model, rk_bound_plan(replay))
+            @test mean.(ReactiveKernelsPPL.predictive_laws(predicted, b).y) ≈ square.X * b
+        end
+    end
+    # A product nested under a reduction still distinguishes row scaling.
+    rowdata = merge(data, (; K=3))
+    scale = @brm rowdata begin
+        b[1:K] .~ Normal.(0, 1)
+        y .~ Normal.(sum(X .* b), 1)
+    end
+    @test occursin("sum(X .* b)", string(scale))
+    @test occursin("brm_scale_matrix_rows", stan_code(SBBRMI(scale; mod=@__MODULE__)))
+    legacy = @brm rowdata begin
+        b[1:K] .~ Normal.(0, 1)
+        y ~ Normal(sum(X * b), 1)
+    end
+    @test stan_code(SBBRMI(legacy; mod=@__MODULE__)) == stan_code(SBBRMI(scale; mod=@__MODULE__))
+    bare = @brm(y .~ Normal.(m, 1))
+    @test string(bare((; y=data.y, m=data.y))) == "y .~ Normal.(m, 1)"
+    # A joint law remains one event. A dotted destination needs a scalar law.
+    @test_throws ArgumentError brm(data, "y .~ MvNormal.(y, 1)"; mod=@__MODULE__)
+    # Categorical consumes a whole probability vector even though its event
+    # is scalar. The explicit form must never reinterpret it as a shared law.
+    @test_throws ArgumentError brm((; y=[1,2], p=[0.4,0.6]), "y .~ Categorical.(p)"; mod=@__MODULE__)
 end
