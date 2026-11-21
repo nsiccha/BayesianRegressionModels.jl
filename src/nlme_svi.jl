@@ -758,11 +758,10 @@ _brm_svi_unit_draws(rng, q, i, curvature) =
         _brm_svi_unit_design(rng, length(q.M[i])) : _brm_svi_unit_noise(rng, q.U[i])
 
 function _brm_svi_unit_design(rng, d)
-    F = qr(randn(rng, d, d))
     # Q from Householder QR is Haar-distributed once each column takes the sign
     # of R's diagonal (Mezzadri 2007, "How to generate random matrices from the
     # classical compact groups").
-    Matrix(F.Q) .* (sqrt(d) .* [r < 0 ? -1.0 : 1.0 for r in diag(F.R)]')
+    _svi_unit_design(randn(rng, d, d))
 end
 
 # Unit-gradient attempts per visit, including the auxiliary baseline and the
@@ -967,9 +966,7 @@ function _brm_svi_unit_step_full!(q, i, gz, S, β; positive=true)
     U = LowerTriangular(q.U[i])
     all(isfinite, S) || throw(ArgumentError(
         "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
-    Ŝ = Symmetric((S .+ S') ./ 2)
-    Ĝ = Symmetric((positive ? _brm_svi_positive_part(Ŝ) : Ŝ) - I)
-    r = maximum(abs, eigvals(Ĝ))
+    Ĝ, r = _svi_orthogonal_gap(S, positive)
     # U⁻¹(Λ + βG) = (I + βĜ) Uᵀ.
     stack, step = _svi_orthogonal_stack(U, Ĝ, r, β, _BRM_SVI_UNIT_TRUST)
     _brm_svi_commit_dense_step!(q, i, U, stack, gz, step)
@@ -977,10 +974,7 @@ end
 
 # A symmetric matrix's positive part; itself, to the last bit, when it has no
 # negative eigenvalue.
-function _brm_svi_positive_part(S::Symmetric)
-    F = eigen(S)
-    first(F.values) >= 0 ? S : Symmetric(F.vectors * Diagonal(max.(F.values, 0.0)) * F.vectors')
-end
+_brm_svi_positive_part(S::Symmetric) = Symmetric(_svi_positive_curvature(S))
 
 # Unit i's terms on the orthogonal design `E` (columns ε_k): the value and the
 # gradients averaged over the 2d draws, `gg` in the pair's convention (the sum
@@ -1036,7 +1030,7 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
         gz .+= (gz₊ .+ gz₋) ./ 2d
         W[:, k] .= _svi_whitened_difference(U, (gz₊ .- gz₋) ./ 2)
     end
-    S = (W * E' .+ E * W') ./ 2d
+    S = _svi_design_curvature(W, E)
     centered = centering === nothing ? nothing :
         (; gc=something(gc, Float64[]), adjoints=adjoint === nothing ? () : (adjoint,),
            weight=1 / d)

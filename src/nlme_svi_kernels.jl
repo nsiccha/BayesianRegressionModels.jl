@@ -86,10 +86,41 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         b = norm(epsilon)
         direction = w ./ ifelse(a == 0, 1.0, a) .+ epsilon ./ ifelse(b == 0, 1.0, b)
         n = norm(direction)
-        active = (a != 0) & (b != 0) & (n != 0)
-        lambda = ifelse(active, (dot(w, epsilon) + a * b) / 2, 0.0)
+        # At opposite directions a fused normalization can leave a few ulps
+        # in their sum. Its eigenvector is then undefined. The half-angle
+        # identity also avoids subtracting equal eigenvalue terms nearby.
+        active = (a != 0) & (b != 0) & !(n <= $(4 * eps(Float64)))
+        half = n / 2
+        lambda = ifelse(active, (a * half) * (b * half), 0.0)
         axis = ifelse.(active, direction ./ ifelse(n == 0, 1.0, n), 0.0)
         result = (lambda, axis)
+        return result
+    end),
+    unit_design=:(function _svi_unit_design(normals)
+        factor = qr(normals)
+        signs = ifelse.(diag(factor.R) .< 0, -1.0, 1.0)
+        result = Matrix(factor.Q) .* transpose(sqrt(size(normals, 1)) .* signs)
+        return result
+    end),
+    design_curvature=:(function _svi_design_curvature(whitened, design)
+        result = (whitened * transpose(design) .+ design * transpose(whitened)) ./ (2 * size(design, 1))
+        return result
+    end),
+    positive_curvature=:(function _svi_positive_curvature(curvature)
+        factor = eigen(Symmetric(curvature))
+        result = if first(factor.values) >= 0
+            curvature
+        else
+            vectors = factor.vectors
+            Matrix(Symmetric(vectors * Diagonal(max.(factor.values, 0.0)) * transpose(vectors)))
+        end
+        return result
+    end),
+    orthogonal_gap=:(function _svi_orthogonal_gap(curvature, positive)
+        symmetric = (curvature .+ transpose(curvature)) ./ 2
+        estimate = positive ? _svi_positive_curvature(symmetric) : symmetric
+        gap = estimate - diagm(ones(size(curvature, 1)))
+        result = (gap, maximum(abs.(eigvals(Symmetric(gap)))))
         return result
     end),
     pair_stack=:(function _svi_pair_stack(root, precision, lambda, axis, rate, trust)
@@ -115,6 +146,51 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         delta = rate .* (transpose(root) \ (root \ gradient))
         next_mean = mean .+ _svi_mean_trust(old_root, delta, trust) .* delta
         result = (next_mean, root * transpose(root), Matrix(root))
+        return result
+    end),
+    coupling_noise=:(function _svi_coupling_noise(epsilon, columns, eta)
+        result = vcat(epsilon[columns], eta)
+        return result
+    end),
+    coupled_mean=:(function _svi_coupled_mean(mean_rows, loading, noise)
+        result = mean_rows .+ loading * noise
+        return result
+    end),
+    coupling_baseline=:(function _svi_coupling_baseline(value, gradient)
+        valid = isfinite(value) & all(isfinite.(gradient))
+        result = ifelse.(valid, gradient, 0.0)
+        return result
+    end),
+    coupling_direction=:(function _svi_coupling_direction(root, gradient)
+        lower = LowerTriangular(root)
+        result = transpose(lower) \ (lower \ gradient)
+        return result
+    end),
+    coupling_variances=:(function _svi_coupling_variances(root)
+        inverse_root = LowerTriangular(root) \ diagm(ones(size(root, 1)))
+        result = vec(sum(inverse_root .* inverse_root; dims=1))
+        return result
+    end),
+    coupling_row_update=:(function _svi_coupling_row_update(noise, updates, direction, variance)
+        scale = 1 ./ max.(1.0, noise)
+        n = updates + 1
+        next_noise = noise .+ (direction .^ 2 ./ variance .- noise) ./ n
+        result = (scale, next_noise, n)
+        return result
+    end),
+    coupling_metric=:(function _svi_coupling_metric(precision, direction)
+        result = dot(direction, precision * direction)
+        return result
+    end),
+    coupling_step=:(function _svi_coupling_step(loading, direction, noise, metric, rate, trust)
+        den = 2 * length(noise)
+        reach = sqrt(max(metric, 0.0)) * sqrt(sum(noise .* noise)) / den
+        result = if reach > 0 && rate > 0
+            amount = min(rate, trust / reach) / den
+            loading .+ direction .* transpose(amount .* noise)
+        else
+            loading
+        end
         return result
     end),
     adam=:(function _svi_adam(x, moment, variance, gradient, beta1, beta2, correction1, correction2, rate)

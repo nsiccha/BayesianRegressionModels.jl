@@ -192,7 +192,7 @@ function _brm_svi_coupling_baseline!(b, t, q, i, centering, frame, plan, work)
             first(_brm_svi_centered_unit_term!(gg, b, centering, frame, t, q, i,
                 q.μ, q.M[i], plan, work))
         end
-        isfinite(value) && all(isfinite, b) || fill!(b, 0.0)
+        b .= _svi_coupling_baseline(value, b)
     catch e
         (e isa DomainError || e isa OverflowError) || rethrow()
         fill!(b, 0.0)
@@ -286,7 +286,7 @@ function _brm_svi_uncouple_sparse!(coupling::NamedTuple, sites::_BRMSVISites)
 end
 
 # Unit i's ζ at the global draw's standard normals (ε, η).
-_brm_svi_coupling_noise(coupling, i, ε, η) = vcat(ε[coupling.columns[i]], η)
+_brm_svi_coupling_noise(coupling, i, ε, η) = _svi_coupling_noise(ε, coupling.columns[i], η)
 
 # The coupled mean of unit i at ζ: M_i + V_i ζ on its coupled rows (M_i itself
 # without coupling).
@@ -295,15 +295,15 @@ function _brm_svi_coupled_mean(coupling, q, i, ζ)
     V = coupling.V[i]
     isempty(V) && return q.M[i]
     m = copy(q.M[i])
-    view(m, coupling.rows[i]) .+= V * ζ
+    rows = view(m, coupling.rows[i])
+    rows .= _svi_coupled_mean(rows, V, ζ)
     m
 end
 
 # Λ_i⁻¹ x for unit i's factor: two triangular solves for a dense one, the
 # diagonal-plus-low-rank covariance for a structured one.
 _brm_svi_unit_covariance_mul(q, i, x) = _brm_svi_unit_covariance_mul(q.U[i], x)
-_brm_svi_unit_covariance_mul(U::AbstractMatrix, x) =
-    (L = LowerTriangular(U); L' \ (L \ x))
+_brm_svi_unit_covariance_mul(U::AbstractMatrix, x) = _svi_coupling_direction(U, x)
 function _brm_svi_unit_covariance_mul(U::_BRMSVIUnitRoot, x)
     f = U.factor
     exp.(2 .* f.ρ) .* x .+ f.Β * (f.Β' * x)
@@ -317,7 +317,7 @@ function _brm_svi_coupling_direction(q, i, rows, x)
     _brm_svi_coupling_direction(q.Λ[i], q.U[i], rows, x[rows])
 end
 _brm_svi_coupling_direction(Λ::AbstractMatrix, U, rows, x) =
-    cholesky(Symmetric(Λ[rows, rows])) \ x
+    _svi_coupling_direction(cholesky(Symmetric(Λ[rows, rows])).L, x)
 function _brm_svi_coupling_direction(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows, x)
     f = U.factor
     B = f.Β[rows, :]
@@ -332,14 +332,14 @@ function _brm_svi_coupling_variances(q, i, rows)
     _brm_svi_coupling_variances(q.Λ[i], q.U[i], rows)
 end
 _brm_svi_coupling_variances(Λ::AbstractMatrix, U, rows) =
-    vec(sum(abs2, inv(cholesky(Symmetric(Λ[rows, rows])).L); dims=1))
+    _svi_coupling_variances(cholesky(Symmetric(Λ[rows, rows])).L)
 _brm_svi_coupling_variances(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows) =
     (f = U.factor; exp.(2 .* f.ρ[rows]) .+ vec(sum(abs2, view(f.Β, rows, :); dims=2)))
 
 # y' A y for a step y of the coupled rows, A the inverse of their direction
 # operator: Λ_RR, or for a structured unit Σ_RR⁻¹ (by Woodbury's identity).
 _brm_svi_coupling_norm2(q, i, rows, y) = _brm_svi_coupling_norm2(q.Λ[i], q.U[i], rows, y)
-_brm_svi_coupling_norm2(Λ::AbstractMatrix, U, rows, y) = dot(y, Symmetric(Λ[rows, rows]) * y)
+_brm_svi_coupling_norm2(Λ::AbstractMatrix, U, rows, y) = _svi_coupling_metric(Symmetric(Λ[rows, rows]), y)
 function _brm_svi_coupling_norm2(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows, y)
     f = U.factor
     d = exp.(2 .* f.ρ[rows])
@@ -354,15 +354,12 @@ end
 # update). A row stepped at s β with updates of mean square m wanders by about
 # s β m / 4 squared sds, so s = 1/m holds that at β/4 whatever the noise (1/rms
 # would leave it growing like rms).
-_brm_svi_coupling_row_scales(coupling, i) = 1 ./ max.(1.0, coupling.noise[i])
-
-# This visit's update a joins unit i's rows' mean squares, in their conditional sds.
-function _brm_svi_coupling_noise!(coupling, q, i, rows, a)
-    n = coupling.updates[i] += 1
-    σ2 = _brm_svi_coupling_variances(q, i, rows)
-    m = coupling.noise[i]
-    @. m += (a^2 / σ2 - m) / n
-    m
+function _brm_svi_coupling_row_update!(coupling, q, i, rows, a)
+    scale, noise, updates = _svi_coupling_row_update(coupling.noise[i], coupling.updates[i],
+        a, _brm_svi_coupling_variances(q, i, rows))
+    coupling.noise[i] .= noise
+    coupling.updates[i] = updates
+    scale
 end
 
 # The step of unit i's coupling from ∇̄, its gradient averaged over the visit's
@@ -370,30 +367,25 @@ end
 function _brm_svi_coupling_step!(coupling, q, i, ∇̄, ζ, β)
     V = coupling.V[i]
     (isempty(V) || β <= 0) && return q
-    n2 = sum(abs2, ζ)
-    n2 > 0 || return q
+    sum(abs2, ζ) > 0 || return q
     rows = coupling.rows[i]
     a = _brm_svi_coupling_direction(q, i, rows, ∇̄)
     all(isfinite, a) || throw(ArgumentError(
         "brm_svi: non-finite unit gradient in its coupling step"))
-    den = 2length(ζ)
     # The rows' scales from their earlier updates, read before this one joins them.
     s, trust = nothing, _BRM_SVI_UNIT_MEAN_TRUST
     if _brm_svi_coupling_scaled(coupling)
-        s, trust = _brm_svi_coupling_row_scales(coupling, i), _BRM_SVI_COUPLING_TRUST
-        _brm_svi_coupling_noise!(coupling, q, i, rows, a)
+        s, trust = _brm_svi_coupling_row_update!(coupling, q, i, rows, a), _BRM_SVI_COUPLING_TRUST
     end
     # At a fresh ζ' the conditional mean moves by ΔV ζ', whose rms in the
     # factor's sds is β sqrt(∇̄_R' a) ‖ζ‖ / den for the unscaled step.
-    if s === nothing || all(isone, s)
-        reach = sqrt(max(dot(view(∇̄, rows), a), 0.0)) * sqrt(n2) / den
+    metric = if s === nothing || all(isone, s)
+        dot(view(∇̄, rows), a)
     else
         a = a .* s
-        reach = sqrt(max(_brm_svi_coupling_norm2(q, i, rows, a), 0.0)) * sqrt(n2) / den
+        _brm_svi_coupling_norm2(q, i, rows, a)
     end
-    reach > 0 || return q
-    β = min(β, trust / reach)
-    BLAS.ger!(β / den, a, ζ, V)
+    V .= _svi_coupling_step(V, a, ζ, metric, β, trust)
     q
 end
 
@@ -424,7 +416,7 @@ end
 
 # The diagonal of a unit factor's covariance Λ⁻¹.
 _brm_svi_unit_variances(U::AbstractMatrix) =
-    isempty(U) ? Float64[] : vec(sum(abs2, inv(LowerTriangular(U)); dims=1))
+    isempty(U) ? Float64[] : _svi_coupling_variances(U)
 _brm_svi_unit_variances(U::_BRMSVIUnitRoot) =
     exp.(2 .* U.factor.ρ) .+ vec(sum(abs2, U.factor.Β; dims=2))
 

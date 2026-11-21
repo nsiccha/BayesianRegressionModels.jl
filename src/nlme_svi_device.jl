@@ -16,7 +16,16 @@ mapping and partition declarations. `problem.bound_data(source)` provides the
 inputs of the partition module's `prepare_data` in its declared order.
 The `kernels` named tuple contains RK graphs for the global draw, entropy
 gradient, variance bound, antithetic pair, work weights, Adam, clipping,
-dense-factor triangular solves, curvature and trust bounds.
+dense-factor triangular solves, curvature, trust bounds and linear coupling.
+`unit_design` takes the square matrix of normal draws. `design_curvature`
+takes the whitened gradient differences and the design, both in columns.
+`orthogonal_gap` returns the curvature difference from identity and its
+spectral radius. The coupling kernels operate on the coupled rows of a unit.
+For a dense unit, `coupling_direction` and `coupling_variances` take the
+lower Cholesky factor of the precision block on those rows. The control
+variate uses the unit gradient evaluated at the global and unit means.
+`coupling_row_update` returns the scale from previous visits, the updated
+mean square and the visit count. Use the factor from before the unit step.
 `global_factors` and the unit-indexed `unit_factors` are selections on
 the model's original factor catalogue. `expected_layout` is that model's
 packed layout. Their underlying events are in `factor_buckets[1]` for global
@@ -67,6 +76,8 @@ function _brm_svi_device_problem(t)
     bound_data = source -> _rk_jax_bound_data(partition.bound, source)
     (; backend=t.m.backend, partition, bound_data, factor_buckets, selections...,
         kernels=_rk_svi_kernels(), global_clip=_BRM_SVI_GLOBAL_CLIP,
+        unit_trust=_BRM_SVI_UNIT_TRUST, unit_mean_trust=_BRM_SVI_UNIT_MEAN_TRUST,
+        coupling_trust=_BRM_SVI_COUPLING_TRUST,
         expected_layout=t.m.backend.model.layout, owner,
         levels=_brm_svi_unit_levels(t), observation_units=t.plan.labels,
         point=t.m.unit, coordinates=t.m.view.coordinates, t.globals, t.units,
