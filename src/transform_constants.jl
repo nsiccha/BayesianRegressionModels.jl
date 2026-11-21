@@ -58,21 +58,9 @@ interaction operand is staged under an internal name and is not listed.
 """
 function brm_transform_constants end
 
-function _brm_transform_member(model, submodel)
-    if submodel isa Tuple{Symbol,Union{Int,Symbol}}
-        collection, key = submodel
-        for axis in _brm_collection_axes(model)
-            axis.collection === collection || continue
-            index = findfirst(isequal(key), axis.keys)
-            isnothing(index) || return axis, index
-        end
-    end
-    throw(ArgumentError("brm_transform_constants: unknown record member `$submodel`; use (collection, key)"))
-end
-
 function brm_transform_constants(x::Union{SBBRMI,GenerativePlan}; submodel=nothing)
     isnothing(submodel) && return _brm_transform_constants(x.preproc)
-    axis, i = _brm_transform_member(x.parent, submodel)
+    axis, i = _brm_collection_member(x.parent, submodel, :brm_transform_constants)
     fits = _brm_member_fits(x.preproc, axis)
     isnothing(fits) ? () : brm_transform_constants(fits[i])
 end
@@ -250,7 +238,7 @@ end
 
 function brm_transform_constants(rk::RKBRMI; submodel=nothing)
     if !isnothing(submodel)
-        axis, i = _brm_transform_member(brm_source(rk), submodel)
+        axis, i = _brm_collection_member(brm_source(rk), submodel, :brm_transform_constants)
         for kernel in _rk_plan_kernels(rk.plan), statement in kernel.body
             _rk_is_cell_component(statement) && first(statement.args) === last(axis.path) || continue
             members = statement.args[2].args[3].transforms

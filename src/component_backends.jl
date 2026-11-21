@@ -335,6 +335,7 @@ function _brm_component_rk_plan(component, call)
     plan = _brm_rk_value_plan(instance, program, observations;
         kernels, submodels, value_roots=_brm_component_results(component),
         external_inputs=component.inputs)
+    isempty(kernels) || (plan = _rk_with_kernel_observations(plan, kernels, program))
     _rk_attach_data_assignments!(plan, assignments, constants)
     plan, instance
 end
@@ -444,7 +445,13 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     header = Tuple(doc for doc in _brm_component_own_documentation(component) if isempty(doc.path))
     definition = Expr(:(=), Expr(:call, entry, params...), body)
     push!(definitions, _brm_documented_statement(definition, header))
-    push!(statements, Expr(:call, :~, target, Expr(:call, entry, args...)))
+    # A component that indexes a graph argument in its own plate needs one
+    # complete cell per index. The caller knows the producer's emitted name.
+    cell_inputs = Set(input.source for kernel in _rk_plan_kernels(plan) for input in kernel.inputs
+        if input.kind === :element && input.column === nothing)
+    call_args = [formal in cell_inputs && arg isa Symbol ? Expr(:brm_component_cells, arg) : arg
+        for (formal, arg) in zip(params, args)]
+    push!(statements, Expr(:call, :~, target, Expr(:call, entry, call_args...)))
     # A plate invocation keeps its fit computations inside the indexed
     # submodel. Its caller supplies their per-member inputs. The member's own
     # coordinate records travel with it, so the coordinate transport can pair
@@ -454,7 +461,8 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
         # without a separate raw data column in the enclosing program.
         fits = Dict{Symbol,Symbol}(column_names[input] =>
             get(column_names, source, column_names[input]) for (input, source) in fit_inputs)
-        return (; fits, coordinates, transforms)
+        observed = Tuple(column_names[name] for name in _rk_observed_names(plan))
+        return (; fits, coordinates, transforms, observed)
     end
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs

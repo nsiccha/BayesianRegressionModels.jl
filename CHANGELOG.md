@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.386
+
+- `rk_draw_values(rk, U, (:loc,); submodel=(:sensors, key))` reads a named
+  return from one record component at each draw. The member keeps its own
+  shape when the supplied records are reordered or its reading schedule changes.
+
 ## 0.2.385
 
 - `brm_laplace_integration` accepts `latent_marginals=:gaussian` or

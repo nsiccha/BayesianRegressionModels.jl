@@ -81,6 +81,8 @@ _rk_cell_component(call) = error("RK backend: internal: a component marker was e
 _rk_is_cell_component(statement) = Meta.isexpr(statement, :(=), 2) &&
     Meta.isexpr(last(statement.args), :call) &&
     first(last(statement.args).args) === _rk_cell_component
+_rk_prepared_cell_component(statement) = statement.args[2].args[3]
+_rk_cell_component_observations(statement) = get(_rk_prepared_cell_component(statement), :observed, ())
 
 # Each record has its own fitted group labels. Both the row lookup and the
 # number of coefficient rows read that input of the shared submodel.
@@ -110,6 +112,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
     calls = nothing
     records = ()
     transforms = ()
+    observed = ()
     for axis in values(kernel_columns)
         axis isa _BRMCollectionAxis && !isempty(axis.path) && last(axis.path) === lhs || continue
         raw = Dict(param => kernel_columns[source] for (param, source) in sources)
@@ -124,7 +127,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
             data, bindings = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
             member = _rk_submodel_rhs!(defs, body, data, bindings, lhs, component, calls[i];
                 cell=(; sources, position=i))
-            (; defs, body, data, bindings, member.fits, member.coordinates, member.transforms)
+            (; defs, body, data, bindings, member.fits, member.coordinates, member.transforms, member.observed)
         end
         head = first(programs)
         all(p -> p.defs == head.defs && p.body == head.body &&
@@ -136,6 +139,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
         merge!(fit_inputs, head.fits)
         # Every member runs one program, so one member's records describe all.
         records = head.coordinates
+        observed = head.observed
         transforms = map(p -> p.transforms, programs)
         for key in keys(head.data)
             columns[key] = [p.data[key] for p in programs]
@@ -150,7 +154,9 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
     end
     fits = Dict{Symbol,Symbol}(fields[input] => get(fields, source, get(sources, source, source))
         for (input, source) in fit_inputs)
-    (; defs, statement=only(statements), bound, fields, sliced, fits, coordinates=records, transforms)
+    responses = Tuple(get(fields, key, get(sources, key, key)) for key in observed)
+    (; defs, statement=only(statements), bound, fields, sliced, fits, coordinates=records,
+        transforms, observed=responses)
 end
 
 function _rk_component_cell_statement(statement, kernel, definitions, bindings, taken)

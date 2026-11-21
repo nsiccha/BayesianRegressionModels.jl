@@ -5955,13 +5955,20 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     unbound = sort!(unique!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
                               !(d.target in missing_sources) && !(d.target in fresh_sources)]))
+    function include_call(prefix, fitted)
+        nested = _sb_observation_triage(fitted)
+        append!(unbound, (Symbol(prefix, :., target) for target in nested.unbound))
+        union!(fresh_sources, (Symbol(prefix, :., target) for target in nested.fresh_sources))
+        nested.bound
+    end
     for entry in values(sb.preproc)
-        entry.kind === :brm_component || continue
-        record = entry.const_
-        nested = _sb_observation_triage(record.fitted)
-        bound += nested.bound
-        append!(unbound, (Symbol(record.target, :., target) for target in nested.unbound))
-        union!(fresh_sources, (Symbol(record.target, :., target) for target in nested.fresh_sources))
+        if entry.kind === :brm_component
+            bound += include_call(entry.const_.target, entry.const_.fitted)
+        elseif entry.kind === :collection_cells
+            for (index, fitted) in pairs(entry.const_.fits)
+                bound += include_call(Symbol(entry.raw_ref, :., index), fitted)
+            end
+        end
     end
     (; bound, unbound, fresh_sources)
 end

@@ -231,7 +231,7 @@ function brm_cut_propagate(fit, family::BRMCutFamily, U::AbstractMatrix;
 end
 
 """
-    rk_draw_values(rk::RKBRMI, U, names) -> NamedTuple
+    rk_draw_values(rk::RKBRMI, U, names; submodel=nothing) -> NamedTuple
 
 The graph values `names` of `rk` (formula values, `=` assignments, `@plate`
 cell outputs) at each draw, the columns of `U` in `rk`'s unconstrained
@@ -241,15 +241,50 @@ kernel.
 A draw's value of a `@plate` output has one entry per cell in the cell's own
 shape, as the model reads it: after `out[i] = v`, `value[i]` is cell `i`'s
 number, vector or matrix. `reduce(vcat, value)` concatenates vector cells.
+
+Pass `submodel=(:sensors, key)` to read named fields returned by one keyed
+component. Each draw then contains just that member's value.
 """
-function rk_draw_values(rk::RKBRMI, U::AbstractMatrix, names)
+function rk_draw_values(rk::RKBRMI, U::AbstractMatrix, names; submodel=nothing)
     names = Tuple(Symbol.(names))
     U = _brm_cut_draws(U, _rk_layout_coordinate_names(rk); prefix="rk_draw_values")
     cells = _rk_plate_output_cell_names(rk)
-    sources = map(name -> get(cells, name, name), names)
+    sources, member = if isnothing(submodel)
+        map(name -> get(cells, name, name), names), nothing
+    else
+        axis, index = _brm_collection_member(brm_source(rk), submodel, :rk_draw_values)
+        fields = _rk_collection_return_cells(rk.plan, axis, cells)
+        missing = setdiff(names, keys(fields))
+        isempty(missing) || throw(ArgumentError("rk_draw_values: member `$submodel` has no " *
+            "returned graph value $(join(missing, ", ")); available fields: $(Tuple(keys(fields)))"))
+        map(name -> fields[name], names), index
+    end
     read = _rk_value_reader(rk, Tuple(unique(sources)))
     values = [read(U[:, k]) for k in axes(U, 2)]
-    NamedTuple{names}(Tuple([v[source] for v in values] for source in sources))
+    at(value) = isnothing(member) ? value : value[member]
+    NamedTuple{names}(Tuple([at(v[source]) for v in values] for source in sources))
+end
+
+# Resolve authored fields through the actual property reads emitted by the
+# collection. An earlier declaration may already own a candidate graph name.
+function _rk_collection_return_cells(plan, axis, cells)
+    sources = Dict{Symbol,Symbol}()
+    for kernel in _rk_plan_kernels(plan)
+        kernel.name === first(axis.path) || continue
+        member = last(axis.path)
+        position = findfirst(st -> _rk_is_cell_component(st) && first(st.args) === member, kernel.body)
+        isnothing(position) && continue
+        call = kernel.body[position].args[2].args[2]
+        fields = _brm_component_fields(_brm_component_cell_head(call, kernel.scope))
+        isnothing(fields) && continue
+        assignments = Dict(st.args[1] => st.args[2] for st in kernel.body if Meta.isexpr(st, :(=), 2))
+        assignments[kernel.name] = kernel.collected
+        for (name, local_name) in pairs(fields), output in (kernel.name, kernel.outputs...)
+            get(assignments, output, nothing) == Expr(:., member, QuoteNode(local_name)) || continue
+            haskey(cells, output) && (sources[name] = cells[output])
+        end
+    end
+    sources
 end
 
 # Each `@plate` output of `rk` with a graph value, to the graph value holding

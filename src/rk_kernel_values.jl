@@ -578,7 +578,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             _rk_push_outer_length!(outer_lengths, values)
             push!(inputs, (; source, kind=:element, rows=nothing, column))
             scan && push!(scan_observed, (; param=params[i], source))
-        elseif argument isa NamedColumn && (parent(argument) isa ExprColumn ||
+        elseif argument isa NamedColumn && (parent(argument) isa Union{ExprColumn,_BRMComponentInput} ||
                 parent(argument) isa MissingColumn && haskey(output_reads, _rk_kernel_column_name(argument)))
             # A predictor or another cell's output, collected or not, is read
             # through the graph value of its name.
@@ -1331,6 +1331,12 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
     submodels = _rk_prepare_submodel_values(program)
     program, kernels = _rk_cells_under_omission(program, kernels, direct, submodels)
     plan = _brm_rk_value_plan(brmi, program, direct; kernels, submodels)
+    plan = _rk_with_kernel_observations(plan, kernels, program)
+    isempty(_rk_observed_names(plan)) && error("RK backend: kernel program needs at least one observed likelihood")
+    plan
+end
+
+function _rk_with_kernel_observations(plan, kernels, program)
     observations = Any[plan.observations...]
     taken = union(Set{Symbol}(keys(plan.columns)),
         Set(spec.name for spec in plan.regression.derived),
@@ -1393,7 +1399,6 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
     for kernel in kernels, entry in kernel.scan_observed
         push!(observations, _RKScanObservation(entry.source, plan.columns[entry.source]))
     end
-    isempty(observations) && error("RK backend: kernel program needs at least one observed likelihood")
     _RKValuePlan(plan.regression, plan.assignments, Tuple(observations), plan.columns,
         plan.completions)
 end
@@ -1548,7 +1553,7 @@ end
 # in the same order, because RK prepares a cell's data-only work once only when
 # bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
 function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=(), defs=nothing, coordinates=nothing, documentation=())
+        rendered=(), defs=nothing, coordinates=nothing, documentation=(), densities=Set{Symbol}())
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
@@ -1557,8 +1562,10 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # Nothing written or observed per subject (a cell without a collected
     # value whose observations read only shared values): there is no cell to
     # run.
-    isempty(written) && isempty(scanned) && return
-    slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)..., scanned...))
+    observing = Symbol[statement.args[1] for statement in kernel.body if
+        _rk_is_cell_component(statement) && !isempty(_rk_cell_component_observations(statement))]
+    isempty(written) && isempty(scanned) && isempty(observing) && return
+    slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)..., scanned..., observing...))
     # The cell latents the program reads. One nothing reads is a generated
     # draw, absent from the fitted program as on SBBRMI.
     latents = Symbol[first(statement.args) for statement in slice.body
@@ -1604,6 +1611,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     declared = Dict{Symbol,Symbol}(latent => _rk_ast_fresh_name(string(latent), model)
         for latent in (latents..., components...))
     union!(taken, values(declared))
+    union!(densities, (declared[name] for name in observing))
     # Its coordinate record names the authored latent (its `brm_start` and
     # descriptor address), the cell it belongs to, and the bijection it is
     # sampled through (`nothing` for its own coordinates).
@@ -1620,7 +1628,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     end
     # A collection member's own records (`members`) name what its program
     # declares, which the coordinate transport pairs per member.
-    members = Dict{Symbol,Any}(first(statement.args) => last(statement.args).args[3].coordinates
+    members = Dict{Symbol,Any}(first(statement.args) => _rk_prepared_cell_component(statement).coordinates
         for statement in slice.body if _rk_is_cell_component(statement))
     for component in components
         _rk_coordinate_record!(coordinates, (; kind=:cell_component,
@@ -2006,7 +2014,7 @@ _rk_kernel_scalar_response(kernel, observation) =
 # RKPPL runs it only in a query that reads it.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing,
-        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}(), documentation=())
+        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}(), documentation=(), densities=Set{Symbol}())
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
     kernel = _rk_kernel_input_cells(kernel, cell_sources)
     # A cell without a collected value writes only what its observations read.
@@ -2050,7 +2058,7 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates,
-        documentation)
+        documentation, densities)
     append!(statements, after)
 end
 
