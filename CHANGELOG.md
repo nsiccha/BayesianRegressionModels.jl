@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.356
+
+- SBBRMI takes `Dirichlet(K, a)` with both `K` and `a` read from data fields,
+  as RKBRMI already did, also as slices (`eachrow(theta[1:S, 1:n]) .~
+  Dirichlet(n, alpha)`). It refused that as "Dirichlet dimension ... must be a
+  positive integer". A data-field concentration is now a constant read when
+  the model is built, like a literal one; a concentration the model samples
+  keeps a data-field dimension too (snag `mixed-membership-1a1930a6`).
+
 ## 0.2.355
 
 - **Breaking:** SelectedInversion is a weak dependency too (decision

@@ -9761,10 +9761,18 @@ end
 function _sb_emit_vector_prior!(stmts, data, target, ::Type{<:Dirichlet}, op)
     args, kwargs = getargs(op), getkwargs(op)
     isempty(kwargs) || error("sbimpl: `$target ~ Dirichlet(...)` takes no keywords")
-    if length(args) == 2 && !(last(args) isa Real)
+    # A concentration from the data is a constant (`_sb_dirichlet_alpha` below);
+    # only one the model computes, such as a sampled scalar, is emitted here.
+    if length(args) == 2 && !(_sb_dirichlet_data_value(last(args)) isa Real)
         dimension, concentration = args
+        # The dimension may be a data field (`Dirichlet(n, a)` with `n` in the
+        # data), read when the model is built, as `_sb_dirichlet_alpha` reads it.
+        dimension = _sb_dirichlet_data_value(dimension)
+        dimension isa Real && !(dimension isa Integer) && isinteger(dimension) &&
+            (dimension = Int(dimension))
         dimension isa Integer && dimension >= 1 || error(
-            "sbimpl: Dirichlet dimension for `$target` must be a positive integer")
+            "sbimpl: Dirichlet dimension for `$target` must be a positive integer ",
+            "or a data field holding one, got `$(repr(dimension))`")
         alpha = Expr(:call, :rep_vector, _sb_effect_prior_arg(concentration), dimension)
         push!(stmts, Expr(:call, :~, target, Expr(:call, :dirichlet, alpha)))
         return true
@@ -9806,8 +9814,7 @@ function _sb_dirichlet_alpha(target, args, kwargs)
         K, a = args
         # A dimension or concentration from the data (`Dirichlet(K, 1)` with
         # `K` a data field) is its value, read when the model is built.
-        data_value(x) = x isa AbstractColumn && (v = _brm_data_value(x); v isa Real) ? v : x
-        K, a = data_value(K), data_value(a)
+        K, a = _sb_dirichlet_data_value(K), _sb_dirichlet_data_value(a)
         K isa Real && !(K isa Integer) && isinteger(K) && (K = Int(K))
         (K isa Integer && a isa Real) || error(
             "sbimpl: symmetric `$target ~ Dirichlet(K, a)` needs an integer ",
@@ -9831,6 +9838,11 @@ function _sb_dirichlet_alpha(target, args, kwargs)
         "strictly positive, got $alpha.")
     alpha
 end
+
+# A `Dirichlet` argument that names a scalar data field is that field's value;
+# anything else (a literal, a model value) is returned unchanged.
+_sb_dirichlet_data_value(x) =
+    x isa AbstractColumn && (v = _brm_data_value(x); v isa Real) ? v : x
 
 # `@brm` is a MACRO over the formula block, so a bare Julia symbol on the RHS is
 # parsed as a formula LOCAL (`@getproperty` falls back to a `NamedColumn`) rather
