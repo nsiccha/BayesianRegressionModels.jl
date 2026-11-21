@@ -4609,6 +4609,9 @@ end
 
 function _sb_record_group_index!(data, idx_key::Symbol, n_groups_key::Symbol,
                                  group::Symbol, raw::AbstractVector)
+    # A separate block can read the very same index. Its values have just
+    # been checked, and replay still needs the joined block's other columns.
+    isnothing(_sb_joint_group_record(data, idx_key)) || return
     levels = _sb_fit_levels(raw)
     _sb_record_preproc!(data, idx_key, PreprocEntry(
         :group_index, (; levels, n_groups_key), group, true))
@@ -6967,11 +6970,13 @@ end
 # columns name together: the re-emission `template` records which those are when
 # it redraws some of them, otherwise every column is resampled.
 function _sb_resampled_record(e::PreprocEntry, groups, new_df, template::PreprocEntry=e)
-    if e.kind === :group_index && e.raw_ref in groups && haskey(e.const_, :columns)
+    if e.kind === :group_index && e.raw_ref in groups && haskey(template.const_, :columns)
+        # Older fits could lose this metadata to another use of the index.
+        # Re-emitting the fit recovers the columns and their block.
         redraw = get(template.const_, :redraw,
-                     (; columns=e.const_.columns))
+                     (; columns=template.const_.columns))
         return PreprocEntry(:group_index, merge(template.const_,
-            (; levels=_sb_joint_redraw_levels(redraw, e.const_.id, new_df))),
+            (; levels=_sb_joint_redraw_levels(redraw, template.const_.id, new_df))),
             e.raw_ref, true)
     end
     e.kind === :group_index && e.raw_ref in groups &&
