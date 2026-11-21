@@ -100,13 +100,6 @@ function rk_oracle(rk, data, u; concentration)
     at(name) = (j = findfirst(==(name), names); j === nothing ? nothing : u[j])
     oracle(data, (s, k) -> at(Symbol("theta.", s, ".", k)), at; concentration)
 end
-function stan_oracle(stan, data, u; concentration)
-    names = String.(BridgeStan.param_unc_names(stan.model))
-    at(name) = (j = findfirst(==(name), names); j === nothing ? nothing : u[j])
-    coordinate(s, k) = u[only(findall(n -> endswith(n, "theta_coordinates.$k.$s"), names))]
-    oracle(data, coordinate, n -> at(String(n)); concentration)
-end
-
 function check_model(brmi, data, label; concentration, points=3)
     rk = RKBRMI(brmi)
     problem = rk_logdensity_problem(check_rk_source_roundtrip(rk); ad_backend=AD)
@@ -141,19 +134,24 @@ end
     check_model(per_cell(D3C), D3C, "per_cell"; concentration=:per_cell)
 end
 
-@stestset "a concentration vector shared by every cell: SBBRMI; RKBRMI refuses it" begin
-    # RKPPL binds the shared data vector as a per-index column (ReactiveKernels
-    # snag rkppl-joint-cell-c8a61b47), so RKBRMI refuses it by name.
-    @test_throws "rkppl-joint-cell-c8a61b47" RKBRMI(concentration_vector(D3))
-    sb = SBBRMI(concentration_vector(D3); mod=@__MODULE__, total_groups=())
-    stan = BRM.stan_instantiate(sb; path=joinpath(tempdir(), "brm-cell-dirichlet", "shared.stan"))
-    rng = Xoshiro(5)
-    d = BridgeStan.param_unc_num(stan.model)
-    for _ in 1:3
-        u = 0.4 .* randn(rng, d)
-        @test BridgeStan.log_density(stan.model, u; propto=false, jacobian=true) ≈
-            stan_oracle(stan, D3, u; concentration=:vector) atol=1e-10 rtol=1e-11
+@stestset "a shared asymmetric concentration vector" begin
+    # Four cells use the same three concentrations. Also check the ambiguous
+    # equal-length case, where per-cell indexing could silently change the law.
+    for S in (4, 3)
+        data = mixing_data(; S, K=3, seed=2)
+        check_model(concentration_vector(data), data, "shared"; concentration=:vector)
     end
+end
+
+@stestset "a sampled vector cannot supply the joint cell's size" begin
+    model = @brm D3 begin
+        conc[1:n] .~ LogNormal.(0, 1)
+        @plate for p in groups(series)
+            theta ~ Dirichlet(conc)
+            y[p] ~ Normal(theta[1] .* x1[p], 1)
+        end
+    end
+    @test_throws "must depend only on bound data" RKBRMI(model)
 end
 
 @stestset "a sampled concentration" begin
@@ -204,21 +202,18 @@ with_levels(data) = @brm data begin
     end
 end
 
-@stestset "SVI fits the simplexes; each is still a global of the fit" begin
-    rk = RKBRMI(with_levels(D2))
+@stestset "SVI assigns each simplex to its series" begin
+    rk = RKBRMI(with_levels(D3))
     m = brm_nlme_model(rk; ad_backend=AD, subject_group=:series)
     t = BRM._brm_svi_target(m)
     names = string.(m.view.coordinates)
     for (j, name) in enumerate(names)
         startswith(name, "theta.") || continue
         series = parse(Int, split(name, '.')[2])
-        # Every unit's cell footprint reads every cell's simplex block, so SVI
-        # keeps them global (ReactiveKernels snag joint-cell-laten-9a3ad461). The
-        # authored factors are per cell already.
-        @test_broken t.ownership.owner[j] == findfirst(==(series), m.view.levels)
-        @test t.ownership.owner[j] == 0
+        @test t.ownership.owner[j] == findfirst(==(series), m.view.levels)
     end
-    @test count(n -> startswith(n, "theta."), names) == length(unique(D2.series))
+    @test count(n -> startswith(n, "theta."), names) == length(unique(D3.series)) * (D3.n - 1)
+    @test t.ownership.owner[findfirst(==("sigma"), names)] == 0
     fit = brm_svi_fit(m; batch_size=2, max_iterations=30, rng=Xoshiro(9))
     @test size(fit.draws, 1) == length(names)
     @test all(isfinite, fit.draws)

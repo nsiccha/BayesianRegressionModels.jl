@@ -1646,18 +1646,8 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
                 # binding a `K` that reads a sampled value); `Dirichlet(alpha)`
                 # has `length(alpha)`.
                 if marker.args[3] == QuoteNode(:simplex)
-                    # RKPPL binds a data array the cell reads whole, not at its
-                    # index, as a per-index column of the plate (ReactiveKernels
-                    # snag `rkppl-joint-cell-c8a61b47`), which would give each cell
-                    # one entry of the concentration.
-                    length(law.args) == 2 && law.args[2] isa Symbol &&
-                        law.args[2] in slice.globals && error(
-                        "RK backend: kernel `$(kernel.name)` cell latent `$lhs ~ " *
-                        "Dirichlet($(law.args[2]))` reads a concentration vector shared by " *
-                        "every cell; RKBRMI does not build that yet (ReactiveKernels snag " *
-                        "`rkppl-joint-cell-c8a61b47`). Write `Dirichlet(K, a)` for a " *
-                        "symmetric concentration, or read one concentration per cell, " *
-                        "`Dirichlet($(law.args[2])[i])`; SBBRMI takes the shared vector")
+                    # RKPPL binds a shared data vector whole and checks that
+                    # the geometry's size can be evaluated from bound data.
                     size = length(law.args) == 3 ? law.args[2] :
                         Expr(:call, :length, law.args[2])
                     return Expr(:(=), lhs, Expr(:call, marker.args..., size))
