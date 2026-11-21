@@ -103,7 +103,7 @@ function _brm_svi_identity(t)
        separator=hasproperty(t, :ownership) ? _brm_svi_separator_options(t) : (; separator=:none),
        # The minibatch engine's target is a NamedTuple; GaussianBlockLaplace's is a
        # struct, with no unit-owned field states and no `get`.
-       field_states=hasproperty(t, :fields) && getproperty(t, :fields) !== nothing ? :units : :global)
+       field_states=hasproperty(t, :field_states) ? t.field_states : :global)
 end
 
 _brm_svi_optimizer_state(t, previous, c, run) = BRMSVIOptimizerState(
@@ -250,7 +250,7 @@ function _brm_svi_consistent(run::_BRMSVIRun, t, c)
             length(run.sampling.draws) == length(run.averaged_through) ==
             length(run.unit_entropy) == N &&
         run.sampling.method == c.unit_sampling &&
-        run.unit_gradient_calls ==
+        run.unit_gradient_calls == sum(get(run.sampling, :field_neighbor_calls, ()); init=0) +
             sum(i -> run.sampling.visits[i] * (_brm_svi_unit_calls(q, i, c) +
                 _brm_svi_collapsed_unit_calls(run.sites, i)), 1:N; init=0) &&
         sum(run.sampling.draws) == c.batch_size * run.iteration &&

@@ -794,27 +794,76 @@ end
 # The derivative of a solved pattern's term in κ and the temporal length, from the
 # sufficient statistics of its listed states: `q` and `work.v` above, `count` conditionals.
 function _brm_vecchia_length_gradient(work, f::_BRMGMRFFootprint, p, m, F, q, count)
+    # v / F is the conditional weight cotangent and (q/F - count)/(2F)
+    # the variance cotangent. Keep v at its original scale for the solve.
+    _brm_vecchia_conditional_pullback!(work, f, p, m, F, (q / F - count) / (2F))
+end
+
+# b = K \ k and F = 1 - k'b. For cotangents on b and F, solve once for
+# K⁻¹ b̄, then contract with the derivatives of the parent and cross covariances.
+# work.v / weight_divisor is b̄.
+function _brm_vecchia_conditional_pullback!(work, f, p, m, weight_divisor, variance_bar)
     dkappa, dtemporal = 0.0, 0.0
     m == 0 && return (; kappa=dkappa, temporal=dtemporal)
     v, w, b, A = work.v, work.w, work.b, work.A
     copyto!(w, 1, v, 1, m)
     _brm_vecchia_cholesky_solve!(w, A, m)
-    scale = (q / F - count) / (2F)
     first_item = f.item_ptr[p]
     space, dspace, timecor, dtime = work.space, work.dspace, work.time, work.dtime
     @inbounds for a in 1:m
         ua, la = f.item_position[first_item + a - 1], f.item_lag[first_item + a - 1]
-        weight = w[a] / F - 2scale * b[a]
+        weight = w[a] / weight_divisor - 2variance_bar * b[a]
         dkappa += weight * dspace[1, ua] * timecor[1, la]
         dtemporal += weight * space[1, ua] * dtime[1, la]
         for e in 1:m
             ue, le = f.item_position[first_item + e - 1], f.item_lag[first_item + e - 1]
-            weight = scale * b[a] * b[e] - w[a] * b[e] / F
+            weight = variance_bar * b[a] * b[e] - w[a] * b[e] / weight_divisor
             dkappa += weight * dspace[ua, ue] * timecor[la, le]
             dtemporal += weight * space[ua, ue] * dtime[la, le]
         end
     end
     (; kappa=dkappa, temporal=dtemporal)
+end
+
+# One geometry's coefficients followed by its conditional standard deviation.
+# Queries selecting several states with the same geometry share this solve.
+function _brm_vecchia_pattern_factor(f, p, spatial, temporal)
+    work = _BRMVecchiaWork(f)
+    solved = _brm_vecchia_solve!(work, f, p, sqrt(2.0) / spatial, temporal, false)
+    vcat(view(work.b, 1:solved.m), sqrt(solved.variance))
+end
+
+function _brm_vecchia_pattern_pullback(f, p, spatial, temporal, factor_bar)
+    work = _BRMVecchiaWork(f)
+    kappa = sqrt(2.0) / spatial
+    solved = _brm_vecchia_solve!(work, f, p, kappa, temporal, true)
+    copyto!(work.v, 1, factor_bar, 1, solved.m)
+    variance_bar = last(factor_bar) / (2sqrt(solved.variance))
+    d = _brm_vecchia_conditional_pullback!(work, f, p, solved.m, 1.0, variance_bar)
+    (; spatial=-d.kappa * kappa / spatial, temporal=d.temporal)
+end
+
+# For the residual r = L z at one field state, the earlier channels give
+# z[J] = L[J,J] \ r[J]. Return the coefficients of r[J] in the conditional
+# mean of r[c], followed by its residual scale. All states share this row.
+function _brm_vecchia_channel_factor(L, c)
+    J = 1:(c - 1)
+    lower = LowerTriangular(view(L, J, J))
+    weights = lower' \ view(L, c, J)
+    vcat(weights, L[c, c])
+end
+
+function _brm_vecchia_channel_pullback(L, c, factor, factor_bar)
+    J = 1:(c - 1)
+    lower = LowerTriangular(view(L, J, J))
+    row_bar = lower \ view(factor_bar, J)
+    gradient = zeros(size(L))
+    gradient[c, c] = last(factor_bar)
+    gradient[c, J] .= row_bar
+    for j in J, i in j:(c - 1)
+        gradient[i, j] = -factor[i] * row_bar[j]
+    end
+    gradient
 end
 
 """

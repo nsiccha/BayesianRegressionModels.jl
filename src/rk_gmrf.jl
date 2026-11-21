@@ -144,6 +144,49 @@ end
 brm_gmrf_rows(support::_BRMGMRFFootprintSupport, east, north, time, channel) =
     (; index=_brm_vecchia_field_index(support.geometry, support.channels, east, north, time, channel))
 
+# Gather indices for the scalar conditionals in field packing order (channel
+# first, then state). Geometry is bound data. Only the length scales, channel
+# factor and the named parents of a queried coordinate carry derivatives.
+function brm_gmrf_conditional_layout(f::_BRMGMRFFootprint)
+    C = f.nchannels
+    patterns = zeros(Int, length(f.position))
+    for p in 1:(length(f.pattern_ptr) - 1), slot in f.pattern_ptr[p]:(f.pattern_ptr[p + 1] - 1)
+        patterns[f.pattern_states[slot]] = p
+    end
+    inputs = Vector{Vector{Int}}(undef, f.ncoordinates)
+    for s in eachindex(patterns), c in 1:C
+        first = C * (s - 1)
+        neighbors = view(f.neighbor, f.neighbor_ptr[s]:(f.neighbor_ptr[s + 1] - 1))
+        ids = [C * (Int(parent) - 1) + c for parent in neighbors]
+        for earlier in 1:(c - 1)
+            push!(ids, first + earlier)
+            append!(ids, (C * (Int(parent) - 1) + earlier for parent in neighbors))
+        end
+        inputs[first + c] = ids
+    end
+    (; inputs, ids=1:(length(f.pattern_ptr) - 1), pattern=repeat(patterns; inner=C),
+       coordinates=1:f.ncoordinates, channel_ids=1:C, channel=repeat(1:C, length(patterns)))
+end
+
+# Direct-parent coefficients of one scalar conditional, with its conditional
+# standard deviation last. Within a state the earlier channel residuals are
+# explained by the same spatial weights as the current channel.
+function brm_gmrf_conditional_factor(pattern, channel)
+    n = length(pattern)
+    result = similar(pattern, n * length(channel))
+    for j in 1:n-1
+        result[j] = pattern[j]
+    end
+    for c in 1:length(channel)-1
+        result[n*c] = channel[c]
+        for j in 1:n-1
+            result[n*c+j] = -channel[c] * pattern[j]
+        end
+    end
+    result[end] = last(pattern) * last(channel)
+    result
+end
+
 # One field of a cell row read (`brm_gmrf_cell_read`), as a function of its
 # own so a broadcast over the reads infers one concrete element type
 # (`getproperty.(reads, :index1)` with a runtime Symbol infers a Union, which
@@ -309,11 +352,19 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     multiresolution_functions = multiresolution ?
         (; basis=_rk_value_callee!(bindings, _rk_gmrf_multiresolution_basis(), taken),
            reader=_rk_gmrf_multiresolution_reader!(definitions, taken, bindings)) : nothing
+    conditional_functions = if footprint
+        factors = _rk_gmrf_conditional_factors()
+        (; layout=_rk_value_callee!(bindings, brm_gmrf_conditional_layout, taken),
+           combine=_rk_value_callee!(bindings, brm_gmrf_conditional_factor, taken),
+           pattern=_rk_value_callee!(bindings, factors.pattern, taken),
+           channel=_rk_value_callee!(bindings, factors.channel, taken))
+    end
     locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
-        footprint, multiresolution_functions, spatial=_brm_gmrf_spatial(options.source))
+        footprint, multiresolution_functions, conditional_functions,
+        spatial=_brm_gmrf_spatial(options.source))
     push!(statements, Expr(:call, :~, options.id, locals.call))
-    (; locals.sigma, locals.spatial_length, locals.temporal_length, locals.field,
-       geometry, support, rows, priors=prior)
+    merge((; locals.sigma, locals.spatial_length, locals.temporal_length, locals.field,
+        geometry, support, rows, priors=prior), locals.conditionals)
 end
 
 _rk_ast_property(value, name) = Expr(:., value, QuoteNode(name))
@@ -326,7 +377,7 @@ _rk_ast_property(value, name) = Expr(:., value, QuoteNode(name))
 # geometry (RKPPL cell submodels bind bare names only).
 function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
         cell::Bool=false, accessors=nothing, footprint::Bool=false, multiresolution_functions=nothing,
-        spatial::Bool=false)
+        conditional_functions=nothing, spatial::Bool=false)
     sigma = _rk_block_local!(block, :sigma)
     spatial_length = _rk_block_local!(block, :spatial_length)
     temporal_length = _rk_block_local!(block, :temporal_length)
@@ -356,6 +407,9 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
             Expr(:ref, field, access(Symbol(:index, j)))) for j in 1:3)...)
     end
     value = Expr(:call, :.*, sigma, read)
+    conditionals = isnothing(conditional_functions) ? NamedTuple() :
+        _rk_ast_gmrf_conditionals!(definitions, taken, block, conditional_functions,
+            geometry, field, spatial_length, temporal_length, L)
     reads_doc = multiresolution_functions !== nothing ?
         "each row reads the field through its multiresolution basis weights" : footprint ?
         "each row reads the field's state at its own index" :
@@ -375,7 +429,46 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
         `$field ~ $law($spatial_length, $temporal_length, …)` on the mesh `$geometry`;
         $reads_doc. Returns `$sigma` times those reads, one value per row.""")
     call = _rk_ast_block_call!(definitions, taken, "brm_gmrf", block, value; doc)
-    (; call, sigma, spatial_length, temporal_length, field)
+    (; call, sigma, spatial_length, temporal_length, field, conditionals)
+end
+
+# RK selects the same coefficient row for the conditional mean, SD and SVI map.
+# A mean reads only the packed parents of its scalar conditional.
+function _rk_ast_gmrf_conditionals!(definitions, taken, block, functions, geometry, field,
+        spatial, temporal, L)
+    layout = _rk_block_local!(block, :conditional_layout)
+    factors = _rk_block_local!(block, :conditional_factors)
+    channel = _rk_block_local!(block, :conditional_channels)
+    conditional_factor = _rk_block_local!(block, :conditional_factor)
+    conditional_mean = _rk_block_local!(block, :conditional_mean)
+    conditional_scale = _rk_block_local!(block, :conditional_scale)
+    function plate_kernel(name, args, lists, indices, expression)
+        plate = _rk_ast_graph_plate(lists, indices, expression)
+        _rk_ast_shared_definition!(definitions, taken, name, args,
+            Expr(:block, Expr(:return, plate)); kernel=true)
+    end
+    factor = plate_kernel("brm_gmrf_pattern_factors", [:geometry, :ids, :space, :time],
+        [:ids], [:p], Expr(:call, functions.pattern, :geometry, :p, :space, :time))
+    channel_factor = plate_kernel("brm_gmrf_channel_factors", [:L, :ids], [:ids], [:c],
+        Expr(:call, functions.channel, :L, :c))
+    combine = plate_kernel("brm_gmrf_conditional_factors", [:spatial, :channel, :patterns, :channels],
+        [:patterns, :channels], [:p, :c], Expr(:call, functions.combine, :(spatial[p]), :(channel[c])))
+    locate = plate_kernel("brm_gmrf_conditional_means", [:field, :laws, :parents, :coordinates],
+        [:parents, :coordinates], [:indices, :k], Base.remove_linenums!(quote
+            coefficients = laws[k]
+            sum(coefficients[1:length(indices)] .* field[indices])
+        end))
+    scale = plate_kernel("brm_gmrf_conditional_scales", [:laws, :coordinates],
+        [:coordinates], [:k], :(last(laws[k])))
+    part(name) = _rk_ast_property(layout, name)
+    push!(block.statements,
+        Expr(:(=), layout, Expr(:call, functions.layout, geometry)),
+        Expr(:(=), factors, Expr(:call, factor, geometry, part(:ids), spatial, temporal)),
+        Expr(:(=), channel, Expr(:call, channel_factor, L, part(:channel_ids))),
+        Expr(:(=), conditional_factor, Expr(:call, combine, factors, channel, part(:pattern), part(:channel))),
+        Expr(:(=), conditional_mean, Expr(:call, locate, field, conditional_factor, part(:inputs), part(:coordinates))),
+        Expr(:(=), conditional_scale, Expr(:call, scale, conditional_factor, part(:coordinates))))
+    (; conditional_layout=layout, conditional_factor, conditional_mean, conditional_scale)
 end
 
 # ---- Independent fields in `@plate for p in groups(g)` cells ----------------
@@ -643,6 +736,7 @@ function brm_gmrf_rows(s::_BRMGMRFMultiresolutionSupport, east, north, time, cha
 end
 # The extension provides the RK-owned derivative rule and visible read graph.
 function _rk_gmrf_multiresolution_basis end
+function _rk_gmrf_conditional_factors end
 
 # Emit the weighted read as a visible plate and scalar reduction. The two
 # ordinary helpers read data only; all parameter gathers stay in the graph.

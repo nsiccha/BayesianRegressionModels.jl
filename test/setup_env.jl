@@ -465,6 +465,8 @@ const PINS = [
     # prepared sampler type (a const branch kernel inside a data-bound arm), and
     # branch_arms = "all" keeps side-by-side flag branches in one plate
     # (test/rk_rebuild_types.jl, snag rk-logdensity-pr-b8b1cc36).
+    # RKPPL 0.1.244 reads one plate row over selected packed coordinates
+    # (`indexed_value`), which SVI uses for a field state's conditional.
     # RKPPL 0.1.249 keeps shared data whole and identifies each joint cell latent’s packed block.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a4d3e204b34e8c1ca800f09c8fa93e2716f55f76"),
     # ReactiveKernels' own `[sources]` revision of its unregistered

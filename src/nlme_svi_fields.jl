@@ -2,8 +2,8 @@
 #
 # A state read by one unit joins that unit's Gaussian factor, next to its effects, so a
 # unit's field slice is the unit's own: its cost and storage follow its reads, not the
-# field. A state read by several units stays global. The approximation keeps units
-# independent; the prior couples them only through its conditionals' means.
+# field. A state read by several units stays global. These routines evaluate the
+# packed target. Learned centering uses the same conditionals in its direct-parent map.
 #
 # The field's joint prior is a sum of one conditional per state (`gmrf_vecchia_local.jl`),
 # assigned to the state's owner, so the objective stays exactly
@@ -151,8 +151,8 @@ function _brm_svi_unit_fields(m, ownership, inventory, globals, units)
         factor = _brm_svi_field_factor(m, field.record, f, globals)
         global_states = [(field.positions[k], _brm_sorted_slot(globals, field.positions[k]))
             for k in 1:f.ncoordinates if _brm_sorted_slot(globals, field.positions[k]) != 0]
-        (; f, field.positions, plans, unit_slots, global_slots, spatial,
-           temporal, factor, global_states, law=Ref{Any}(nothing))
+        (; f, field.record, field.positions, plans, unit_slots, global_slots, spatial,
+           temporal, factor, global_states, law=Ref{Any}(nothing), conditional_reader=Ref{Any}(nothing))
     end
     foreach(list -> sort!(unique!(list)), blanket)
     (; fields=Tuple(fields), blanket, others=copy(m.unit))
@@ -189,6 +189,9 @@ end
 # A step's reading of the world outside its batch: the laws at `g`, the global states, and
 # one draw of every unit a batch's conditionals read. Serial, before any task.
 function _brm_svi_field_prepare!(rng, t::NamedTuple, q, g, batch, ε=nothing, η=nothing)
+    if get(t, :field_sweep, nothing) !== nothing
+        return _brm_svi_sweep_prepare!(rng, t, q, g, batch, ε, η)
+    end
     state = get(t, :fields, nothing)
     state === nothing && return nothing
     _brm_svi_field_laws!(state, g)

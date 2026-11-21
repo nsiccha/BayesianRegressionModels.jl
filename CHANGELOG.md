@@ -12,6 +12,43 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.374
+
+- Model-scope `gmrf(...; neighbors=m)` terms on RKBRMI expose
+  `<id>.conditional_mean` and `<id>.conditional_scale` in packed field order.
+  Each pair gives the Gaussian prior for that standardized field coordinate
+  given its earlier states and the earlier channels at the same state.
+  `<id>.conditional_factor` holds those parents' coefficients in
+  `<id>.conditional_layout.inputs` order, followed by the conditional SD.
+  **Breaking:** These ports change the emitted program identity. Finish any
+  existing SVI or SMC run on its original version or start a fresh checkpoint.
+- With `field_states=:units`, `LearnedCentering(; fields=true)` maps each
+  unit-owned GMRF state through its conditional scale and direct Vecchia
+  parents, so neighbouring states can covary. The fit reports one `kind=:gmrf`
+  control per such state. Each update reads the selected owner's term and
+  samples up to two other owners for its local gradient. `fields` defaults to
+  `false`: the states keep their packed coordinates and existing fits keep
+  their results. On a six-station synthetic field the map more than halved
+  the covariance error of within-station changes against NUTS; one iteration
+  at batch 8 took 0.22 s against 0.02 s packed on 256 states and 3.4 s against
+  0.025 s on 4,096. The fit reads each coefficient row through
+  ReactiveKernelsPPL's `indexed_value` query (ReactiveKernelsPPL 0.1.244),
+  which raises the ReactiveKernels floor to 0.1.347. A row's derivative
+  costs memory in proportion to the field's size: inside a prepared query,
+  ReactiveKernels still copies the fixed inputs of a derivative rule on each
+  reverse call (its snag `native-reverse-r-b8de62b9`, open on the Enzyme
+  side). A spatial field with no time axis
+  (`gmrf((east, north); neighbors=m)`) keeps its states in the units' factors
+  and takes the same map.
+- `brm_svi_fit(checkpoint, model)` accepts disjoint observation windows for
+  `field_states=:units` on the same fitted read-pair GMRF support with the
+  same coordinate ownership, with packed or learned field coordinates. The
+  checkpoint carries any field controls and draws an absent owner from its
+  saved Gaussian conditional on the globals.
+- For subject-partitioned fits, `brm_svi_combine(...; field_states=:units)`
+  assembles the GMRF states in their owners' factors. The start uses each
+  owner's packed field mean and covariance at the checkpoint's global mean.
+
 ## 0.2.373
 
 - On SBBRMI, `reprocess(fit, rows; resample_groups=[:site])` jointly

@@ -96,9 +96,11 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
         max_promoted_coordinates=128, cell_units=nothing, field_states=:global)
     field_states in (:global, :units) || throw(ArgumentError(
         "brm_svi_fit: field_states must be :global or :units, got $(repr(field_states))"))
-    field_states === :units && previous !== nothing && throw(ArgumentError(
-        "brm_svi_fit: field_states=:units has no streaming form: a new window adds states the " *
-        "carried factors cannot name. Fit the window with field_states=:global, or refit"))
+    if previous !== nothing
+        saved = get(get(previous.layout, :options, (;)), :field_states, :global)
+        field_states === saved || throw(ArgumentError(
+            "brm_svi_fit: the streaming checkpoint holds field_states=$saved, requested $field_states"))
+    end
     m.cell_query === nothing && _brm_nlme_error(
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
@@ -112,7 +114,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     !connected && policy !== :none && throw(ArgumentError(
         "brm_svi_fit: automatic separators require unit_partition=:connected"))
     cell_units = _brm_svi_cell_units_option(cell_units, connected)
-    inventory =field_states === :units ? _brm_svi_field_inventory(m) : ()
+    inventory = field_states === :units ? _brm_svi_field_inventory(m) : ()
     ownership = connected ? _brm_svi_connected_ownership(m; global_coordinates, previous,
         separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates,
         cell_units, fields=inventory) :
@@ -138,7 +140,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     t = (; m, globals, units, ownership, previous, partition=(; partition.context), plan,
        plans=[plan], work, places,
        touched=_brm_svi_field_touched!(_brm_svi_touched_globals(places, prior), fields), prior,
-       fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
+       field_states, fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
     # From the model's own prior, before a streaming fit puts its carried factor
     # there: what the sd bound, a stopgap, multiplies (src/nlme_svi_sd_bound.jl),
     # and the mean a non-finite evaluation's globals are measured from.
@@ -290,6 +292,19 @@ function _brm_svi_unit_local!(gg, gz, t::NamedTuple, i, g, z, plan, work)
         _brm_svi_field_term!(gg, gz, t, i, z, work)
 end
 
+# Neighboring field terms need only their derivatives on local coordinates.
+# Omitting gg avoids allocating a whole global gradient for each such visit.
+function _brm_svi_add_bucket_gradient!(gg, gz, places, gradient)
+    @inbounds for (k, p) in enumerate(places)
+        if p < 0
+            gz[-p] += gradient[k]
+        elseif gg !== nothing && p > 0
+            gg[p] += gradient[k]
+        end
+    end
+    nothing
+end
+
 # The unit's observation cells alone, added into `gg` and `gz` as above.
 _brm_svi_unit_partition!(gg, gz, t, i, g, z, plan) = i in plan.labels ?
     _brm_svi_partition_local!(gg, gz, plan, t.m.unit, plan.footprints[i], t.places[i], i, g, z) : 0.0
@@ -302,9 +317,7 @@ function _brm_svi_partition_local!(gg, gz, plan, unit, footprint, places, i, g, 
     end
     try
         value = first(_rk_nlme_partition_value_and_gradient!(plan.sampler, gradient, point, i))
-        @inbounds for (k, p) in enumerate(places)
-            p > 0 ? (gg[p] += gradient[k]) : p < 0 && (gz[-p] += gradient[k])
-        end
+        _brm_svi_add_bucket_gradient!(gg, gz, places, gradient)
         value
     finally
         @inbounds for (k, j) in enumerate(footprint)
@@ -392,9 +405,7 @@ function _brm_svi_factor_term!(gg, gz, prior::_BRMSVIAuthoredPrior, b, g, z)
         p > 0 ? (active[k] = g[p]) : p < 0 && (active[k] = z[-p])
     end
     value, gradient = _rk_svi_factor_value_gradient(query, prior.base, active)
-    for (k, p) in enumerate(places)
-        p > 0 ? (gg[p] += gradient[k]) : p < 0 && (gz[-p] += gradient[k])
-    end
+    _brm_svi_add_bucket_gradient!(gg, gz, places, gradient)
     value
 end
 
@@ -879,7 +890,7 @@ end
 
 # A unit's objective at the draw of the globals its terms `r` were read at: their
 # expected log density plus the entropy of the factor with root `U`, up to a constant.
-_brm_svi_unit_objective(r, U) = r.value - sum(log, diag(LowerTriangular(U)))
+_brm_svi_unit_objective(r, U) = r.value + r.neighbor_value - sum(log, diag(LowerTriangular(U)))
 
 # Unit i's re-optimized copy at the draw `g` and its terms there, which the globals
 # step on. `r` holds the unit's own terms, at its factor (root `q.U[i]`, mean
@@ -896,7 +907,7 @@ function _brm_svi_reoptimized_terms(t, q, i, g, r, designs, plan, work, touched,
     for E in designs
         L, Δ = _brm_svi_newton_factor(U, r.gz, r.S; positive)
         c = _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
-            centering, frame, zmean=m .+ Δ, U=L)
+            centering, frame, zmean=m .+ Δ, U=L, local_objective=true)
         c.problem === nothing && all(isfinite, c.S) && all(isfinite, c.gz) || return r
         objective = _brm_svi_unit_objective(c, L)
         objective >= best || return r
@@ -995,7 +1006,10 @@ end
 # every draw's adjoints, each draw weighted 1/d where a pair's are weighted 1
 # (`_brm_svi_centering_batch_gradient`).
 function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
-        centering=nothing, frame=nothing, zmean=q.M[i], U=q.U[i])
+        centering=nothing, frame=nothing, zmean=q.M[i], U=q.U[i], local_objective=false)
+    # A re-optimized copy also changes its neighboring owners' log densities.
+    # They enter its step acceptance, while the ELBO counts each owner's value once.
+    neighbor_value = local_objective && hasproperty(t, :field_sweep) ? Ref(0.0) : nothing
     d = size(E, 1)
     U, m = LowerTriangular(U), zmean
     gg₊, gg₋ = _brm_svi_global_buffers(work, D)
@@ -1013,9 +1027,9 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
             v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
         else
             v₊, gc₊, a₊ = _brm_svi_centered_unit_term!(gg₊, gz₊, centering, frame, t, q, i,
-                g, z₊, plan, work)
+                g, z₊, plan, work; neighbor_value)
             v₋, gc₋, a₋ = _brm_svi_centered_unit_term!(gg₋, gz₋, centering, frame, t, q, i,
-                g, z₋, plan, work)
+                g, z₋, plan, work; neighbor_value)
             gc = something(gc, zero(gc₊))
             gc .+= (gc₊ .+ gc₋) ./ 2d
             if adjoint === nothing
@@ -1025,8 +1039,8 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
             end
         end
         problem = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
-            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g),
-            finite=x -> _brm_svi_unit_finite(t, i, x, plan, work, touched))
+            (gg₊, gg₋), (gz₊, gz₋), touched; point=z -> _brm_svi_diagnostic_point(t, q, centering, frame, i, g, z),
+            finite=x -> _brm_svi_unit_finite(t, i, x, plan, work, touched; q))
         for (entry, p) in enumerate(touched)
             gg[entry] += (gg₊[p] + gg₋[p]) / d
             gg₊[p] = gg₋[p] = 0.0
@@ -1040,7 +1054,7 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
     centered = centering === nothing ? nothing :
         (; gc=something(gc, Float64[]), adjoints=adjoint === nothing ? () : (adjoint,),
            weight=1 / d)
-    (; value, gg, gz, S, problem, centered)
+    (; value, gg, gz, S, problem, centered, neighbor_value=neighbor_value === nothing ? 0.0 : neighbor_value[] / 2d)
 end
 
 # ── Non-finite evaluations ───────────────────────────────────────────────────
@@ -1203,7 +1217,10 @@ end
 # Whether unit i's own term (`_brm_svi_unit_local!`, the model's unit term in packed
 # coordinates) has a finite value and gradient at the packed point `x`, gradient
 # read at the unit's coordinates and its `touched` globals.
-function _brm_svi_unit_finite(t, i, x, plan, work, touched)
+function _brm_svi_unit_finite(t, i, x, plan, work, touched; q=nothing)
+    if q !== nothing && hasproperty(t,:field_sweep)
+        return _brm_svi_sweep_finite(t,q,i,x,plan)
+    end
     gg, gz = zeros(length(t.globals)), zeros(length(t.units[i]))
     v = _brm_svi_unit_local!(gg, gz, t, i, x[t.globals], x[t.units[i]], plan, work)
     isfinite(v) && all(isfinite, gz) && all(p -> isfinite(gg[p]), touched)
@@ -1216,7 +1233,7 @@ end
 # other ones). `finite(x)` evaluates the unit's term at a packed point for the swap
 # probe, against the pair's finite draw or, when both fail, the pair's mean.
 function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachindex(t.globals);
-        packed=identity, finite=nothing)
+        packed=identity, point=z -> _brm_svi_term_point(t,g,t.units[i],packed(z)), finite=nothing)
     finite_gg(gg) = all(p -> isfinite(gg[p]), touched)
     side_ok = map((v, gg, gz) -> isfinite(v) && finite_gg(gg) && all(isfinite, gz),
         Tuple(values), Tuple(ggs), Tuple(gzs))
@@ -1229,7 +1246,7 @@ function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachinde
         all(isfinite, gz) || (push!(quantities, Symbol(:unit_gradient_, side));
             append!(bad, t.units[i][findall(!isfinite, gz)]))
     end
-    points = NamedTuple{(:plus, :minus)}(map(z -> _brm_svi_term_point(t, g, t.units[i], packed(z)), zs))
+    points = NamedTuple{(:plus, :minus)}(map(point, zs))
     failing = side_ok[1] ? points.minus : points.plus
     probe = if finite === nothing
         nothing
@@ -1237,7 +1254,7 @@ function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachinde
         _brm_svi_swap_probe(t, finite, side_ok[1] ? :plus : :minus, failing,
             side_ok[1] ? points.plus : points.minus, t.units[i])
     else
-        middle = _brm_svi_term_point(t, g, t.units[i], packed((zs[1] .+ zs[2]) ./ 2))
+        middle = point((zs[1] .+ zs[2]) ./ 2)
         _brm_svi_swap_probe(t, finite, :mean, failing, middle, t.units[i])
     end
     (; term=:unit, unit=i, quantities,
@@ -1250,18 +1267,22 @@ end
 # Throws `BRMSVINonfiniteError` (iteration 0, which the caller fills in) when
 # the global term `P`, `gP` at `g` or a unit's terms (`problems`) are not finite.
 # `center`, the global factor's mean, is the global term's swap-probe reference.
-function _brm_svi_check_finite(t, g, P, gP, problems; center=nothing)
+function _brm_svi_check_finite(t, g, P, gP, problems; center=nothing, q=nothing)
     found = NamedTuple[]
     if !(isfinite(P) && all(isfinite, gP))
         quantities = Symbol[]
         isfinite(P) || push!(quantities, :value)
         all(isfinite, gP) || push!(quantities, :global_gradient)
-        points = (; draw=_brm_svi_term_point(t, g))
+        sweep = q !== nothing && hasproperty(t,:field_sweep)
+        point(g) = sweep ? _brm_svi_diagnostic_point(t,q,t.centering,
+            _brm_svi_centering_frame(t.centering,t,g),0,g,Float64[]) : _brm_svi_term_point(t,g)
+        points = (; draw=point(g))
         probe = center === nothing ? nothing :
             _brm_svi_swap_probe(t, x -> begin
+                    sweep && return _brm_svi_sweep_finite(t,q,0,x,t.plan)
                     v, gv = _brm_svi_global_term(t, x[t.globals])
                     isfinite(v) && all(isfinite, gv)
-                end, :mean, points.draw, _brm_svi_term_point(t, center), t.globals)
+                end, :mean, points.draw, point(center), t.globals)
         push!(found, (; term=:global, unit=0, quantities,
             coordinates=t.m.view.coordinates[t.globals[findall(!isfinite, gP)]],
             draw_finite=all(isfinite, g), points,
@@ -1305,7 +1326,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     ζs = coupling === nothing ? nothing :
         [_brm_svi_coupling_noise(coupling, i, noise, η) for i in batch]
     _brm_svi_field_prepare!(rng, t, q, g, batch, noise, η)
-    P, gP = _brm_svi_global_term(t, g)
+    sweep = hasproperty(t, :field_sweep)
+    P, gP = sweep ? _brm_svi_global_term(t.prior, t, g) : _brm_svi_global_term(t, g)
     draws = [_brm_svi_unit_draws(rng, q, i, curvature) for i in batch]
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
         gd::Vector{Float64}}}(undef, length(batch))
@@ -1316,6 +1338,10 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # and the unit terms read y = T(u) (src/nlme_svi_centering.jl).
     centering = _brm_svi_centering(t)
     frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
+    if sweep
+        P += first(_brm_svi_sweep_term!(gP, Float64[], centering, frame, t, q, 0,
+            g, Float64[], t.plan))
+    end
     designs = nothing
     if reoptimize > 0
         # Drawn serially, from the run's stream, before the threaded unit loop.
@@ -1353,7 +1379,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         zmean = _brm_svi_coupled_mean(coupling, q, i, ζs === nothing ? nothing : ζs[k])
         if εi isa AbstractMatrix
             r = _brm_svi_unit_design_terms(t, q, i, g, εi, plan, work, touched, D;
-                centering, frame, zmean)
+                centering, frame, zmean, local_objective=copies)
             problems[k] = r.problem
             terms[k] = (; r.value, r.gg, r.gz, gd=Float64[])
             curvatures[k] = r.S
@@ -1390,8 +1416,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             copies && (centered_globals[k] = centered[k])
         end
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
-            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g),
-            finite=x -> _brm_svi_unit_finite(t, i, x, plan, work, touched))
+            (gg₊, gg₋), (gz₊, gz₋), touched; point=z -> _brm_svi_diagnostic_point(t, q, centering, frame, i, g, z),
+            finite=x -> _brm_svi_unit_finite(t, i, x, plan, work, touched; q))
         gg = [gg₊[p] + gg₋[p] for p in touched]
         # The buffers are the worker's, zero again for its next unit.
         for p in touched
@@ -1404,7 +1430,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         end
     end
     # Before anything changes q or the optimizer.
-    _brm_svi_check_finite(t, g, P, gP, problems; center=q.μ)
+    _brm_svi_check_finite(t, g, P, gP, problems; center=q.μ, q)
 
     # A sparse global takes its readers from their sites (src/nlme_svi_sites.jl),
     # not from N / B times this batch's.
@@ -1538,6 +1564,9 @@ function _brm_svi_run(rng, q, c, t)
     end
     sampling = (; method=c.unit_sampling, work, probabilities=sampler.probabilities,
         visits=zeros(Int, N), draws=zeros(Int, N))
+    if hasproperty(t, :field_sweep)
+        sampling = merge(sampling, (; field_neighbor_calls=zeros(Int, N)))
+    end
     if _brm_svi_stationarity_enabled(c)
         sampling = merge(sampling, (; stationarity=_brm_svi_stationarity_state(q, c)))
     end
@@ -1817,6 +1846,13 @@ function _brm_svi_advance!(run, t, c)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
+    end
+    if hasproperty(run.sampling, :field_neighbor_calls)
+        for i in batch.indices
+            calls = t.field_sweep.neighbor_calls[i]
+            run.sampling.field_neighbor_calls[i] += calls
+            run.unit_gradient_calls += calls
+        end
     end
     for i in batch.indices
         entropy = _brm_svi_unit_entropy(q, i)
@@ -2105,6 +2141,12 @@ function _brm_svi_draws(rng, t, q, n; sites=nothing)
         end
     end
     _brm_svi_fill_absent_draws!(rng, U, t, t.previous)
+    if hasproperty(t, :field_sweep)
+        for j in axes(U, 2)
+            _brm_svi_sweep_draws!(view(U,:,j), t, q, U[t.globals,j])
+        end
+    end
+    U
 end
 
 _brm_svi_fill_absent_draws!(rng, draws, t, ::Nothing) = draws
@@ -2224,9 +2266,11 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 - `centering` — fresh fits default to [`LearnedCentering`](@ref), jointly
   learning each supported unit cell's coordinates and variational factor.
   This includes unit-owned Gaussian random effects, Gaussian vector elements
-  and grouped HSGP weights. By default (`LearnedCentering(; delay=true)`) a fresh
-  fit explores with its cells, grouped HSGP weights excepted, in their packed
-  coordinates first and centres them once exploration's ELBO test first reads flat,
+  and grouped HSGP weights, and with `LearnedCentering(; fields=true)` the
+  unit-owned states of a read-pair GMRF (`field_states=:units`). The HSGP weights
+  and GMRF states learn their controls from the first iteration. By default
+  (`LearnedCentering(; delay=true)`) a fresh fit explores with its other cells
+  in their packed coordinates and centres them once exploration's ELBO test first reads flat,
   then explores on; `diagnostics.centering.activation_window` names that window
   (`0` for `delay=false` or a fit with nothing to defer, `nothing` if it never came).
   `diagnostics.centering` reports the cells and
@@ -2239,7 +2283,8 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   [`LinearCoupling`](@ref): every unit's factor is conditional on the globals,
   its mean linear in the global factor's standard-normal draw at the globals
   the unit's term reads, learned with the fit, on the unit coordinates learned
-  centering does not centre (`@plate` cell latents among them). Fresh runs hold
+  centering does not centre (`@plate` cell latents among them) and on unit-owned
+  read-pair GMRF states, packed or after their direct parents have been included. Fresh runs hold
   the coupling at zero during exploration and learn it in settling and
   polishing, using a mean-point gradient baseline to reduce update noise.
   It keeps the
@@ -2374,8 +2419,16 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 - `field_states` — how a read-pair field (`gmrf(...; neighbors=m)`) is held. `:global`
   (default) gives each state its own global Gaussian factor. `:units` puts a state read
   by one unit into that unit's factor, next to its effects, so its cost and storage follow
-  the unit's reads, and a state read by several units stays global. It reads the field's
-  lengths from the globals, and has no streaming form. A mesh `gmrf` is refused either way:
+  the unit's reads. A state read by several units stays global. The states keep
+  their packed coordinates unless `centering=LearnedCentering(; fields=true)` is given.
+  Then each unit-owned state has one control. Its draw uses the conditional scale and one
+  pass over its direct Vecchia parents, including earlier channels, which lets neighbouring
+  states covary. A unit update then also reads the coefficient rows of its states' parents
+  and of their parents, and samples up to two additional owners for the gradients of terms
+  that read its states, so an iteration costs a multiple of the packed one. A streaming
+  update accepts observations on the fitted support with the same ownership. It keeps any
+  field controls fixed and draws an absent parent's states from its saved conditional
+  Gaussian. A mesh `gmrf` is refused either way:
   one factor per mesh state collapses the learned lengths.
 - `start` / `inits` — where the global and unit means start: BRM's prior-median
   starting point by default, a full RK packed point `start`, or values keyed
@@ -2781,6 +2834,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 q = _brm_svi_result_q(run)
                 centering = _brm_svi_centering(t)
                 centering_maps = _brm_svi_centering_maps(t, q)
+                field_projection = _brm_svi_field_projection(t,q)
                 bound = _brm_svi_sd_bound_report(t, run.q, _brm_svi_sd_bound_factor(c))
                 _brm_svi_warn_sd_bound(bound; caller)
                 _brm_svi_warn_unconverged(run, c, string.(m.view.coordinates[t.globals]); caller)
@@ -2805,8 +2859,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     unit_gradient_calls=run.unit_gradient_calls,
                     sparse_globals=_brm_svi_sites_diagnostics(run.sites, t),
                     start=get(t, :start_receipt, nothing),
-                    streaming=_brm_svi_carried_state(previous, t, q, centering_maps), optimizer=state,
-                    centering_maps,
+                    streaming=_brm_svi_carried_state(previous, t, q, centering_maps, field_projection),
+                    optimizer=state, centering_maps, field_projection,
                     centering=centering === nothing ? nothing :
                         _brm_svi_centering_report(centering, q, _brm_svi_unit_levels(t)),
                     coupling=_brm_svi_coupling_report(q)))
@@ -2831,4 +2885,4 @@ function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, u
     end
     t, q
 end
-_brm_svi_carried_state(::Nothing, m, q, maps=nothing) = nothing
+_brm_svi_carried_state(::Nothing, m, q, maps=nothing, projection=nothing) = nothing

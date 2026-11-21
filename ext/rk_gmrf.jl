@@ -133,6 +133,35 @@ end
 ReactiveKernelsPPL.sampling_distribution_graph(::Type{BRM._BRMGMRFVecchiaLaw}, args::Tuple) =
     _gmrf_vecchia_density_graph
 
+# Each pattern solves the same conditioning system as the joint density.
+# The pattern id and compiled geometry are fitted data.
+ReactiveKernels.@kernel function _gmrf_pattern_rule(geometry, pattern,
+        spatial::Float64, temporal::Float64, factor_bar::Vector{Float64})
+    factor::Vector{Float64} = BRM._brm_vecchia_pattern_factor(geometry, pattern, spatial, temporal)
+    slopes = BRM._brm_vecchia_pattern_pullback(geometry, pattern, spatial, temporal, factor_bar)
+    spatial_bar::Float64 = slopes.spatial
+    temporal_bar::Float64 = slopes.temporal
+    geometry_bar = nothing
+    pattern_bar = nothing
+    return factor, geometry_bar, pattern_bar, spatial_bar, temporal_bar
+end
+const _gmrf_pattern_factor = ReactiveKernels.derivative_rule(_gmrf_pattern_rule;
+    primal=:factor, covector=:factor_bar, cotangents=(geometry=:geometry_bar,
+        pattern=:pattern_bar, spatial=:spatial_bar, temporal=:temporal_bar),
+    name=:brm_gmrf_pattern_factor)
+
+ReactiveKernels.@kernel function _gmrf_channels_rule(L::Matrix{Float64}, c, factor_bar::Vector{Float64})
+    factor::Vector{Float64} = BRM._brm_vecchia_channel_factor(L, c)
+    L_bar::Matrix{Float64} = BRM._brm_vecchia_channel_pullback(L, c, factor, factor_bar)
+    c_bar = nothing
+    return factor, L_bar, c_bar
+end
+const _gmrf_channel_factor = ReactiveKernels.derivative_rule(_gmrf_channels_rule;
+    primal=:factor, covector=:factor_bar, cotangents=(L=:L_bar, c=:c_bar),
+    name=:brm_gmrf_channel_factor)
+
+BRM._rk_gmrf_conditional_factors() = (; pattern=_gmrf_pattern_factor, channel=_gmrf_channel_factor)
+
 ReactiveKernels.@kernel function _gmrf_multiresolution_rule_graph(field::Vector{Float64},
         spatial_length::Float64, temporal_length::Float64, L::Matrix{Float64},
         geometry, density_bar::Float64)

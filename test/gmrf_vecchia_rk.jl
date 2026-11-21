@@ -47,6 +47,86 @@ function vecchia_gradient_check(fx, u; h=1e-6, tolerance=2e-4)
     value
 end
 
+function check_vecchia_conditionals(rk, u)
+    record = BRM._brm_gmrf_footprint_record(rk, :field)
+    f = only(rk.plan.columns[record.fitted]).geometry
+    law = BRM._brm_gmrf_draw_law(rk, record, f, u)
+    ports = (Symbol(record.declaration, ".", record.locals.conditional_mean),
+        Symbol(record.declaration, ".", record.locals.conditional_scale))
+    read = BRM._rk_value_reader(rk, ports)
+    location, scale = Tuple(read(u))
+    @test length(location) == length(scale) == f.ncoordinates
+    # A per-coordinate query must stay local. In the correlated model the
+    # earlier channels also contribute through their spatial parent means.
+    names = BRM._rk_layout_coordinate_names(rk)
+    packed = findall(name -> BRM._brm_nlme_owned(name,
+        Symbol(record.declaration, ".", record.locals.field)), names)
+    bound = rk_bound_data(rk)
+    C = f.nchannels
+    factor_port = Symbol(record.declaration, ".", record.locals.conditional_factor)
+    layout_port = Symbol(record.declaration, ".", record.locals.conditional_layout)
+    layout = Base.invokelatest(ReactiveKernels.prepare(rk.model.spec;
+        have=Tuple(keys(bound)), want=layout_port, bound))
+    rows = only(values(BRM._rk_value_reader(rk, (factor_port,))(u)))
+    for k in eachindex(rows)
+        @test length(rows[k]) == length(layout.inputs[k]) + 1
+        @test dot(rows[k][1:end-1], law.field[layout.inputs[k]]) ≈ location[k] atol=1e-12
+        @test rows[k][end] ≈ scale[k]
+    end
+    for (port, full) in zip((ports..., factor_port), (location, scale, rows))
+        spec = ReactiveKernels.plate_cell(rk.model.spec, port; index=:k, name=:selected, locality=:error)
+        selected = ReactiveKernels.prepare(spec; have=(:unconstrained, keys(bound)..., :k),
+            want=:selected, bound)
+        footprint = ReactiveKernels.partition_footprint_kernel(selected)
+        for k in eachindex(full)
+            @test Base.invokelatest(selected, u, k) ≈ full[k] atol=1e-12
+            reads = Base.invokelatest(footprint, u, k).unconstrained
+            @test reads !== :whole
+            reads === :whole && continue
+            s, c = divrem(k - 1, C) .+ 1
+            parents = f.neighbor[f.neighbor_ptr[s]:(f.neighbor_ptr[s + 1] - 1)]
+            allowed = if port === first(ports)
+                vcat(packed[(k - c + 1):(k - 1)],
+                    [packed[C * (p - 1) + j] for p in parents for j in 1:c])
+            else
+                Int[]
+            end
+            @test issubset(intersect(packed, reads), allowed)
+        end
+    end
+    @test sum(logpdf.(Normal.(location, scale), law.field)) ≈
+        BRM._brm_vecchia_logdensity(law.field, law.spatial_length, law.temporal_length, law.L, f)
+    # Condition an ordinary multivariate normal for the channels at each
+    # state, after computing the parent's contribution on every channel.
+    factors = BRM._brm_vecchia_factors(f, law.spatial_length, law.temporal_length)
+    states = reshape(law.field, C, :)
+    covariance = law.L * law.L'
+    for s in axes(states, 2)
+        center = zeros(C)
+        for a in f.neighbor_ptr[s]:(f.neighbor_ptr[s + 1] - 1)
+            center .+= factors.B[a] .* states[:, f.neighbor[a]]
+        end
+        for c in 1:C
+            k = C * (s - 1) + c
+            previous = 1:(c - 1)
+            weights = covariance[previous, previous] \ covariance[previous, c]
+            @test location[k] ≈ center[c] + dot(weights, states[previous, s] - center[previous]) atol=1e-11
+            @test scale[k]^2 ≈ factors.F[s] * (covariance[c, c] - dot(weights, covariance[previous, c]))
+        end
+    end
+    rng = MersenneTwister(107)
+    cot = (randn(rng, f.ncoordinates), randn(rng, f.ncoordinates))
+    pullback = BRM._rk_value_pullback(rk, ports, u)
+    grad = pullback(u, cot)
+    loss(x) = sum(dot(a, b) for (a, b) in zip(cot, Tuple(read(x))))
+    for j in eachindex(u)
+        plus, minus = copy(u), copy(u)
+        plus[j] += 1e-5
+        minus[j] -= 1e-5
+        @test grad[j] ≈ (loss(plus) - loss(minus)) / 2e-5 atol=2e-7 rtol=1e-6
+    end
+end
+
 @testset "A model-scope footprint field: density and reverse derivative" begin
     data = vecchia_rk_data()
     model = @brm data begin
@@ -75,6 +155,7 @@ end
         logpdf(LogNormal(log(1.7), 0.4), temporal) + log(temporal)
     @test Base.invokelatest(prepare_query(fx.built, fx.bound, :sampler), u) ≈ expected atol=1e-8
     @test vecchia_gradient_check(fx, u) ≈ expected atol=1e-8
+    check_vecchia_conditionals(fx.rk, u)
     # The derivative comes from the rule, not from Enzyme over the states.
     problem = vecchia_rk_problem(fx.rk)
     @test LDP.logdensity(problem, u) ≈ expected atol=1e-8
@@ -149,7 +230,9 @@ end
     end
     fx = vecchia_rk_backend(model; case_id="gmrf-vecchia-channels")
     rng = MersenneTwister(2)
-    vecchia_gradient_check(fx, 0.15 .* randn(rng, fx.built.layout.total))
+    u = 0.15 .* randn(rng, fx.built.layout.total)
+    vecchia_gradient_check(fx, u)
+    check_vecchia_conditionals(fx.rk, u)
 end
 
 @testset "State plates read the field under locality = :error" begin
