@@ -71,7 +71,8 @@ const NATIVE = (; sd=:sigma, length_scale=:rho_iso, basis_weights=:beta_raw)
 # the RK variant's carriers.
 function check_members(component, single, sensors, smooth, variant, label)
     m = clocks(component)((; sensors, input))
-    desc = brm_descriptor(SBBRMI(m; mod=@__MODULE__, total_groups=()))
+    sb = SBBRMI(m; mod=@__MODULE__, total_groups=())
+    desc = brm_descriptor(sb)
     stan = consumer_stan(m, label; mod=@__MODULE__).model
     names = BridgeStan.param_unc_names(stan)
     constrained = BridgeStan.param_names(stan)
@@ -117,6 +118,10 @@ function check_members(component, single, sensors, smooth, variant, label)
     n = length(names)
     @test sort(reduce(vcat, r.mapping for r in refs)) == 1:n
     @test sort(stan_to_rk) == 1:n
+    # The public transport must recover each member's basis positions even
+    # when its neighbours have other basis counts or the caller reorders names.
+    @test brm_coordinate_transport(rk, sb, names).permutation == stan_to_rk
+    @test brm_coordinate_transport(rk, sb, reverse(names)).permutation == reverse(stan_to_rk)
     for u in (zeros(n), collect(range(-0.37, 0.31; length=n)))
         value, gradient = BridgeStan.log_density_gradient(stan, u; propto=false)
         native_value, native_gradient =

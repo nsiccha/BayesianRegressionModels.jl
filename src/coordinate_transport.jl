@@ -440,7 +440,9 @@ with Stan `kin_<block>_z_flat`, its semantic addresses carrying
 labels stay apart. A member of a component repeated over records
 (`for entry in records; blocks[entry.id] ~ component(entry); end`) pairs its
 population coefficients by the member's key and coefficient label, with
-`scope = (:blocks, key)` in their semantic addresses; a member's own
+`scope = (:blocks, key)` in their semantic addresses. An ungrouped HSGP's
+basis weights pair by member and basis position, including when the members
+use different basis counts. A member's own
 random-effect block is not paired yet. A provider declaration
 `<target>.<path>` pairs with the sampled SB output that the same `<target>`
 declaration owns under StanBlocks' submodel name `<target>_<path>` (path
@@ -1676,6 +1678,20 @@ function _brm_transport_scoped(name::Symbol)
     (Symbol(join(parts[1:(k - 1)], ".")), Tuple(index))
 end
 
+# RK puts the member first. Stan puts it last in a rectangular carrier and
+# packs member vectors end-to-end in a segmented vector.
+function _brm_transport_member_index(output, index)
+    isempty(index) && return index
+    if length(index) == 2 && length(output.size) == 1 && !isnothing(output.segments)
+        member, position = index
+        member in eachindex(output.segments) || return nothing
+        segment = _brm_member_segment(output.segments, member)
+        position in eachindex(segment) || return nothing
+        return (segment[position],)
+    end
+    (Base.tail(index)..., first(index))
+end
+
 # A provider's or missing completion's scoped declarations. RK scopes each
 # under its target (`loc.inner.slope`, `age.y_mis`); StanBlocks inlines the
 # submodel under `_`-joined names owned by that target declaration. Only
@@ -1739,10 +1755,9 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
                 "declaration `$declaration` of layout transform `$(only(transforms))`")
             positions = Set(_brm_element_coordinates(output, stan))
             for element in elements
-                # A collection cell's RK coordinate leads with its member; the
-                # stacked Stan carrier ends with it.
-                stan_index = member_first && !isempty(element.index) ?
-                    (Base.tail(element.index)..., first(element.index)) : element.index
+                stan_index = member_first ?
+                    _brm_transport_member_index(output, element.index) : element.index
+                isnothing(stan_index) && continue
                 stan_name = isempty(stan_index) ? carrier :
                     string(carrier, ".", join(stan_index, "."))
                 get(stan_pos, stan_name, 0) in positions || continue
