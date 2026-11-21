@@ -7,13 +7,16 @@
 Provider interface for `brm_svi_fit(...; device=:gpu)` and `brm_svi_resume`.
 A loaded GPU runtime implements this method and returns a callable
 `runner(advance, problem, run, controls)`. It checks that the requested device
-is available, puts its state on that device, calls `advance(step!)` once and
+is available, puts its state on that device, calls `advance(step!, synchronize!)` once and
 returns a named tuple `(; device=:gpu, backend, device_name)` identifying the
 device used. The fit exposes it as `diagnostics.execution`.
 
 `problem.partition` holds the built RK model, binding, observation names, key
 mapping and partition declarations. `problem.bound_data(source)` provides the
 inputs of the partition module's `prepare_data` in its declared order.
+The `kernels` named tuple contains RK graphs for the global draw and
+gradient, antithetic pair, work weights, Adam, clipping, scale updates and
+dense-factor curvature and trust bounds.
 `global_factors` and the unit-indexed `unit_factors` are selections on
 the model's original factor catalogue. `expected_layout` is that model's
 packed layout. Their underlying events are in `factor_buckets[1]` for global
@@ -27,10 +30,16 @@ The remaining fields carry the native centering, field and streaming plans
 and the prior projection. All problem fields are read-only.
 
 `step!(n, phase)` advances exactly `n` numerical iterations in the given
-`:exploring`, `:settling` or `:polishing` phase. It synchronizes `run` at
-return, including the raw factors, optimizer moments, sampling counts, random
-stream, entropy, iterate histories, polishing average, iteration and one ELBO
-per iteration. Partitioning calls to `step!` differently must preserve the
+`:exploring`, `:settling` or `:polishing` phase. On return it updates
+`run.iteration` and appends one ELBO per iteration to `run.trace`.
+`synchronize!(:histories)` transfers the iterate histories used to assess
+drift and stationarity. `synchronize!(:state)` transfers the complete current
+state before a phase change, save, snapshot, or return. It includes the
+factors, moments, sampling counts, random stream, entropy and polishing
+average. A repeated synchronization at the same iteration must preserve any
+updates BRM has since made to the host state. Providers that already update
+the complete host run in `step!` can call `advance(step!)`.
+Partitioning calls to `step!` differently must preserve the
 random stream and the updates. BRM owns window summaries, phase transitions,
 stopping, checkpoint/snapshot callbacks and the final packed draws. A phase
 transition may update the host factors, moments or averaging state before
@@ -57,11 +66,12 @@ function _brm_svi_device_problem(t)
     partition = t.partition.context
     bound_data = source -> _rk_jax_bound_data(partition.bound, source)
     (; backend=t.m.backend, partition, bound_data, factor_buckets, selections...,
-        kernels=_rk_svi_kernels(), expected_layout=t.m.backend.model.layout, owner,
+        kernels=_rk_svi_kernels(), global_clip=_BRM_SVI_GLOBAL_CLIP,
+        expected_layout=t.m.backend.model.layout, owner,
         levels=_brm_svi_unit_levels(t), observation_units=t.plan.labels,
         point=t.m.unit, coordinates=t.m.view.coordinates, t.globals, t.units,
         t.touched, t.prior_mean, t.sd_prior, centering=_brm_svi_centering(t),
-        t.fields, t.previous)
+        t.fields, field_sweep=get(t, :field_sweep, nothing), t.previous)
 end
 
 function _rk_jax_bound_data end
@@ -77,19 +87,20 @@ function _brm_gpu_execution(info)
 end
 
 function _brm_svi_execute!(fit!, ::Nothing, target, run, controls)
-    fit!(nothing)
+    fit!(nothing, identity)
     (; device=:cpu, backend=:julia)
 end
 
 function _brm_svi_execute!(fit!, runner, target, run, controls)
     advanced = false
-    execution = runner(_brm_svi_device_problem(target), run, controls) do step!
+    function advance(step!, synchronize! = identity)
         advanced && error("GPU fitting runtime called advance more than once")
         step! === nothing && error("GPU fitting runtime supplied no iteration method")
-        fit!(step!)
+        fit!(step!, synchronize!)
         advanced = true
         nothing
     end
+    execution = runner(advance, _brm_svi_device_problem(target), run, controls)
     advanced || error("GPU fitting runtime returned before advancing the fit")
     _brm_gpu_execution(execution)
 end

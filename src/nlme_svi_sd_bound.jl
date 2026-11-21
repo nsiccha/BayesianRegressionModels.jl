@@ -120,8 +120,8 @@ function _brm_svi_bound_sd!(q, sd, factor)
         for j in 1:r
             v += q.Β[k, j]^2
         end
-        v > b^2 || continue
-        f = b / sqrt(v)
+        f = _svi_sd_shrink(v, b)
+        f == 1.0 && continue
         q.ρ[k] += log(f)
         for j in 1:r
             q.Β[k, j] *= f

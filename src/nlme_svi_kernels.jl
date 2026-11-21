@@ -13,6 +13,52 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         result = count ./ (batch_size .* probability)
         return result
     end),
+    global_gradient=:(function _svi_global_gradient(w, epsilon, eta, scale, entropy_diagonal, entropy_loading)
+        grad_scale = w .* epsilon .* scale .+ entropy_diagonal
+        grad_loading = w * transpose(eta) .+ entropy_loading
+        result = vcat(w, grad_scale, vec(grad_loading))
+        return result
+    end),
+    global_step_scale=:(function _svi_global_step_scale(log_scale, loading, mean_scale, rank_step)
+        row_scale = exp.(log_scale)
+        loading_scale = rank_step .* repeat(row_scale, size(loading, 2))
+        result = vcat(mean_scale, ones(length(log_scale)), loading_scale)
+        return result
+    end),
+    batch_clip=:(function _svi_batch_clip(weights, multiplier)
+        result = multiplier * sqrt(maximum(weights))
+        return result
+    end),
+    clip_gradient=:(function _svi_clip_gradient(gradient, variance, correction, clip)
+        limit = clip .* sqrt.(variance ./ correction)
+        result = ifelse.(variance .== 0, gradient, clamp.(gradient, .-limit, limit))
+        return result
+    end),
+    sd_shrink=:(function _svi_sd_shrink(variance, bound)
+        result = ifelse.(isfinite.(bound) .& (variance .> bound .^ 2), bound ./ sqrt.(variance), 1.0)
+        return result
+    end),
+    # Both curvature designs use the same positive-diagonal root and cap the
+    # mean's displacement in standard deviations of its old factor.
+    precision_root=:(function _svi_precision_root(r, divisor)
+        result = transpose(r) .* transpose(sign.(diag(r))) ./ divisor
+        return result
+    end),
+    mean_trust=:(function _svi_mean_trust(root, delta, trust)
+        result = min(1.0, trust / norm(transpose(root) * delta))
+        return result
+    end),
+    curvature_axis=:(function _svi_curvature_axis(w, epsilon)
+        a = norm(w)
+        b = norm(epsilon)
+        direction = w ./ ifelse(a == 0, 1.0, a) .+ epsilon ./ ifelse(b == 0, 1.0, b)
+        n = norm(direction)
+        active = (a != 0) & (b != 0) & (n != 0)
+        lambda = ifelse(active, (dot(w, epsilon) + a * b) / 2, 0.0)
+        axis = ifelse.(active, direction ./ ifelse(n == 0, 1.0, n), 0.0)
+        result = (lambda, axis)
+        return result
+    end),
     adam=:(function _svi_adam(x, moment, variance, gradient, beta1, beta2, correction1, correction2, rate)
         next_moment = beta1 .* moment .+ (1 - beta1) .* gradient
         next_variance = beta2 .* variance .+ (1 - beta2) .* gradient .^ 2

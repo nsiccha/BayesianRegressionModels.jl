@@ -351,6 +351,20 @@ end
         @test Set(last.(blocks)) == Set((:exploring, :settling, :polishing))
         @test any(b -> first(b) > 1, blocks)
     end
+    # Ordinary windows in exploration read only the trace. Full factors stay
+    # on the device until this call returns its optimizer checkpoint.
+    q = S._brm_svi_params(t, [0.7], S.MeanFieldGlobal(); global_scale=0.2, unit_scale=1.0)
+    exploring = merge(c, (; min_windows=100))
+    run = S._brm_svi_run(Xoshiro(12), q, exploring, t)
+    pulls = Tuple{Int,Symbol}[]
+    function explore_step!(n, phase)
+        for _ in 1:n
+            S._brm_svi_numerical_step!(run, t, exploring, phase)
+        end
+    end
+    S._brm_svi_fit!(run, t, exploring; stop_after=37, device_step! = explore_step!,
+        synchronize! = what -> push!(pulls, (run.iteration, what)))
+    @test pulls == [(37, :state)]
 end
 
 @testset "lazy local averages equal averages of every iterate" begin

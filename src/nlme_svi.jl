@@ -533,11 +533,7 @@ const _BRM_SVI_GLOBAL_CLIP = 10.0
 function _brm_svi_clip(opt::_BRMSVIAdam, g, clip)
     isfinite(clip) && opt.t > 0 || return g
     b2 = 1 - opt.β2^opt.t
-    bounded = map(g, opt.v) do gi, vi
-        iszero(vi) && return gi
-        limit = clip * sqrt(vi / b2)
-        clamp(gi, -limit, limit)
-    end
+    bounded = _svi_clip_gradient(g, opt.v, b2, clip)
     bounded == g || (opt.clipped += 1)
     bounded
 end
@@ -569,9 +565,7 @@ end
 function _brm_svi_global_gradient(q, w, ε, η)
     h = _brm_svi_global_geometry(q)
     diagonal, loading = _brm_svi_entropy_gradients(h, q.Β)
-    gρ = w .* ε .* h.s .+ diagonal
-    gΒ = w * η' .+ loading
-    vcat(w, gρ, vec(gΒ))
+    _svi_global_gradient(w, ε, η, h.s, diagonal, loading)
 end
 
 # A scale-preconditioned ("whitened") step: μ moves in units of a square root of
@@ -616,14 +610,10 @@ function _brm_svi_exploration_global_step!(opt, q, x, grad, lr; clip=Inf)
     r = size(q.Β, 2)
     r == 0 && return _brm_svi_step!(opt, x, grad, lr; clip)
     D = length(q.μ)
-    scale = repeat(exp.(q.ρ), r)
-    rank = 2D+1:length(x)
-    grad = copy(grad)
-    grad[rank] .*= scale
+    scale = _svi_global_step_scale(q.ρ, q.Β, ones(D), 1.0)
     step = zeros(length(x))
-    _brm_svi_step!(opt, step, grad, lr; clip)
-    x[1:2D] .+= view(step, 1:2D)
-    x[rank] .+= scale .* view(step, rank)
+    _brm_svi_step!(opt, step, grad .* scale, lr; clip)
+    x .+= scale .* step
     x
 end
 
@@ -634,11 +624,7 @@ end
 #
 #
 function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
-    r = size(q.Β, 2)
-    r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
-    D = length(q.μ)
-    s = exp.(q.ρ)
-    scale = vcat(s, ones(D), rank .* repeat(s, r))
+    scale = _svi_global_step_scale(q.ρ, q.Β, exp.(q.ρ), rank)
     step = zeros(length(x))
     _brm_svi_step!(opt, step, grad .* scale, lr; clip)
     x .+= scale .* step
@@ -657,15 +643,10 @@ _brm_svi_rank_step_ratio(c) = min(1.0, c.lr_global / c.polish_lr)
 # eigensolver and costs O(d²) for the triangular solve.
 function _brm_svi_unit_curvature(U, gd, εi)
     w = -(U \ gd)
-    a, b = norm(w), norm(εi)
-    (iszero(a) || iszero(b)) && return 0.0, zero(w)
-    λ = (dot(w, εi) + a * b) / 2
+    λ, e = _svi_curvature_axis(w, εi)
     isfinite(λ) || throw(ArgumentError(
         "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
-    e = w ./ a .+ εi ./ b
-    n = norm(e)
-    # ŵ = -ε̂: the estimate is negative semidefinite, its positive part zero.
-    iszero(n) ? (0.0, zero(w)) : (λ, e ./ n)
+    λ, e
 end
 
 # The largest relative change of a subject's precision in one step: no
@@ -731,9 +712,9 @@ function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β; rank=1.0)
     r = max(abs(λ - 1), length(e) > 1 ? 1.0 : 0.0)
     β = min(β, _BRM_SVI_UNIT_TRUST / r)
     R = qr(vcat(Matrix(U'), U \ (q.Λ[i] .+ β .* G))).R
-    L = LowerTriangular(R' * Diagonal(sign.(diag(R))) ./ sqrt(2))
+    L = LowerTriangular(_svi_precision_root(R, sqrt(2)))
     Δ = β .* (L' \ (L \ gz))
-    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
+    Δ .*= _svi_mean_trust(U, Δ, _BRM_SVI_UNIT_MEAN_TRUST)
     q.U[i] .= L
     q.Λ[i] .= L * L'
     q.M[i] .+= Δ
@@ -886,9 +867,9 @@ function _brm_svi_newton_factor(U, gz, S; positive=true)
     b = _BRM_SVI_REOPT_PRECISION_BOUND
     f = clamp.(F.values, 1 / b, b)
     R = qr(Matrix((U * F.vectors * Diagonal(sqrt.(f)))')).R
-    L = LowerTriangular(R' * Diagonal(sign.(diag(R))))
+    L = LowerTriangular(_svi_precision_root(R, 1.0))
     Δ = L' \ (L \ gz)
-    Δ .*= min(1.0, _BRM_SVI_REOPT_MEAN_TRUST / norm(U' * Δ))
+    Δ .*= _svi_mean_trust(U, Δ, _BRM_SVI_REOPT_MEAN_TRUST)
     Matrix(L), Δ
 end
 function _brm_svi_unit_step_newton!(q, i, gz, S; positive=true)
@@ -992,9 +973,9 @@ function _brm_svi_unit_step_full!(q, i, gz, S, β; positive=true)
     β = r > 0 ? min(β, _BRM_SVI_UNIT_TRUST / r) : β
     # U⁻¹(Λ + βG) = (I + βĜ) Uᵀ.
     R = qr(vcat(Matrix(U'), (I + β .* Ĝ) * Matrix(U'))).R
-    L = LowerTriangular(R' * Diagonal(sign.(diag(R))) ./ sqrt(2))
+    L = LowerTriangular(_svi_precision_root(R, sqrt(2)))
     Δ = β .* (L' \ (L \ gz))
-    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
+    Δ .*= _svi_mean_trust(U, Δ, _BRM_SVI_UNIT_MEAN_TRUST)
     q.U[i] .= L
     q.Λ[i] .= L * L'
     q.M[i] .+= Δ
@@ -1474,7 +1455,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
     # carries weight about 1 / π, so its coordinates' gradients are about √w times
     # their rms when drawn, and the batch's largest weight bounds every unit in it.
-    clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
+    clip = _svi_batch_clip(weights, _BRM_SVI_GLOBAL_CLIP)
     whiten ? _brm_svi_polish_global_step!(global_opt, q, x, grad, lr_global; clip, rank=rank_step) :
         _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
@@ -1891,8 +1872,8 @@ end
 
 # The native loop and an accelerator finishing a block of iterations use the
 # same window statistics, centering activation, phase changes and stopping test.
-function _brm_svi_finish_interval!(run, t, c, phase)
-    it, W, q = run.iteration, c.window, run.q
+function _brm_svi_finish_interval!(run, t, c, phase, synchronize! = identity)
+    it, W = run.iteration, c.window
     polishing = phase === :polishing
     it % W == 0 && push!(run.windows, _brm_svi_window(view(run.trace, it-W+1:it)))
     if polishing && it - run.polish_start >= _brm_svi_polish_iterations(run, c)
@@ -1901,24 +1882,31 @@ function _brm_svi_finish_interval!(run, t, c, phase)
     end
     it % W == 0 || return :iteration
     windows = run.windows
-    explore = _brm_svi_windows_after(windows, max(_brm_svi_centering_activation(q), 0))
+    explore = _brm_svi_windows_after(windows, max(_brm_svi_centering_activation(run.q), 0))
     polishing && return :window
     if phase === :settling
         explored = _brm_svi_explored(run, c)
         # Polishing continues settling's step and its Adam moments.
-        settled = _brm_svi_settled(windows, explored, c) && _brm_svi_stationary!(run, c)
+        settled = _brm_svi_settled(windows, explored, c)
+        if settled && _brm_svi_stationarity_enabled(c)
+            synchronize!(:histories)
+            settled = _brm_svi_stationary!(run, c)
+        end
         _brm_svi_stationarity_enabled(c) && (_brm_svi_stationarity_state(run).settled = settled)
-        (settled || _brm_svi_budget_polish_due(it, c) ||
-            length(windows) - explored >= _brm_svi_settle_windows(c)) &&
-            _brm_svi_start_polishing!(run, q, it)
+        if settled || _brm_svi_budget_polish_due(it, c) ||
+                length(windows) - explored >= _brm_svi_settle_windows(c)
+            synchronize!(:state)
+            _brm_svi_start_polishing!(run, run.q, it)
+        end
     elseif length(explore) >= max(c.min_windows, c.patience + 1) &&
             _brm_svi_exploration_stalled(explore, length(explore), c)
         # A deferred fit's ELBO has stopped climbing: its opening transient has
         # passed, so it centres now and explores on (`LearnedCentering`'s `delay`,
         # src/nlme_svi_centering.jl). The drift gate below governs where exploration
         # ends, not this: a global's slow drift is no transient.
-        if _brm_svi_centering_deferred(q)
-            _brm_svi_activate_centering!(q, t, length(windows))
+        if _brm_svi_centering_deferred(run.q)
+            synchronize!(:state)
+            _brm_svi_activate_centering!(run.q, t, length(windows))
             _brm_svi_centering_activated!(run, c)
             return :window
         end
@@ -1926,6 +1914,7 @@ function _brm_svi_finish_interval!(run, t, c, phase)
         # settling's scale-relative step cannot finish its move: exploration goes on
         # while the drift gate reads one, up to half the budget
         # (src/nlme_svi_stationarity.jl).
+        _brm_svi_stationarity_enabled(c) && synchronize!(:histories)
         drift = _brm_svi_exploration_drift(run, c)
         previous_drift = drift === nothing ? nothing :
             get(_brm_svi_stationarity_state(run).report, :drift, nothing)
@@ -1941,11 +1930,12 @@ function _brm_svi_finish_interval!(run, t, c, phase)
         # without certifying it. It does not gate this step-size improvement.
         # With no settling phase, exploration must pass before averaging starts.
         !stationary && _brm_svi_settle_windows(c) == 0 && return :window
+        synchronize!(:state)
         _brm_svi_stationarity_explored!(run, c)
         clipped = run.adam.clipped
-        run.adam = _brm_svi_adam(q, c.polish_lr)
+        run.adam = _brm_svi_adam(run.q, c.polish_lr)
         run.adam.clipped = clipped
-        _brm_svi_settle_windows(c) > 0 || _brm_svi_start_polishing!(run, q, it)
+        _brm_svi_settle_windows(c) > 0 || _brm_svi_start_polishing!(run, run.q, it)
     end
     :window
 end
@@ -1990,7 +1980,7 @@ _brm_svi_phase(run, c) = _brm_svi_polishing(run) ? :polishing :
 # Neither advances the random stream or writes to the run.
 function _brm_svi_fit!(run, t, c; stop_after=typemax(Int), checkpoint_every=c.window,
         save=nothing, checkpoint=identity, node=nothing, observe=nothing,
-        observe_every=c.window, device_step! = nothing)
+        observe_every=c.window, device_step! = nothing, synchronize! = identity)
     commit() = save === nothing || save(checkpoint(run))
     taken = 0
     while !_brm_svi_finished(run, c) && taken < stop_after
@@ -2008,13 +1998,14 @@ function _brm_svi_fit!(run, t, c; stop_after=typemax(Int), checkpoint_every=c.wi
             device_step!(n, phase)
             run.iteration == before + n && length(run.trace) == run.iteration ||
                 error("SVI accelerator did not synchronize the requested $n iterations")
-            _brm_svi_finish_interval!(run, t, c, phase)
+            _brm_svi_finish_interval!(run, t, c, phase, synchronize!)
         end
         taken += run.iteration - before
         if status === :window
             try
                 _brm_throw_if_interrupted(node)
             catch
+                synchronize!(:state)
                 commit()
                 observe === nothing || observe(:interrupted)
                 rethrow()
@@ -2022,9 +2013,15 @@ function _brm_svi_fit!(run, t, c; stop_after=typemax(Int), checkpoint_every=c.wi
             _brm_update_progress!(node, _brm_svi_progress_message(run, c))
         end
         (_brm_svi_finished(run, c) || taken >= stop_after) && continue
-        save === nothing || run.iteration % checkpoint_every != 0 || commit()
-        observe === nothing || run.iteration % observe_every != 0 || observe(:running)
+        saving = save !== nothing && run.iteration % checkpoint_every == 0
+        observing = observe !== nothing && run.iteration % observe_every == 0
+        if saving || observing
+            synchronize!(:state)
+            saving && commit()
+            observing && observe(:running)
+        end
     end
+    synchronize!(:state)
     commit()
     observe === nothing || observe(_brm_svi_end_status(run, c))
     run
@@ -2862,12 +2859,13 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 seconds, execution, draws = _brm_with_serial_blas() do
                     started_fit = time_ns()
                     execution = _brm_enter_phase(phases.fit) do phase
-                        _brm_svi_execute!(runner, t, run, c) do step!
+                        _brm_svi_execute!(runner, t, run, c) do step!, synchronize!
                             _brm_svi_fit!(run, t, c; stop_after=something(stop_after, typemax(Int)),
                                 checkpoint_every=something(checkpoint_every, c.window), save,
                                 checkpoint=_ -> _brm_svi_detach(state), node=phase,
                                 observe=_brm_svi_observer(snapshot, t, state, snapshot_draws),
-                                observe_every=something(snapshot_every, c.window), device_step! = step!)
+                                observe_every=something(snapshot_every, c.window), device_step! = step!,
+                                synchronize!)
                         end
                     end
                     seconds = (time_ns() - started_fit) / 1e9
