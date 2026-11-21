@@ -13,7 +13,12 @@
 #     named plans and never by `:auto`, refused for non-Normal priors, with
 #     priors read from data fields, `constant`s and per-level data vectors
 #     integrating exactly as their literal twins;
-#   - the refusals name their reason.
+#   - the refusals name their reason;
+#   - its speed-ups change no result (snag `brm-laplace-inte-e0991a0f`): fixed
+#     coefficient C maps equal probed ones, design values started from the
+#     centre's modes equal those of a search from the prior's, the draws reuse
+#     the design's searches and equal searching each drawn point again, and
+#     brm_laplace_mode's first L-BFGS step stays where the searches converge.
 # RUN: julia --project=test test/laplace_integration.jl
 include(joinpath(@__DIR__, "fitting_packages.jl"))
 using WarmupHMC   # loads Optim, which brm_laplace_mode needs
@@ -388,4 +393,58 @@ end
     @test_throws "not negative definite" brm_laplace_integration(p; point,
         curvature=(; hessian=[1.0 0.0; 0.0 1.0], positive_definite=false))
     @test_throws "point has length 3" brm_laplace_integration(p; point=zeros(3))
+end
+
+# A Poisson model whose marginal's gradient at the prior median is 150 in the
+# log scale. On epil such a first L-BFGS step went to log scales where a mode
+# search ran to its iteration limit (snag `brm-laplace-inte-e0991a0f`); the
+# step rule is checked on its own below, with a line search's state.
+mutable struct LintLineSearchState
+    s::Vector{Float64}
+    alpha::Float64
+end
+@stestset "integration speed-ups change no result" begin
+    first_step = Base.get_extension(BRM, :BayesianRegressionModelsOptimExt)._BRMUnitFirstStep
+    rule = first_step(true)
+    state = LintLineSearchState([30.0, 40.0], NaN)
+    rule(nothing, state, 0.0, 0.0, nothing)
+    @test state.alpha ≈ 1 / 50           # the first trial step: unit length
+    rule(nothing, state, 0.0, 0.0, nothing)
+    @test state.alpha == 1.0             # later ones: L-BFGS's own length
+    short = LintLineSearchState([0.3, 0.4], NaN)
+    first_step(true)(nothing, short, 0.0, 0.0, nothing)
+    @test short.alpha == 1.0             # a first step already shorter is kept
+    rng = Xoshiro(11)
+    ng, per = 30, 4
+    g = repeat(1:ng; inner=per)
+    x = randn(rng, ng * per)
+    b = 0.6 .* randn(rng, ng)
+    count = [rand(rng, Poisson(exp(2.5 + 0.3 * x[i] + b[g[i]]))) for i in eachindex(g)]
+    rk = RKBRMI(@brm (; g, x, count, sd_scale=1 / -log(0.01)) begin
+        log(mu) ~ 1 + x + (1 | g)
+        sd(mu, g) ~ Exponential(sd_scale)
+        effect(mu, :) ~ Normal(0.0, 10.0)
+        count ~ Poisson(mu)
+    end)
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:g, :coefficients))
+    # the coefficients' C maps are fixed and copied; the random effects' move
+    # with their scale and are probed at every point
+    @test p.cfixed == [b.group === :coefficients for b in p.blocks]
+    q = deepcopy(p)
+    fill!(q.cfixed, false)
+    for φ in ([-1.0], [0.5], [-3.0])
+        v, gr = LogDensityProblems.logdensity_and_gradient(p, φ)
+        vq, gq = LogDensityProblems.logdensity_and_gradient(q, φ)
+        @test v ≈ vq rtol=1e-12
+        @test gr ≈ gq rtol=1e-10
+    end
+    md = brm_laplace_mode(p)
+    @test md.diagnostics.converged
+    point = md.draws[p.population, 1]
+    out = brm_laplace_integration(p; point, rng=Xoshiro(5))
+    cold = deepcopy(p)
+    @test [LogDensityProblems.logdensity(cold, out.points[:, k]) for k in axes(out.points, 2)] ≈
+        out.log_density rtol=1e-11
+    ref, _ = BRM._brm_lint_draws(cold, out.points, out.weights, 1000, Xoshiro(5), 0)
+    @test out.draws ≈ ref rtol=1e-9 atol=1e-9
 end

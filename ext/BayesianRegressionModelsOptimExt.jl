@@ -6,7 +6,25 @@ module BayesianRegressionModelsOptimExt
 using BayesianRegressionModels
 using LogDensityProblems
 using Optim
+using LinearAlgebra: norm
 const BRM = BayesianRegressionModels
+
+# L-BFGS's first direction is the gradient itself, whose length carries no
+# scale: at a Laplace marginal's prior median it can be 60 in a log scale, and a
+# trial step that long puts the scales where the integrated effects' curvature
+# is lost to rounding and each evaluation's mode search runs to its iteration
+# limit (snag `brm-laplace-inte-e0991a0f`: 220 ms for one such trial on epil).
+# So the first trial step is at most of unit length, as liblbfgs and LBFGS++
+# start; later steps use the curvature L-BFGS has learned, at full length.
+mutable struct _BRMUnitFirstStep
+    first::Bool
+end
+function (s::_BRMUnitFirstStep)(ls, state, phi_0, dphi_0, df)
+    n = norm(state.s)
+    state.alpha = s.first && n > 1 ? 1 / n : 1.0
+    s.first = false
+    state.alpha
+end
 
 # Typed, so it adds a method beside src's fallback instead of overwriting it,
 # which precompilation refuses.
@@ -23,7 +41,8 @@ function BRM._brm_laplace_mode(
     end
     g!(G, φ) = (fg!(G, φ); G)
     objective = OnceDifferentiable(f, g!, fg!, φ0)
-    method = LBFGS(; linesearch=Optim.LineSearches.BackTracking())
+    method = LBFGS(; alphaguess=_BRMUnitFirstStep(true),
+        linesearch=Optim.LineSearches.BackTracking())
     result = optimize(objective, φ0, method, Optim.Options(; g_abstol, iterations))
     φ = Optim.minimizer(result)
     # the integrated effects' modes at the mode itself
