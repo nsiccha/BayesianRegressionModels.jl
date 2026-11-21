@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.359
+
+- A record component's own HSGP prior can name its validity floor:
+  `length_scale(trend, hsgp(entry.time)) ~ Uniform(length_scale_floor, entry.span)`
+  inside `@brm function comp(entry)`, bound as
+  `for entry in records; blocks[entry.id] ~ comp(entry); end`, builds on
+  SBBRMI and RKBRMI. Before, both refused it with ``component `comp` reads
+  undeclared input `length_scale_floor` `` (snag `component-length-32f07da1`).
+  Each member's prior reads that member's own floor, as the model-scope
+  prior does. The name stays refused anywhere else in a component.
+- A component's prior address can spell its term with a record field,
+  `sd(trend, hsgp(entry.time))`, outside a declaration guard too. Before,
+  the `@brm function` definition failed with ``hsgp(...) in a prior address
+  takes plain column names``, while the same address inside
+  `if entry.flag ... end` was accepted.
+- `brm_length_scale_floor(d, logical; term, submodel=(collection, key))` reads
+  one member's floor, e.g.
+  `brm_length_scale_floor(d, :trend; term=:hsgp_entry_time, submodel=(:blocks, :left))`.
+  It works for a member whose formula reads a margin of the parent's block
+  (`parentblock`), which `brm_term_coordinates(...; submodel)` cannot trace
+  yet.
+
 ## 0.2.358
 
 - `brm_laplace_integration` is about six times faster on a sparse Laplace

@@ -2050,6 +2050,10 @@ function _term_address_qualifiers(x::Expr)
     isempty(entries) ? "" : ";" * join(("$k=$(repr(v))" for (k, v) in entries), ",")
 end
 
+_is_record_field_address(a) =
+    Meta.isexpr(a, :., 2) && a.args[1] isa Symbol &&
+    a.args[2] isa QuoteNode && a.args[2].value isa Symbol
+
 function _term_address_key(x::Expr)
     head = x.args[1]::Symbol
     names = Symbol[]
@@ -2062,6 +2066,12 @@ function _term_address_key(x::Expr)
             push!(names, a.value)
         elseif head === :gmrf && Meta.isexpr(a, :tuple, 2) && all(v -> v isa Symbol, a.args)
             push!(names, Symbol("(", join(a.args, ","), ")"))
+        elseif _is_record_field_address(a)
+            # A record component's `hsgp(entry.time)`, spelled as its formula
+            # spells the term. Binding the component over records makes each
+            # field read one data input before the body is parsed again
+            # (`_brm_project_record`), so this spelling only has to parse here.
+            push!(names, Symbol(a.args[1], ".", a.args[2].value))
         else
             error("@brm: `$head(...)` in a prior address takes plain column " *
                   "names; got $(repr(a)). Address the term the way the formula " *

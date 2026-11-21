@@ -356,10 +356,33 @@ function _brm_component_instance(component::BRMComponent, call::ExprColumn)
     # its interface. An undeclared name must never capture a caller parameter.
     for (key, column) in _brm_operation_entries(model)
         (key in component.inputs || key === :Inf) && continue
+        key === _BRM_LENGTH_SCALE_FLOOR && _brm_floor_names_term_floors(model) && continue
         column isa NamedColumn && parent(column) isa MissingColumn &&
             throw(ArgumentError("component `$(component.name)` reads undeclared input `$key`"))
     end
     model
+end
+
+# `length_scale_floor` in a call's own `length_scale(<lp|:>, hsgp(...))` prior
+# names that term's validity floor, which preparation substitutes, exactly as at
+# model scope (decision 1fk9b29). Preparation also gives the model-scope
+# refusal for it in any other term-parameter statement. Any other statement
+# reading the name keeps the undeclared-input refusal above.
+function _brm_floor_names_term_floors(model)
+    for (key, column) in _brm_operation_entries(model)
+        key === _BRM_LENGTH_SCALE_FLOOR && continue
+        operation = column isa NamedColumn ? parent(column) : column
+        _BRM_LENGTH_SCALE_FLOOR in _brm_operation_references!(Set{Symbol}(), operation) ||
+            continue
+        _brm_is_term_prior(operation) || return false
+    end
+    true
+end
+_brm_is_term_prior(_operation) = false
+function _brm_is_term_prior(operation::ExprColumn{typeof(~)})
+    lhs = first(getargs(operation))
+    lhs isa ExprColumn{typeof(effect)} && !isempty(getargs(lhs)) &&
+        first(getargs(lhs)) in _TERM_PRIOR_CLASSES
 end
 
 function _brm_check_component_recursion(component::BRMComponent,

@@ -3052,7 +3052,8 @@ function _brm_member_element_coordinates(output::BRMOutput, constrained_names)
 end
 
 """
-    brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
+    brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol,
+                           submodel=nothing)
 
 The fitted length-scale validity floor of one `hsgp` term: the value
 `length_scale_floor` stands for in that term's `length_scale(...)` prior and
@@ -3074,18 +3075,32 @@ floor = brm_length_scale_floor(d, :mu; term=:hsgp_t)
 "allowed length-scale interval [\$(round(floor; sigdigits=3)), 24.0]"
 ```
 
+`submodel=(collection, key)` reads one member of a component bound over
+records (`for entry in records; blocks[entry.id] ~ comp(entry); end`): the
+floor of that member's own term, which `length_scale_floor` stands for in the
+member's `length_scale(trend, hsgp(entry.time))` prior. Its term label spells
+the record field as the member's formula reads it, `term=:hsgp_entry_time`.
+
 A term that is not an `hsgp` term, or an address that names no unique term,
 errors with the available labels.
 """
-function brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
-    entry = _brm_term_entry(d, logical, e -> e.term === term, "term `$term`")
+function brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol,
+                                submodel=nothing)
+    # A member's own program reads ports that only the parent's call binds, so
+    # it cannot be traced alone; its floor is read from that program untraced.
+    plan = isnothing(submodel) ? d.plan :
+        _brm_plan_of(last(_brm_member_fit(d, submodel, "brm_length_scale_floor")))
+    entry = _brm_term_entry(plan.parent, logical, e -> e.term === term, "term `$term`")
     getf(entry.value) === hsgp || error(
         "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
         "is a `$(nameof(getf(entry.value)))` term; only an `hsgp` term has a " *
         "length-scale validity floor")
-    owner = _brm_term_owner_output(d, logical, entry).declaration
-    floor = get(owner.keywords, :rho_lower, nothing)
-    value = floor isa Symbol ? get(d.plan.data, floor, nothing) : floor
+    floor = if isnothing(submodel)
+        get(_brm_term_owner_output(d, logical, entry).declaration.keywords, :rho_lower, nothing)
+    else
+        _brm_term_call_keyword(plan, logical, entry, :rho_lower)
+    end
+    value = floor isa Symbol ? get(plan.data, floor, nothing) : floor
     value isa Union{Real,AbstractVector{<:Real}} || error(
         "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
         "has no fitted validity floor (found $(repr(floor))). Re-reflect the " *
@@ -3096,15 +3111,17 @@ end
 # The one formula term on `logical` that `select` accepts. `what` names the
 # selection in the error, so a public label lookup and an internal semantic
 # lookup (e.g. by HSGP axes) report the same available labels.
-function _brm_term_entry(d::BRMDescriptor, logical::Symbol, select, what)
-    predictors = [lp for lp in linear_predictors(d.plan.parent)
+_brm_term_entry(d::BRMDescriptor, logical::Symbol, select, what) =
+    _brm_term_entry(d.plan.parent, logical, select, what)
+function _brm_term_entry(brmi, logical::Symbol, select, what)
+    predictors = [lp for lp in linear_predictors(brmi)
                   if lp.name === logical]
     length(predictors) == 1 || error(
         "brm_descriptor: logical predictor `$logical` resolves to " *
         "$(length(predictors)) formula declarations; expected exactly one " *
         "public term-parameter address.")
 
-    all_entries = _brm_term_coordinate_entries(d.plan.parent, logical)
+    all_entries = _brm_term_coordinate_entries(brmi, logical)
     entries = [e for e in all_entries if select(e)]
     length(entries) == 1 || error(
         "brm_descriptor: $what occurs $(length(entries)) times on logical " *
@@ -3160,6 +3177,36 @@ function _brm_term_owners(d, logical::Symbol, entry)
         isempty(owners) || break
     end
     owners
+end
+
+# A keyword argument of the call that binds a term's carrier in `plan`'s
+# untraced program, `carrier ~ submodel(; key = value, ...)`. The carrier is the
+# one the emitter recorded for this occurrence of the term, as in
+# `_brm_term_owners`.
+function _brm_term_call_keyword(plan, logical::Symbol, entry, key::Symbol)
+    emitted_lp = _sb_lp_emitted_name(logical, entry.link)
+    term_key = _brm_term_full_key(entry.value)
+    carriers = Set(k for (k, b) in plan.bindings if
+        get(b, :term_predictor, nothing) === emitted_lp &&
+        get(b, :term_key, nothing) === term_key &&
+        get(b, :term_scope, :population) === :population &&
+        get(b, :term_occurrence, entry.occurrence) == entry.occurrence)
+    found = Any[]
+    for statement in plan.model.model.args
+        Meta.isexpr(statement, :call, 3) && statement.args[1] === :~ &&
+            _sb_plan_lhs_name(statement.args[2]) in carriers || continue
+        call = statement.args[3]
+        Meta.isexpr(call, :call) && length(call.args) >= 2 &&
+            Meta.isexpr(call.args[2], :parameters) || continue
+        for argument in call.args[2].args
+            Meta.isexpr(argument, :kw, 2) && argument.args[1] === key &&
+                push!(found, argument.args[2])
+        end
+    end
+    length(found) == 1 || error(
+        "brm_descriptor: term `$(entry.term)` on logical predictor `$logical` " *
+        "binds $(length(found)) `$key` arguments in its program; expected one.")
+    only(found)
 end
 
 # The term-prior class behind each public parameter role a known value can hold.
