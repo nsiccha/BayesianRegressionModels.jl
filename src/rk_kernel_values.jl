@@ -985,7 +985,7 @@ function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
     _is_brm_ar1_normal(statement) &&
         return _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
     _rk_is_cell_latent(statement) || return _rk_kernel_bind_calls(statement,
-        kernel.scope, bindings, taken)
+        kernel.scope, bindings, taken; defs)
     lhs, marker = statement.args
     law = only(marker.args[2:end])
     callable = _rk_kernel_latent_family(kernel.scope, law, kernel.name, lhs)
@@ -1004,12 +1004,12 @@ function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
         plain = Expr(:call, first(bounded.base.args),
             lower, bounded.base.args[2:end]...)
     end
-    args = Any[_rk_kernel_bind_calls(arg, kernel.scope, bindings, taken)
+    args = Any[_rk_kernel_bind_calls(arg, kernel.scope, bindings, taken; defs)
         for arg in plain.args[2:end]]
     # A latent through a bijection keeps it and its total on the marker for
     # the plate.
     bijection = spec === nothing ? () : (QuoteNode(spec.bijection),
-        _rk_kernel_bind_calls(spec.total, kernel.scope, bindings, taken))
+        _rk_kernel_bind_calls(spec.total, kernel.scope, bindings, taken; defs))
     Expr(:(=), lhs, Expr(:call, _rk_cell_latent, Expr(:call, family, args...), bijection...))
 end
 
@@ -1023,7 +1023,7 @@ function _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
         doc=_RK_AR1_NORMAL_DOCS[variant])
     arguments = Any[_brm_ar1_normal_series(spec, :fill)...]
     spec.time === nothing || push!(arguments, spec.time)
-    bound = Any[_rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)
+    bound = Any[_rk_kernel_bind_calls(argument, kernel.scope, bindings, taken; defs)
         for argument in arguments]
     Expr(:call, :~, spec.response, Expr(:call, submodel, bound...))
 end
@@ -1411,10 +1411,53 @@ _rk_kernel_function_arguments(callable) = ()
 _rk_kernel_named(value) = value isa Symbol || value isa GlobalRef || Meta.isexpr(value, :.)
 
 # Stan broadcasts scalar addition/subtraction over vectors and matrices.
-# Julia's undotted operators require matching array operands, so bind those
-# Stan cases at the cell edge while leaving all other dispatch unchanged.
-# Unary `+`/`-` mean the same in both languages and keep their authored
-# spelling; a splatted call may still reach the one-operand methods.
+# Julia's undotted operators require matching array operands, so a cell's
+# undotted binary `+`/`-` takes Stan's meaning while all other operands keep
+# Julia's. Unary `+`/`-` mean the same in both languages and keep their
+# authored spelling, and so does a broadcast `(+).(x, y)`, which already
+# combines a scalar with each entry.
+#
+# Each binary call is the program's `stan_add`/`stan_sub` kernel below, which
+# ReactiveKernels splices into the cell, so the type test and both arms are in
+# the graph rather than behind a helper returning a fresh array RK cannot own
+# (snag `rk-kernel-stan-a-cf3a16d7`). RK keeps the selected `x .+ y` arm as
+# cheap as an authored `x .+ y` once it lowers a branch that concrete types
+# decide as that arm (snag `type-decided-bra-2686ef6f`); until then the
+# branch costs one array per call. Only a splatted operand list, whose count
+# is unknown when emitting, calls the helper methods below.
+const _RK_STAN_BINARY_KERNELS = Dict{Symbol,Expr}(
+    :+ => :(stan_add(x, y) = begin
+        value = (typeof(x) <: Number && typeof(y) <: AbstractArray) ||
+            (typeof(x) <: AbstractArray && typeof(y) <: Number) ? x .+ y : x + y
+        return value
+    end),
+    :- => :(stan_sub(x, y) = begin
+        value = (typeof(x) <: Number && typeof(y) <: AbstractArray) ||
+            (typeof(x) <: AbstractArray && typeof(y) <: Number) ? x .- y : x - y
+        return value
+    end))
+const _RK_STAN_BINARY_DOCS = Dict{Symbol,Any}(
+    :+ => @_rk_definition_doc("""
+        Stan's `x + y`. A scalar and an array add entrywise, as `x .+ y`; any
+        other operands add as Julia's `x + y`."""),
+    :- => @_rk_definition_doc("""
+        Stan's `x - y`. A scalar and an array subtract entrywise, as `x .- y`;
+        any other operands subtract as Julia's `x - y`."""))
+
+# A cell's undotted `+`/`-` call with two or more operands, as Stan reads
+# it: the program's kernel for each operand pair, folded left
+# (`a + b + c` is `stan_add(stan_add(a, b), c)`). A splatted operand list,
+# or a call emitted without the program's definitions, binds the helper.
+function _rk_kernel_stan_arithmetic(defs, bindings, taken, head, operands)
+    if defs === nothing || any(operand -> Meta.isexpr(operand, :...), operands)
+        helper = head === :+ ? _rk_kernel_stan_add : _rk_kernel_stan_sub
+        return Expr(:call, _rk_value_callee!(bindings, helper, taken), operands...)
+    end
+    callee = _rk_shared_definition!(defs, taken, _RK_STAN_BINARY_KERNELS[head];
+        kernel=true, doc=_RK_STAN_BINARY_DOCS[head])
+    foldl((x, y) -> Expr(:call, callee, x, y), operands)
+end
+
 _rk_kernel_stan_add(x) = +x
 _rk_kernel_stan_add(x, y) = x + y
 _rk_kernel_stan_add(x::Number, y::AbstractArray) = x .+ y
@@ -1437,30 +1480,30 @@ end
 # Indices and range endpoints are integer arithmetic: Stan's scalar-array
 # broadcasting does not apply there, and RKPPL recognises a scan's lag reads
 # (`h[t - 1]`) and loop starts by their authored operators. `index` marks
-# such a position.
-function _rk_kernel_bind_calls(value, scope, bindings, taken; index=false)
+# such a position. `defs` holds the program's definitions, where a binary
+# `+`/`-` adds its kernel.
+function _rk_kernel_bind_calls(value, scope, bindings, taken; index=false, defs=nothing)
     value isa Expr || return value
     if Meta.isexpr(value, :call)
         call = _rk_statistic_call_parts(value, scope)
         if call !== nothing
             statistic = _rk_distribution_statistic!(
-                x -> _rk_kernel_bind_calls(x, scope, bindings, taken; index),
+                x -> _rk_kernel_bind_calls(x, scope, bindings, taken; index, defs),
                 bindings, call.callable, call.args, call.kwargs, taken, scope)
             statistic === nothing || return statistic
         end
     end
     integer = value.head === :ref || (value.head === :call && first(value.args) === :(:))
     args = Any[_rk_kernel_bind_calls(arg, scope, bindings, taken;
-        index=index || (integer && i > 1)) for (i, arg) in enumerate(value.args)]
+        index=index || (integer && i > 1), defs) for (i, arg) in enumerate(value.args)]
     # A broadcast `f.(args...)` carries its callee in the same first slot.
     if value.head === :call || _brm_is_broadcast_call(value)
         head = first(value.args)
         if head === :rep_vector
             args[1] = :fill
-        elseif head === :+ && !index && !_rk_kernel_unary_call(value)
-            args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_add, taken)
-        elseif head === :- && !index && !_rk_kernel_unary_call(value)
-            args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_sub, taken)
+        elseif value.head === :call && head in (:+, :-) && !index &&
+                !_rk_kernel_unary_call(value)
+            return _rk_kernel_stan_arithmetic(defs, bindings, taken, head, args[2:end])
         elseif head === :inv_logit && !isdefined(scope, head)
             # Stan's vectorized primitive need not be defined in the cell's
             # Julia scope. Bind its scalar and array Julia equivalent.
@@ -1524,7 +1567,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     selected = _rk_emit_cell_gmrf_supports!(statements, bindings, taken, slice.body)
     cell = Any[[_rk_kernel_cell_statement(statement, slice, defs, bindings, taken)
         for statement in slice.body];
-        [Expr(:(=), cells, _rk_kernel_bind_calls(value, kernel.scope, bindings, taken))
+        [Expr(:(=), cells, _rk_kernel_bind_calls(value, kernel.scope, bindings, taken; defs))
             for (cells, value) in outputs];
         [Expr(:(=), cells, value) for (cells, value) in rendered]]
     bound(input) = input.kind === :gather || haskey(kernel.columns, input.source)
@@ -1994,7 +2037,7 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
                     push!(outputs, (name, argument))
                 elseif route.route === :value
                     push!(after, Expr(:(=), name,
-                        _rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)))
+                        _rk_kernel_bind_calls(argument, kernel.scope, bindings, taken; defs)))
                 end
                 continue
             end
