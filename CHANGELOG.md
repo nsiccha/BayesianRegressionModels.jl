@@ -12,6 +12,29 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.361
+
+- `brm_nlme_view`, `brm_nlme_model` and `brm_svi_fit` read a model with no
+  random-effect block over its units: `subject_group` names them, a grouping
+  column the model reads, such as the `g` of a `@plate for p in groups(g)`.
+  Each unit holds the draws of the terms grouped by `g` (a grouped
+  `hsgp(x; by = g)`), or none, and `brm_svi_fit` gives it the latents its cells
+  declare (`m ~ Normal(0, 1)` in the cell), as it does with a block. Before,
+  every such model was refused: "the model has no subject-level random effects;
+  an NLME reading needs at least one `(... | group)` block" (snag
+  `brm-svi-fit-refu-d79b878a`). Without `subject_group` the refusal now says how
+  to name the units, and a `subject_group` the model does not read is refused by
+  name. NLMEEstimation's estimators (`brm_nlme_fit`'s FOCE(I), SAEM and
+  empirical Bayes) need at least one random effect and refuse units with none
+  ("NLMELayout: eta_blocks is empty").
+- Units that own no coordinate are declared to ReactiveKernelsPPL as
+  `partitioned = :none`, so a shared value with no row form that every cell
+  reads, such as the weights of a `cor = multigroup(Omega, tau)` HSGP, is
+  computed once. Before, the empty declaration left it undeclared and the
+  cells' strict queries refused it (`PartitionLocalityError`). With
+  NLMEEstimation loaded, `brm_nlme_model` leaves out the Gaussian observations'
+  η pushforward for such units, which have no direction to push.
+
 ## 0.2.360
 
 - A record component's own HSGP prior can name its validity floor:

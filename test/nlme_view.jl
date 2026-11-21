@@ -394,6 +394,12 @@ end
     err = try brm_nlme_view(RKBRMI(no_ranef)); nothing catch e; e end
     @test err isa BRMNLMEViewError
     @test occursin("no subject-level random effects", err.message)
+    # It names the way to give the units, a grouping column (cell latents and
+    # grouped terms with no block: test/nlme_cell_latents.jl, nlme_grouped_hsgp.jl).
+    @test occursin("`subject_group = :g`", err.message)
+    # The column must be one the model reads: this model never reads `subject`.
+    @test_throws "subject_group `subject` is not a grouping column" brm_nlme_view(
+        RKBRMI(no_ranef); subject_group=:subject)
 
     crossed_data = (; NLME_DATA..., site=repeat(["a", "b"], 7)[1:13])
     crossed = @brm crossed_data begin

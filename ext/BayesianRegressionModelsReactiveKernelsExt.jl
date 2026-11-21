@@ -804,7 +804,13 @@ function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, owner::Vector{Int})
             for owner in axis_owners]
         push!(declarations, entry.name => labels)
     end
-    declarations
+    # Units that own no coordinate (a model whose `subject_group` names units
+    # with no draws of their own) are RKPPL's `partitioned = :none`: every
+    # coordinate is shared, and shared values with no row form, such as a
+    # multigroup HSGP's weights, are computed once for all cells. An empty
+    # declaration leaves them undeclared, and the strict locality check then
+    # refuses them (snag brm-svi-fit-refu-d79b878a).
+    isempty(declarations) ? :none : declarations
 end
 
 BRM._rk_nlme_partition_query(context, unit) =

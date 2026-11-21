@@ -854,3 +854,30 @@ end
     plain = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
     @test result.modes ≈ empirical_bayes(plain, θ, σ, ω).modes rtol=1e-10 atol=1e-12
 end
+
+# Units that `subject_group` names in a model with no random-effect block hold
+# no η (snag brm-svi-fit-refu-d79b878a). With this extension loaded,
+# `brm_nlme_model` prepares the Gaussian observations' η pushforward, which has
+# no direction to push for them: it is left out, as without a forward backend,
+# and SVI fits the model. NLMEEstimation's estimators need at least one random
+# effect and refuse the model by name.
+@stestset "units with no random effects: SVI fits, the NLME estimators refuse" begin
+    data = (; series=["s3", "s3", "s1", "s1", "s1", "s4", "s3", "s2", "s2", "s4", "s2"],
+        x=[0.1, -0.4, 0.8, 0.3, -0.2, 0.5, 0.0, -0.7, 0.9, 0.2, -0.1],
+        y=[0.6, 0.1, 1.2, -0.3, -0.6, 1.4, 0.9, 0.2, 1.8, -0.9, -1.1])
+    model = @brm data begin
+        sigma ~ Exponential(1)
+        b ~ Normal(0.0, 1.0)
+        @plate for p in groups(series)
+            m ~ Normal(0.0, 1.0)
+            y[p] ~ Normal(m .+ b .* x[p], sigma)
+        end
+    end
+    m = brm_nlme_model(RKBRMI(model); ad_backend=NLME_AD, subject_group=:series)
+    @test isempty(m.eta_blocks)
+    @test m.observations_query !== nothing && m.observations_pushforward === nothing
+    fit = brm_svi_fit(m; rng=Random.Xoshiro(11), batch_size=2, max_iterations=6,
+        ndraws=4, threads=1)
+    @test all(isfinite, fit.draws)
+    @test_throws "needs at least one random effect" brm_nlme_fit(m, focei)
+end
