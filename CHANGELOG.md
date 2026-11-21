@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.359
+
+- On RKBRMI, a kernel cell's undotted Stan-spelled `x + y` / `x - y` with two
+  or more operands calls the program's `stan_add` / `stan_sub` definition,
+  one documented `ReactiveKernels.@kernel` each, which RKPPL splices into the
+  cell. Previously it called an opaque bound helper. The meaning is unchanged:
+  a scalar and an array combine entrywise, any other operands as Julia's
+  operator, and `a + b + c` is `stan_add(stan_add(a, b), c)`. A broadcast
+  `(+).(x, y)` / `(-).(x, y)` now keeps its authored spelling instead of
+  calling the helper on every entry. A splatted operand list still calls the
+  helper. Printed RK programs show the new definitions. Native Enzyme Reverse
+  gradient allocations of a toy cell, per gradient, the same at 100 and 400
+  cells (gordito, one CPU):
+  - `b + v`, 560 B before, 544 B now;
+  - `b + v + 0.5`, 960 B before, 752 B now;
+  - `(+).(b, v)`, 320 B before, 112 B now, the same as a cell without the sum.
+
+  `b + v` costs no more than `b .+ v` (112 B) once ReactiveKernels gives a
+  branch that concrete types decide its selected arm's lowering (snag
+  `type-decided-bra-2686ef6f`). Until then, `b .+ v` is the non-allocating
+  spelling (snag `rk-kernel-stan-a-cf3a16d7`).
+
 ## 0.2.358
 
 - `brm_laplace_integration` is about six times faster on a sparse Laplace
