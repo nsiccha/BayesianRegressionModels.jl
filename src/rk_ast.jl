@@ -2204,7 +2204,7 @@ function _rk_ast_class_block_predictor!(defs, stmts, taken, coordinates, predict
             "`CategoricalLogit(@brm(...))` takes " *
             "$(join(keys(_RK_POPULATION_FAMILIES), ", ")) coefficient laws")
         push!(columns, term.kind === :intercept ?
-            Expr(:call, :ones, Expr(:call, :length, key)) : only(term.columns))
+            Expr(:call, :ones, Expr(:call, :length, key)) : get(term.options, :matrix_column, only(term.columns)))
         push!(laws, prior)
         push!(coefficients, (; predictor=predictor.name, coefficient=term.addressee,
             response=key, nclass=response.n_levels - 1))
@@ -2414,6 +2414,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         refactual = Dict{Int,Any}()
         replacements = Dict{Int,Any}()
         population = Tuple{Int,Any,Tuple{Symbol,Tuple}}[]
+        matrix_axis = findfirst(t -> haskey(t.options, :matrix_column), predictor.terms)
+        nrows = matrix_axis === nothing ? Expr(:call, :length, predictor.row_source) :
+            Expr(:call, :size, predictor.terms[matrix_axis].options.matrix_column.source, 1)
         scalar_stmts = Expr[]
         monotonic_alpha(term) = only(vector_priors[term.options.increments].args)
         # A monotonic term's value: its column of a joint block, or its own
@@ -2619,9 +2622,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     (kind === :intercept ? predictor.row_source !== nothing :
                         kind === :continuous)
                 column = kind === :intercept ?
-                    Expr(:call, :ones, Expr(:call, :length, predictor.row_source)) :
-                    colactual[index]
-                push!(population, (index, column, override))
+                    Expr(:call, :ones, nrows) : colactual[index]
+                push!(population, (index, get(term.options, :matrix_column, column), override))
             else
                 if kind === :monotonic
                     # A horseshoe coefficient scales the owned contrast.
@@ -2754,7 +2756,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _rk_ast_fresh_name(string("pop_", target), taken),
                 string("X_", target),
                 [entry[2] for entry in population], [entry[3] for entry in population],
-                designs, coefficients)
+                designs, coefficients; prior_data=Dict(_rk_prior_array_name(v.source) => v.value
+                    for v in Base.values(plan.prior_reads)))
             replacements[first(first(population))] = name
             foreach(entry -> replacements[first(entry)] = nothing, population[2:end])
         end

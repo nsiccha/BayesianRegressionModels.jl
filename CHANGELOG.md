@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.368
+
+- A numeric matrix in `eta ~ 1 + offset(log_area) + X` contributes one slope
+  per column. Set a prior across the block with `effect(eta, X)`, or address
+  slope `j` by its label, such as `X_col_2`. New rows use the fitted width
+  and column order on both backends.
+
 ## 0.2.367
 
 - An `@plate` cell can declare independent draws as `z[1:K] .~ Normal.(0, 1)`

@@ -3467,6 +3467,10 @@ _brm_is_level_indicator(column) =
     column.preprocess isa _BRMPopulationPreprocess &&
     column.preprocess.kind === :population_factor_dummy
 
+_brm_is_design_block_column(column) =
+    column.preprocess isa _BRMPopulationPreprocess &&
+    column.preprocess.kind in (:population_factor_dummy, :matrix_column)
+
 function _brm_design_block_columns(d::BRMDescriptor, logical::Symbol,
                                    coefficient::Symbol, entry)
     bindings = hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict()
@@ -3474,24 +3478,23 @@ function _brm_design_block_columns(d::BRMDescriptor, logical::Symbol,
     isnothing(columns) && return nothing
     claimed = [c for c in columns
                if c.label !== coefficient && coefficient in c.effect_addresses &&
-                  _brm_is_level_indicator(c)]
+                  _brm_is_design_block_column(c)]
     isempty(claimed) && return nothing
     blocks = unique(c.effect_block for c in claimed)
     length(blocks) == 1 || error(
-        "brm_descriptor: categorical address `$coefficient` on logical " *
-        "predictor `$logical` claims the level columns of $(length(blocks)) " *
+        "brm_descriptor: block address `$coefficient` on logical " *
+        "predictor `$logical` claims columns of $(length(blocks)) " *
         "design terms $(Tuple(blocks)); address one of them by its own name.")
     claimed
 end
 
-function _brm_design_categorical_coordinates(d::BRMDescriptor, logical::Symbol,
-                                             coefficient::Symbol,
-                                             constrained_names, entry, columns)
+function _brm_design_block_coordinates(d::BRMDescriptor, logical::Symbol,
+                                       coefficient::Symbol, constrained_names, entry, columns)
     idxs = _brm_carrier_indices(d.outputs,
                o -> o.role === :population_effect && !isnothing(o.declaration) &&
                     o.declaration.target === entry.block && o.name !== entry.block)
     length(idxs) == 1 || error(
-        "brm_descriptor: categorical address `$coefficient` on logical " *
+        "brm_descriptor: block address `$coefficient` on logical " *
         "predictor `$logical` resolves to population block `$(entry.block)`, " *
         "which owns $(length(idxs)) parameter carriers; expected exactly one.")
     output = d.outputs[only(idxs)]
@@ -3509,10 +3512,14 @@ function _brm_design_categorical_coordinates(d::BRMDescriptor, logical::Symbol,
     positions = map(columns) do c
         p = findall(==(c.label), labels)
         length(p) == 1 || error(
-            "brm_descriptor: level column `$(c.label)` of categorical address " *
+            "brm_descriptor: design column `$(c.label)` of block address " *
             "`$coefficient` occurs $(length(p)) times on population carrier " *
             "`$(output.name)`; re-reflect the model.")
         only(p)
+    end
+    if first(columns).preprocess.kind === :matrix_column
+        return (; logical, coefficient, output, coordinates=all_coordinates[positions],
+                   link=entry.link, inverse_link=InverseFunctions.inverse(entry.link), recovered=false)
     end
     # Treatment coding starts at level 2; cell means keep level 1.
     cellmeans = first(columns).preprocess.const_.level == 1
@@ -3677,7 +3684,7 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
             categorical_block)
     end
     design_block = _brm_design_block_columns(d, logical, coefficient, entry)
-    isnothing(design_block) || return _brm_design_categorical_coordinates(
+    isnothing(design_block) || return _brm_design_block_coordinates(
         d, logical, coefficient, constrained_names, entry, design_block)
 
     # The coefficient vector is the block INTERNAL (name !== target); the block
@@ -3753,7 +3760,7 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     design_columns = _brm_population_design_columns(
         hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict(), entry.block)
     design_blocks = isnothing(design_columns) ? Symbol[] :
-        sort!(unique!(Symbol[a for c in design_columns if _brm_is_level_indicator(c)
+        sort!(unique!(Symbol[a for c in design_columns if _brm_is_design_block_column(c)
                              for a in c.effect_addresses if a !== c.label]))
     available = unique!(vcat(copy(labels), sort!(collect(keys(categorical))),
                              design_blocks, recovered_labels))

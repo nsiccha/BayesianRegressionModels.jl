@@ -57,7 +57,7 @@ end
 function _brm_collect_data_lengths!(acc, x)
     columns = Tuple{Symbol,Any}[]
     _brm_collect_data_columns!(columns, x)
-    append!(acc, ((column, length(values)) for (column, values) in columns))
+    append!(acc, ((column, _brm_data_rows(values)) for (column, values) in columns))
     nothing
 end
 
@@ -72,7 +72,7 @@ end
 function _brm_kernel_lp_data_lengths(lp_col)
     n = _brm_parameter_length(lp_col)
     isnothing(n) || return Tuple{Symbol,Int}[(name(lp_col), n)]
-    Tuple{Symbol,Int}[(column, length(values)) for (column, values) in _brm_kernel_lp_data_columns(lp_col)]
+    Tuple{Symbol,Int}[(column, _brm_data_rows(values)) for (column, values) in _brm_kernel_lp_data_columns(lp_col)]
 end
 
 # A per-subject linear predictor without a random effect, or whose random
@@ -284,9 +284,7 @@ end
 
 # A raw column's rows, checked against its ragged group column. An absent
 # replay response (`_BRMAbsentResponse`) lies on the group column's rows.
-_brm_ragged_column_length!(lens, name, values) = push!(lens, (name, length(values)))
-# A matrix is grouped by its rows (a cell reads `X[p, :]`).
-_brm_ragged_column_length!(lens, name, values::AbstractMatrix) = push!(lens, (name, size(values, 1)))
+_brm_ragged_column_length!(lens, name, values) = push!(lens, (name, _brm_data_rows(values)))
 _brm_ragged_column_length!(lens, name, ::_BRMAbsentResponse) = lens
 
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;

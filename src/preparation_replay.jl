@@ -61,6 +61,12 @@ function _brm_replay_preprocess(::Val{:center}, entry, raw, freeze, _prefix)
         _BRMPreprocEntry(:center, fit, entry.raw_ref, false))
 end
 
+function _brm_replay_preprocess(::Val{:matrix_column}, entry, raw, _freeze, _prefix)
+    c = entry.const_
+    matrix = _brm_check_matrix_width(raw, c.source, c.width)
+    _BRMPreprocessResult((primary=matrix[:, c.index],), entry)
+end
+
 function _brm_replay_preprocess(::Val{:protect}, entry, raw, _freeze, _prefix)
     _BRMPreprocessResult((primary=collect(Float64, raw),), entry)
 end

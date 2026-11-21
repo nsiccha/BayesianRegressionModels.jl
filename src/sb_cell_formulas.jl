@@ -166,13 +166,16 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
     rewritten
 end
 
-function _sb_prune_cell_formula_inputs!(data, preproc, statements)
+function _sb_prune_prepared_inputs!(data, preproc, statements)
     reads = Set{Symbol}()
     foreach(statement -> _sb_read_symbols!(reads, statement), statements)
     for entry in values(preproc)
-        entry.kind === :cell_formulas || continue
-        for (_, source) in entry.const_.inputs
-            source in reads || delete!(data, source)
+        if entry.kind === :matrix_predictor
+            entry.raw_ref in reads || delete!(data, entry.raw_ref)
+        elseif entry.kind === :cell_formulas
+            for (_, source) in entry.const_.inputs
+                source in reads || delete!(data, source)
+            end
         end
     end
     nothing
