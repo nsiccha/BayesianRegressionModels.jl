@@ -5576,11 +5576,19 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         level_cor = get(state.by, :level_cor, nothing)
         _brm_check_hyper_level_correlation(level_cor, hyper_plans;
             what="hsgp(...; by=..., cor=...)", prefix="$prefix: predictor `$target`")
+        # The term's levels are a fitted value of the grouping's fit-role
+        # input (`g_fit_levels = brm_fit_levels(g_fit)`), as a `(… | g)`
+        # block's are: the training levels on a frozen replay, the design's
+        # when `g` is resampled, so one program serves every design and its
+        # weights have one row per level of that set. A coordinate field
+        # twins its grouping itself (`_rk_plan_level_coordinates!`).
+        level_fit = level_cor isa _BRMMultigroupCoordinates ? (;) :
+            (; group_fit_source=_rk_fit_twin!(derived, columns, taken, data, state.by.source))
         # `group_column` is the authored `by` column, which `group_source`
         # renames when that name is taken.
         (; group_index=idx, group_source=source, group_column=state.by.source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
-            level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
+            level_cor, level_fit..., _rk_plan_level_coordinates!(level_cor, data, columns, taken,
                 derived; id, source=state.by.source, levels=state.by.levels,
                 hyper_plans, orthogonal)...,
             _rk_plan_projection_levels!(orthogonal, state, idx, data, columns, taken,

@@ -12,6 +12,33 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.363
+
+- RKBRMI resamples the grouping of a grouped `hsgp(x...; by = g)`, with or
+  without a per-level hyper-predictor (`log(sd(hsgp(x))) ~ 1 + (1 | g)`, or the
+  length-scale form), as SBBRMI does since 0.2.12. The term's per-level rows
+  (its standardized basis weights and the hyper-predictor's per-level effects)
+  are sized by the in-graph level set `g_fit_levels = brm_fit_levels(g_fit)`,
+  as a `(… | g)` block's are, so `reprocess(rk, design; resample_groups = [:g])`
+  and `RKBRMI(builder(design), state; resample_groups = [:g])` keep the fit's
+  program for any design (new labels, any level count): the replay's
+  coordinates hold the new levels' standardized draws, whose law is the fitted
+  levels'. Before, these were refused (BRM 0.2.13), and a design reusing the
+  fitted labels had read the fitted levels' weights (todo `10h1myt`; snag
+  `rk-design-binder-45d0b445`).
+- `rk_design_binder(rk; resample_groups = [:g])` keeps the fit's level set of a
+  grouped HSGP's grouping, so `u` stays a draw of the fit, and takes the new
+  levels' standardized weights (`<term>.z`, levels × basis functions) and
+  per-level hyper effects (`<term>.sigma_z`, `<term>.rho_z`) in HAVE, beside a
+  `(… | g)` block's effects (`b_g`). The graph scales them at the draw's fitted
+  length scale and amplitude: zeros give the typical level, standard normal
+  draws a new level of the fitted population, and the fitted levels' rows of
+  `constrain(layout, u)` those levels. `binder.level_inputs` names every value
+  the new levels take, as `(; columns, kind)` by name.
+- Resampling the grouping of a grouped `hsgp(...; by = g, orthogonal_to = ...)`
+  stays refused on RKBRMI, now with SBBRMI's reason: each level's projection is
+  fitted on that level's training rows, which a new level does not have.
+
 ## 0.2.362
 
 - SBBRMI lowers a record component whose member returns its record's own data

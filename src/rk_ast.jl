@@ -2321,11 +2321,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     for predictor in plan.predictors, term in predictor.terms
         term.kind === :hsgp && _rk_ast_multigroup_fit!(defs, stmts, taken, term)
     end
+    # The level set each index reads, by index: a grouped HSGP sizes its
+    # per-level weights by it (`_rk_ast_hsgp_grouped`).
+    level_sets = Dict{Symbol,Any}()
     for name in sort!(collect(keys(index_sources)); by=string)
         source, levels = index_sources[name]
         level_value = levels isa _RKLevelInput ? levels.name : levels isa Symbol ?
             _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
                 Expr(:call, :brm_fit_levels, levels)) : _rk_ast_level_values(levels)
+        level_sets[name] = level_value
         call = _rk_ast_statistical_call!(defs, taken, :brm_prepared_indices,
             source, level_value; kernel=true)
         push!(stmts, Expr(:(=), name, call))
@@ -2652,6 +2656,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
+            term = _rk_hsgp_with_level_set(term, level_sets)
             hsgp_stmts, locals, fit = _rk_ast_value_hsgp(defs, term, taken, bindings; collection_cell)
             append!(stmts, hsgp_stmts)
             # An HSGP component owns its hyperparameters and basis weights
