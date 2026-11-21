@@ -73,5 +73,65 @@ function (body::_BRMGuardedComponentBody)(df)
     columns = data(df)
     inputs = Dict(key => getproperty(columns, key) for key in body.inputs)
     selected = _brm_guarded_statements(body, inputs)
+    any(_brm_has_record_rhs, selected) && throw(ArgumentError(
+        "@brm: rhs(record.field) requires a component bound in a record collection"))
     brm(Expr(:block, selected...); mod=body.scope)(df)
+end
+
+# A record supplies fixed-effect syntax as data. Only the following term
+# grammar is admitted. The record's text and expressions never run as Julia.
+_brm_is_record_rhs(x) = isxcall(x, :rhs) && length(x.args) == 2 &&
+    Meta.isexpr(x.args[2], :., 2) && x.args[2].args[1] isa Symbol && x.args[2].args[2] isa QuoteNode
+_brm_has_record_rhs(x) = _brm_is_record_rhs(x) ||
+    (x isa Expr && any(_brm_has_record_rhs, x.args))
+
+function _brm_record_term(x, formal, field)
+    x isa Symbol && Base.isidentifier(string(x)) && return Expr(:., formal, QuoteNode(x))
+    x isa Integer && !(x isa Bool) && x in (0, 1) && return Int(x)
+    if Meta.isexpr(x, :call) && length(x.args) >= 3 && first(x.args) in (:+, :&)
+        return Expr(:call, first(x.args), (_brm_record_term(a, formal, field) for a in x.args[2:end])...)
+    elseif Meta.isexpr(x, :call, 2) && first(x.args) in (:center, :zscale, :standardize) &&
+            last(x.args) isa Symbol
+        return Expr(:call, first(x.args), _brm_record_term(last(x.args), formal, field))
+    elseif Meta.isexpr(x, :ref, 2) && last(x.args) isa Symbol
+        return Expr(:ref, (_brm_record_term(a, formal, field) for a in x.args)...)
+    end
+    throw(ArgumentError("@brm: rhs($formal.$field) expects a fixed-effect term, got `$x`"))
+end
+
+# Splice additive fragments into the predictor's summands so a neighbouring
+# parentblock, for example, still sees the ordinary flat formula.
+function _brm_record_summands!(out, term, formal, record, signature)
+    if isxcall(term, :+)
+        foreach(t -> _brm_record_summands!(out, t, formal, record, signature), term.args[2:end])
+    elseif _brm_is_record_rhs(term)
+        field = _brm_observer_field(last(term.args), formal)
+        isnothing(field) && throw(ArgumentError("@brm: use rhs($formal.field) in a member predictor"))
+        raw = _brm_record_field(record, field)
+        parsed = raw isa AbstractString ? Meta.parse(raw; raise=false) : raw
+        Meta.isexpr(parsed, (:error, :incomplete)) && throw(ArgumentError(
+            "@brm: invalid formula text in rhs($formal.$field): $(repr(raw))"))
+        fragment = _brm_record_term(parsed, formal, field)
+        terms = Any[]
+        _brm_record_summands!(terms, fragment, formal, record, signature)
+        push!(signature, repr(terms))
+        append!(out, terms)
+    elseif _brm_has_record_rhs(term)
+        throw(ArgumentError("@brm: rhs($formal.field) must be an additive predictor term"))
+    else
+        push!(out, term)
+    end
+    out
+end
+
+function _brm_select_record_rhs(stmt, formal, record, signature)
+    _brm_has_record_rhs(stmt) || return stmt
+    if _brm_is_doc(stmt)
+        return Expr(stmt.head, stmt.args[1:3]...,
+            _brm_select_record_rhs(stmt.args[4], formal, record, signature))
+    end
+    isxcall(stmt, :~) && length(stmt.args) == 3 && !_brm_has_record_rhs(stmt.args[2]) ||
+        throw(ArgumentError("@brm: use rhs($formal.field) in a member predictor declaration"))
+    terms = _brm_record_summands!(Any[], stmt.args[3], formal, record, signature)
+    Expr(:call, :~, stmt.args[2], length(terms) == 1 ? only(terms) : Expr(:call, :+, terms...))
 end

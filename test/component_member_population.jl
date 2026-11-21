@@ -212,4 +212,158 @@ end
               for (predictor, coefficient) in ((:base, :Intercept), (:slope, :Intercept),
                                                (:slope, :settings_dose))])
 end
+
+# A calibration survey can select a different design for the level and gain
+# of each instrument, while sharing site effects across all instruments.
+@brm function selected_calibration(entry)
+    level ~ rhs(entry.level_formula) + (1 | parentblock(:p) | entry.site)
+    gain ~ rhs(entry.gain_formula) + offset(entry.offset)
+    effect(level, :) ~ Normal(0, entry.width)
+    effect(level, Intercept) ~ Normal(0, 1)
+    optional(effect(gain, :entry_power)) ~ Normal(0, 0.3)
+    effect(gain, Intercept) ~ Normal(0, 1)
+    if entry.curve
+        drift ~ 0 + hsgp(entry.time; k=3, c=1.5)
+        drift_sum = sum(drift)
+    else
+        drift_sum = 0.0
+    end
+    return sum(level) + sum(gain) + drift_sum
+end
+
+@brm function explicit_calibration(entry)
+    if entry.curve
+        level ~ 1 + standardize(entry.temp) + (1 | parentblock(:p) | entry.site)
+        effect(level, :standardize_entry_temp) ~ Normal(0, entry.width)
+    else
+        level ~ 1 + (1 | parentblock(:p) | entry.site)
+    end
+    effect(level, Intercept) ~ Normal(0, 1)
+    if entry.no_power
+        gain ~ 1 + offset(entry.offset)
+    else
+        gain ~ 1 + entry.power + offset(entry.offset)
+        effect(gain, :entry_power) ~ Normal(0, 0.3)
+    end
+    effect(gain, Intercept) ~ Normal(0, 1)
+    if entry.curve
+        drift ~ 0 + hsgp(entry.time; k=3, c=1.5)
+        drift_sum = sum(drift)
+    else
+        drift_sum = 0.0
+    end
+    return sum(level) + sum(gain) + drift_sum
+end
+
+function calibration_survey(component)
+    brm(quote
+        root ~ 0 + (1 | p | site)
+        for entry in records
+            readings[entry.id] ~ $component(entry)
+        end
+        primary ~ Normal(root, 1)
+        y ~ Normal(readings, 1)
+    end; mod=@__MODULE__)
+end
+
+@stestset "Record formulas select each predictor and freeze its member's transform" begin
+    a = (; id=:a, level_formula="1 + standardize(temp)", gain_formula=1,
+        site=["x","y","x"], temp=[1.,2.,3.], width=0.2, offset=zeros(3),
+        curve=true, time=[0.,1.,4.], no_power=true)
+    b = (; a..., id=:b, level_formula=:(1 + standardize(temp)), temp=[8.,10.,12.], width=0.6)
+    c = (; id=:c, level_formula=1, gain_formula="1 + power", site=["x","y"],
+        offset=zeros(2), power=[0.2, 0.9], width=0.5, curve=false, no_power=false)
+    d = (; id=:d, level_formula=1, gain_formula=1, site=["x","y"], offset=zeros(2),
+        width=0.5, curve=false, no_power=true)
+    frame(records) = (; records, site, primary, y=[0.3, 0.1, -0.2, 0.4])
+    builder = calibration_survey(selected_calibration)
+    data = frame((d, b, c, a))
+    m = builder(data)
+    sb = SBBRMI(m; mod=@__MODULE__, total_groups=())
+    desc = brm_descriptor(sb)
+    rk = RKBRMI(m)
+    # The two selected members share a program and differ in their actual fits.
+    for fit in (sb, generative_plan(sb), desc, rk)
+        for (key, center, scale) in ((:a, 2., 1.), (:b, 10., 2.))
+            submodel = (:readings, key)
+            t = only(brm_transform_constants(fit; submodel))
+            @test t == brm_transform_constants(fit, :standardize_entry_temp; submodel)
+            @test (t.column, t.center, t.scale) == (:entry_temp, center, scale)
+        end
+        @test isempty(brm_transform_constants(fit; submodel=(:readings, :d)))
+        @test_throws "Fitted transforms: ()" brm_transform_constants(fit,
+            :standardize_entry_temp; submodel=(:readings, :c))
+        @test_throws "unknown record member" brm_transform_constants(fit; submodel=(:readings, :other))
+    end
+    next = frame((c, merge(a, (; temp=[30.,40.,50.])), d, merge(b, (; temp=[1.,5.,9.]))))
+    for fit in (sb, rk)
+        for (freeze, ca, sa, cb, sb_) in ((true, 2., 1., 10., 2.), (false, 40., 10., 5., 4.))
+            replay = reprocess(fit, next; freeze_constants=freeze)
+            for (key, center, scale) in ((:a, ca, sa), (:b, cb, sb_))
+                actual = only(brm_transform_constants(replay; submodel=(:readings, key)))
+                @test (actual.center, actual.scale) == (center, scale)
+            end
+        end
+        # The member count and coefficient count stay fixed, but a different
+        # covariate gives that coefficient a different meaning.
+        changed = frame((d, b, merge(c, (; gain_formula="1 + load", load=c.power)), a))
+        @test_throws "build a new model" reprocess(fit, changed)
+    end
+    for bad in ("(", "1; 2", :(run(temp)), :(x ~ Normal(0,1)), true)
+        @test_throws ArgumentError builder(frame((d, b, c, merge(a, (; level_formula=bad)))))
+    end
+
+    twin = calibration_survey(explicit_calibration)(data)
+    stan = consumer_stan(m, "selected-calibration"; mod=@__MODULE__).model
+    ref = consumer_stan(twin, "explicit-calibration"; mod=@__MODULE__).model
+    names = BridgeStan.param_unc_names(stan)
+    # Compare each backend to the written-out component. Identify each native
+    # program by its keys; its backend packs its members in stable key order.
+    function keyed_names(model, names)
+        replacements = Pair{String,String}[]
+        for axis in BRM._brm_collection_axes(model)
+            result, member = string.(axis.path)
+            keys = join(axis.keys, "_")
+            append!(replacements, (result => "result_" * keys, member => "member_" * keys))
+        end
+        [replace(string(n), replacements...) for n in names]
+    end
+    function check_twin(selected_names, reference_names, selected_gradient, reference_gradient)
+        labels = keyed_names(m, selected_names)
+        twin_labels = keyed_names(twin, reference_names)
+        @test issetequal(labels, twin_labels) && allunique(labels)
+        perm = [only(findall(==(n), twin_labels)) for n in labels]
+        for u in (collect(range(-0.25, 0.28; length=length(labels))), [0.16cos(i) for i in eachindex(labels)])
+            actual, grad = selected_gradient(u[perm])
+            expected, ref_grad = reference_gradient(u)
+            @test actual ≈ expected
+            @test grad ≈ ref_grad[perm]
+        end
+    end
+    check_twin(names, BridgeStan.param_unc_names(ref),
+        u -> BridgeStan.log_density_gradient(stan, u; propto=false),
+        u -> BridgeStan.log_density_gradient(ref, u; propto=false))
+    ref_rk = RKBRMI(twin)
+    problem(fit) = rk_logdensity_problem(fit; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    p, ref_p = problem(rk), problem(ref_rk)
+    check_twin(coordinate_names(rk.model.layout), coordinate_names(ref_rk.model.layout),
+        u -> LogDensityProblems.logdensity_and_gradient(p, u),
+        u -> LogDensityProblems.logdensity_and_gradient(ref_p, u))
+
+    # The full models above include each instrument's smooth. Compare the two
+    # backends directly for all selected covariates and shared site effects
+    # on a survey without smooths, whose complete coordinate transport exists.
+    plain = builder(frame(map(r -> (; r..., curve=false), data.records)))
+    plain_stan = consumer_stan(plain, "selected-calibration-no-smooth"; mod=@__MODULE__).model
+    transport = check_transport(plain, plain_stan, BridgeStan.param_unc_names(plain_stan))
+    expected = [(r.id, target, :Intercept) for r in data.records for target in (:level, :gain)]
+    append!(expected, [(:a, :level, :standardize_entry_temp),
+                       (:b, :level, :standardize_entry_temp), (:c, :gain, :entry_power)])
+    @test Set((p.address.scope[2], p.address.predictor, p.address.coefficient)
+        for p in transport.pairs if p.address.kind === :population) == Set(expected)
+    for (key, target, coefficient) in expected
+        r = brm_population_effect_coordinates(desc, target, names; coefficient, submodel=(:readings, key))
+        @test length(r.coordinates) == 1
+    end
+end
 end

@@ -200,6 +200,54 @@ For example, `brm_outputs(brm_descriptor(SBBRMI(model)); submodel=(:channels,
 `channels[item]` uses positions as keys. For a fit with a different selection
 of members or declaration flags, call the builder on the new records.
 
+When instruments measure different covariates, store the fixed-effect formula
+on each record. In this calibration model the left sensor adjusts for
+temperature and the right sensor fits only an intercept. Its offset vector
+gives each instrument the rows on which to evaluate its calibration.
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:RecordFormulaGuide), raw"""
+@brm function calibration(entry)
+    level ~ rhs(entry.formula) + offset(entry.offset)
+    effect(level, :) ~ Normal(0, entry.width)
+    effect(level, Intercept) ~ Normal(0, 1)
+    return sum(level)
+end
+
+survey = @brm begin
+    for sensor in sensors
+        channels[sensor.id] ~ calibration(sensor)
+    end
+    y ~ Normal(channels, 1)
+end
+
+sensors = [(id=:left, formula="1 + standardize(temp)", temp=[8., 10., 12.],
+            offset=zeros(3), width=0.4),
+           (id=:right, formula=1, offset=zeros(2), width=0.7)]
+model = survey((; sensors, y=[0.2, 1.0]))
+""", :model; title="Calibration covariates selected by instrument", require_stan=true)
+```
+
+```@example record_formulas
+using BayesianRegressionModels
+model = Main.BRMDocsComparisons.example_module(:RecordFormulaGuide).model
+sb = SBBRMI(model)
+left = brm_transform_constants(sb, :standardize_entry_temp; submodel=(:channels, :left))
+(left.center, left.scale, brm_transform_constants(sb; submodel=(:channels, :right)))
+```
+
+A formula may be text, a Julia expression such as `:(1 + standardize(temp))`,
+a column symbol, or the integer `0` or `1`. Combine record columns with `+`
+and `&`, transform a column with `center`, `standardize` or `zscale`, or index
+by a record column. BRM uses the same coefficient labels as the written-out
+member formula. For example, `temp` is `:entry_temp` and `standardize(temp)`
+is `:standardize_entry_temp`. To give that term its own prior wherever it
+appears, write `optional(effect(level, :standardize_entry_temp)) ~ Normal(0, 0.3)`.
+Pass the label as `coefficient` and the same
+`submodel` key to `brm_population_effect_coordinates`. Each predictor can
+read a different formula field. A change to the selected terms needs a new fit.
+
 To give selected instruments their own smooth time effects, put the formula
 inside the guard. Each enabled instrument supplies its time grid and basis
 size. The fixed instrument below contributes its known mean.

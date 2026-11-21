@@ -109,6 +109,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
         if haskey(kernel_columns, input.source))
     calls = nothing
     records = ()
+    transforms = ()
     for axis in values(kernel_columns)
         axis isa _BRMCollectionAxis && !isempty(axis.path) && last(axis.path) === lhs || continue
         raw = Dict(param => kernel_columns[source] for (param, source) in sources)
@@ -123,7 +124,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
             data, bindings = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
             member = _rk_submodel_rhs!(defs, body, data, bindings, lhs, component, calls[i];
                 cell=(; sources, position=i))
-            (; defs, body, data, bindings, member.fits, member.coordinates)
+            (; defs, body, data, bindings, member.fits, member.coordinates, member.transforms)
         end
         head = first(programs)
         all(p -> p.defs == head.defs && p.body == head.body &&
@@ -135,6 +136,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
         merge!(fit_inputs, head.fits)
         # Every member runs one program, so one member's records describe all.
         records = head.coordinates
+        transforms = map(p -> p.transforms, programs)
         for key in keys(head.data)
             columns[key] = [p.data[key] for p in programs]
             push!(sliced, key)
@@ -148,7 +150,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
     end
     fits = Dict{Symbol,Symbol}(fields[input] => get(fields, source, get(sources, source, source))
         for (input, source) in fit_inputs)
-    (; defs, statement=only(statements), bound, fields, sliced, fits, coordinates=records)
+    (; defs, statement=only(statements), bound, fields, sliced, fits, coordinates=records, transforms)
 end
 
 function _rk_component_cell_statement(statement, kernel, definitions, bindings, taken)

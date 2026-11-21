@@ -3019,8 +3019,9 @@ end
 
 # The SB fit of each member of a repeated formula component, in the order of
 # the collection axis's keys, or `nothing` when its members fit no formula.
-function _brm_member_fits(d::BRMDescriptor, axis)
-    recipes = [e for e in values(d.plan.preproc)
+_brm_member_fits(d::BRMDescriptor, axis) = _brm_member_fits(d.plan.preproc, axis)
+function _brm_member_fits(preproc, axis)
+    recipes = [e for e in values(preproc)
                if e.kind === :collection_cells && e.raw_ref === first(axis.path)]
     isempty(recipes) ? nothing : only(recipes).const_.fits
 end

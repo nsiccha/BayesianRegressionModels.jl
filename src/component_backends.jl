@@ -341,8 +341,9 @@ end
 
 function _rk_submodel_rhs!(definitions, statements, data, bindings,
         target::Symbol, component::BRMComponent, call; reserved=(), cell=nothing)
-    plan, instance = _brm_component_replay_scope(target, component, call; cell) do
-        _brm_component_rk_plan(component, call)
+    plan, instance, transforms = _brm_component_replay_scope(target, component, call; cell) do
+        plan, instance = _brm_component_rk_plan(component, call)
+        plan, instance, isnothing(cell) ? nothing : _rk_member_transform_plan(plan, instance)
     end
     cell === nothing || _rk_collection_smooth_inputs!(plan)
     cells = Dict{Symbol,Symbol}()
@@ -439,7 +440,7 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
         # without a separate raw data column in the enclosing program.
         fits = Dict{Symbol,Symbol}(column_names[input] =>
             get(column_names, source, column_names[input]) for (input, source) in fit_inputs)
-        return (; fits, coordinates)
+        return (; fits, coordinates, transforms)
     end
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs

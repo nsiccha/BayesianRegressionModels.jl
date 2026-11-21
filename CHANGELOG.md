@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.363
+
+- A repeated component can use `rhs(entry.formula)` to select fixed effects
+  separately for each member and predictor. Only selected columns are read.
+- `brm_transform_constants(fit; submodel=(collection, key))` returns that
+  member's fitted transforms on Stan and ReactiveKernels, including on replay.
+
 ## 0.2.362
 
 - SBBRMI lowers a record component whose member returns its record's own data
