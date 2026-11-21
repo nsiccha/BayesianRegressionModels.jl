@@ -374,6 +374,9 @@ function _rk_refuse_grouped_hsgp_resample(brmi, groups::Set{Symbol}; prefix)
             term isa ExprColumn && getf(term) === hsgp || continue
             kw = getkwargs(term)
             haskey(kw, :by) && haskey(kw, :orthogonal_to) || continue
+            # A coordinate multigroup field refuses it while planning, naming
+            # its per-level projection fits (`_rk_plan_level_coordinates!`).
+            haskey(kw, :cor) && _brm_multigroup_coordinates_form(kw.cor) && continue
             push!(projected, name(kw.by))
         end
     end
