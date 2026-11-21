@@ -8853,12 +8853,12 @@ function _sb_kernel_link_advice(c)::String
     isnothing(found) && return ""
     inner_name, f = found
     inv = try
-        _sb_julia_to_stan_fn(InverseFunctions.inverse(f))
+        _sb_link_call(InverseFunctions.inverse(f), _sb_lp_emitted_name(inner_name, f))
     catch
         nothing
     end
     binding = isnothing(inv) ? "the response scale" :
-        "the response scale (`$inner_name = $inv($(_sb_lp_emitted_name(inner_name, f)))`)"
+        "the response scale (`$inner_name = $inv`)"
     " If `$inner_name` is the linked predictor declared by `$f($inner_name) ~ ...`, " *
         "pass the bare name `$inner_name` instead — the plate slices it on " *
         "$binding, so drop the inverse-link call from the cell."
@@ -10498,7 +10498,7 @@ function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key,
                           obs_n, cv_groups, centered_groups, group_block_lookup,
                           effect_overrides, r2d2, mod)
-    push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
+    push!(stmts, :($inner_name = $(_sb_link_call(inv_f, pre_name))))
 end
 
 # `mi(y) ~ <family>(args...)` — response with missing values modelled
@@ -10598,11 +10598,11 @@ _sb_stan_family(name::Symbol) = isdefined(StanBlocks, name) ? getfield(StanBlock
     error("sbimpl: internal: `$name` is no StanBlocks family token")
 _sb_stan_family(family) = family
 
-# Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
-# for a link transform) to the Stan-side function name: the kernel cells'
-# table (`_sb_julia_stan_name`, sb_cell_julia.jl) where Stan spells it
-# differently (`logistic` -> `inv_logit`), else its own name.
-_sb_julia_to_stan_fn(f) = something(_sb_julia_stan_name(f), Symbol(nameof(f)))
+# An inverse link uses the same builtin and operands as a call in a formula.
+function _sb_link_call(f, predictor)
+    name, operands = _sb_julia_stan_builtin(f, (predictor,))
+    Expr(:call, something(name, nameof(f)), operands...)
+end
 
 # Inner-arg unwrap helpers shared by `_sb_predictor_term!` overloads (mo, me,
 # s, t2, gp, hsgp, ar, mo1) and a few `mi`-style sites. Each step is a tiny dispatch
