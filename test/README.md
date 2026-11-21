@@ -324,7 +324,12 @@ return holds a per-member vector: a curve beside a fitted scale, and a margin
 of the parent's correlated block beside two scalars. It prepares the native
 program under `type_stability = :error` and compares densities and gradients
 with a hand-written density, an explicit model without components and compiled
-Stan. It needs StanBlocks 0.2.57 and MutatingFunctions 0.1.2.
+Stan. It needs StanBlocks 0.2.57 and MutatingFunctions 0.1.2. Its last two
+testsets return a curve that is the record's own data: ragged across members,
+beside a member whose curve is fitted (two plates), and with no guard. Their
+`@observe` clauses index two returned vectors and their records name a field
+`subject_rows`, which needs generated names that never end in `__` (checked
+directly too). Replay on new curves binds them as a fresh build does.
 
 `component_cell_returns.jl` checks returned plate collections through direct,
 aliased and nested component calls. It

@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.359
+
+- SBBRMI lowers a record component whose member returns its record's own data
+  as a vector, such as a disabled member's `curve = entry.no_curve` beside an
+  enabled member's fitted curve, as RKBRMI did. `stan_code` stopped with
+  `Could not find component_result_curve in model`: the vector is data of each
+  member, and since only the member's `return` read it, it was not passed to
+  the plate's shared submodel (snag `component-data-o-a8b79baf`).
+- Stan compiles a record component whose members are split across two or more
+  plates by their guards and return a vector, such as a `parentblock` margin.
+  `stanc` refused the program with "Non-data variables are not allowed in top
+  level size declarations": joining the plates' vectors took the first plate's
+  length from its fitted values instead of its data ends.
+- A generated name that collides a second time is numbered (`x_2`, `x_3`)
+  instead of taking another underscore. `stanc` refuses an identifier that
+  ends in `__`, which a member's `@observe` clause produced when it indexed
+  two returned vectors and its record had a field named `subject_rows`, or
+  indexed three. RK programs with such a name use the numbered one.
+
 ## 0.2.358
 
 - `brm_laplace_integration` is about six times faster on a sparse Laplace
