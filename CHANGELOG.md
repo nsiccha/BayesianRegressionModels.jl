@@ -37,7 +37,9 @@ instead of failing at run time.
   costs memory in proportion to the field's size: inside a prepared query,
   ReactiveKernels still copies the fixed inputs of a derivative rule on each
   reverse call (its snag `native-reverse-r-b8de62b9`, open on the Enzyme
-  side).
+  side). A spatial field with no time axis
+  (`gmrf((east, north); neighbors=m)`) keeps its states in the units' factors
+  and takes the same map.
 - `brm_svi_fit(checkpoint, model)` accepts disjoint observation windows for
   `field_states=:units` on the same fitted read-pair GMRF support with the
   same coordinate ownership, with packed or learned field coordinates. The

@@ -3430,8 +3430,9 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   agree with the full RK posterior, a batch takes only the row derivatives its
   terms read, and a fixed-support streaming window carries the learned
   coordinates even when a station is absent. Without `fields=true` the states
-  stay packed, in a fresh fit and across a window. Changed support, changed
-  ownership and mesh fields are refused.
+  stay packed, in a fresh fit and across a window. A spatial field with no
+  time axis passes the same whole-model and centering checks. Changed support,
+  changed ownership and mesh fields are refused.
 - `julia --project=test test/nlme_svi_field_covariance.jl` compares covariance
   of within-station changes under `LearnedCentering(; fields=true)` on two SVI
   seeds against four NUTS chains.

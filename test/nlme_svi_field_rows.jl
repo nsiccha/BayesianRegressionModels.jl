@@ -1,9 +1,11 @@
 # One coefficient row of a read-pair field's Vecchia law, as SVI's learned field
 # centering reads it from the emitted RK graph: its values and its derivatives
 # in the two field lengths, on a small and a large field with the same number
-# of parents. The printed cost is a measurement, not an assertion: until
-# ReactiveKernels snag native-reverse-r-b8de62b9 lands, one reverse call copies
-# the fixed footprint geometry, so a row's derivative cost grows with the field.
+# of parents. The printed cost is a measurement, not an assertion: inside a
+# prepared query one reverse call still copies the fixed footprint geometry, so
+# a row's derivative cost grows with the field. ReactiveKernels 0.1.351 removed
+# that copy for a rule called directly; the prepared-query case is open on the
+# Enzyme side (ReactiveKernels snag native-reverse-r-b8de62b9).
 include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, LinearAlgebra, Random, Statistics

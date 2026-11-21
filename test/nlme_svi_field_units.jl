@@ -354,6 +354,47 @@ end
     check_centered_field(mc, rkc)
 end
 
+@testset "a spatial field with no time axis" begin
+    # One state per station: its temporal length is a constant of the emitted
+    # program, so the unit terms and the learned map read only the spatial length.
+    spatial_data = station_data(; stations=8, seed=4)
+    spatial = @brm spatial_data begin
+        sigma ~ Exponential(1)
+        field ~ 0 + gmrf((east, north); neighbors=nb)
+        sd(field, gmrf((east, north))) ~ Exponential(1)
+        length_scale(field, gmrf((east, north))) ~ LogNormal(log(0.3), 0.7)
+        mu ~ 1 + (0 + x | site)
+        @plate for s in eachindex(state)
+            y[s] ~ Normal(mu[s] .+ field[state[s]], sigma)
+        end
+    end
+    rks = RKBRMI(spatial)
+    spatial_states = findall(n -> occursin(".field.", n),
+        String.(BRM._rk_layout_coordinate_names(rks)))
+    @test length(spatial_states) == 8
+    ms = brm_nlme_model(rks; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
+    ts = BRM._brm_svi_target(ms; field_states=:units, separator=:none)
+    @test isempty(intersect(spatial_states, ts.globals))
+    law = only(ts.fields.fields)
+    @test law.spatial.place > 0
+    @test law.temporal.transform === :known && law.temporal.place == 0
+    check_whole_model(ts, rks, ms)
+    counts = check_centered_field(ms, rks)
+    @test counts.parent_rows > 0
+    @test counts.value_rows > 0
+    controls = (; batch_size=3, max_iterations=10, ndraws=3, separator=:none, field_states=:units)
+    packed = brm_svi_fit(ms; rng=Xoshiro(2), threads=1, controls..., max_iterations=2,
+        centering=LearnedCentering())
+    @test all(isfinite, packed.diagnostics.elbo)
+    @test !any(cell -> cell.kind === :gmrf, packed.diagnostics.centering.cells)
+    learned = brm_svi_fit(ms; rng=Xoshiro(2), threads=1, controls...,
+        centering=LearnedCentering(; fields=true))
+    @test all(isfinite, learned.diagnostics.elbo)
+    @test count(cell -> cell.kind === :gmrf, learned.diagnostics.centering.cells) ==
+        length(spatial_states)
+    @test all(isfinite, learned.draws)
+end
+
 @testset "refusals name the reason" begin
     m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
     @test_throws ArgumentError BRM._brm_svi_target(m; field_states=:maybe)
