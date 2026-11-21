@@ -14,15 +14,10 @@ include("rk_hidden_markov.jl")
 include("rk_statistical_gp.jl")
 include("rk_gmrf.jl")
 
-# BRM's ragged-join row partition (`src/ragged_rows.jl`) and a grouping's level
-# coding (`brm_fit_levels`, `brm_level_indices`) as ReactiveKernels
-# `@traceable` source, so `jax_source` translates them into the module's
-# `prepare_data`. Every `@_brm_traceable` definition is defined once more here
-# with untyped formals: BRM's typed method stays the one Julia calls, and RK
-# reads this method's recorded source. The bodies call each other by name, so
-# those names are imported first, and `CA` (CategoricalArrays), whose
-# `CategoricalArray` a type test names.
-import BayesianRegressionModels: CA
+# Record the source of BRM's data preparation and simplex helpers for JAX.
+# Julia calls the typed BRM methods. RK reads the same bodies in this module,
+# so their helper names and module bindings must also resolve here.
+import BayesianRegressionModels: CA, SpecialFunctions
 for name in BRM._brm_traceable_callees()
     @eval import BayesianRegressionModels: $name
 end
@@ -106,6 +101,19 @@ end
 
 @inline ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCellDirichlet, w) =
     BRM._brm_cell_dirichlet_logpdf(w, d.args...)
+
+# Match the graph boundary to the two authored Dirichlet constructors. Both
+# score the same simplex as the ordinary Julia law, including its normalizer.
+@kernel _brm_symmetric_dirichlet_density(w, n, total, K, a) = begin
+    return BRM._brm_cell_dirichlet_logpdf(w, K, a)
+end
+@kernel _brm_dirichlet_density(w, n, total, alpha) = begin
+    return BRM._brm_cell_dirichlet_logpdf(w, alpha)
+end
+ReactiveKernelsPPL.sampling_distribution_graph(::Type{<:BRM._BRMCellDirichlet},
+    ::NTuple{4,Any}) = _brm_symmetric_dirichlet_density
+ReactiveKernelsPPL.sampling_distribution_graph(::Type{<:BRM._BRMCellDirichlet},
+    ::NTuple{3,Any}) = _brm_dirichlet_density
 
 # The grouped entries of `mi(x)::shares(total, rows)`
 # (src/cell_total_coordinates.jl) are one joint latent of the completion,

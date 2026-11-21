@@ -468,7 +468,8 @@ const PINS = [
     # RKPPL 0.1.244 reads one plate row over selected packed coordinates
     # (`indexed_value`), which SVI uses for a field state's conditional.
     # RKPPL 0.1.249 keeps shared data whole and identifies each joint cell latent’s packed block.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a4d3e204b34e8c1ca800f09c8fa93e2716f55f76"),
+    # RKPPL 0.1.252 emits a joint cell's geometry and constrained rows in JAX.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "c22de37b46fea7c7a713d8e89229694f02687952"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

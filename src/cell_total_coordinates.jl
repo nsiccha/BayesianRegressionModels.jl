@@ -178,14 +178,14 @@ function _brm_sum_to_zero_free(z::AbstractVector)
     s = cumsum(z)
     [(s[j] - j * z[j+1]) / sqrt(j * (j + 1)) for j in 1:K-1]
 end
-function _brm_sum_to_zero_values(y::AbstractVector)
-    K = length(y) + 1
-    w = [y[j] / sqrt(j * (j + 1)) for j in 1:K-1]
-    tails = reverse(cumsum(reverse(w)))
-    [(i <= K - 1 ? tails[i] : 0.0) - (i >= 2 ? (i - 1) * w[i-1] : 0.0) for i in 1:K]
+@_brm_traceable function _brm_sum_to_zero_values(y::AbstractVector)
+    j = 1:length(y)
+    w = y ./ sqrt.(j .* (j .+ 1))
+    backwards = length(y) + 1 .- j
+    # Accumulate from the empty tail upwards, then read the tails in coordinate order.
+    tails = cumsum(vcat(0.0, w[backwards]))
+    tails[vcat(length(y) + 1, backwards)] .- vcat(0.0, j .* w)
 end
-
-_brm_logsumexp(x) = (m = maximum(x); m + log(sum(exp.(x .- m))))
 
 # One cell's coordinates of positive values `T` (they depend on the shares
 # only), the log values of coordinates `y` with total `total`, and the values.
@@ -194,11 +194,12 @@ function _brm_shares_coordinates(T::AbstractVector{<:Real})
     eta = log.(T)
     _brm_sum_to_zero_free(eta .- sum(eta) / length(eta))
 end
-function _brm_shares_log_values(y::AbstractVector{<:Real}, total::Real)
+@_brm_traceable function _brm_shares_log_values(y::AbstractVector{<:Real}, total::Real)
     z = _brm_sum_to_zero_values(y)
-    log(total) .- _brm_logsumexp(z) .+ z
+    log(total) .- logsumexp(z) .+ z
 end
-_brm_shares_values(y::AbstractVector{<:Real}, total::Real) = exp.(_brm_shares_log_values(y, total))
+@_brm_traceable _brm_shares_values(y::AbstractVector{<:Real}, total::Real) =
+    exp.(_brm_shares_log_values(y, total))
 
 # ---- StanBlocks families -----------------------------------------------------
 #
@@ -412,18 +413,15 @@ _BRMCellDirichlet(n::Real, total::Real, args...) = _BRMCellDirichlet{typeof(args
 # The Dirichlet's log density at the simplex `w`, with the concentration of
 # `Dirichlet(K, a)` (every entry `a`; `K` is the simplex's length) or of
 # `Dirichlet(alpha)`.
-@inline function _brm_cell_dirichlet_logpdf(w, K::Real, a::Real)
+@_brm_traceable function _brm_cell_dirichlet_logpdf(w, K::Real, a::Real)
     n = length(w)
     n == K || _brm_cell_dirichlet_length_error(K, n)
-    SpecialFunctions.loggamma(n * a) - n * SpecialFunctions.loggamma(a) + (a - 1) * sum(log, w)
+    SpecialFunctions.loggamma(n * a) - n * SpecialFunctions.loggamma(a) + (a - 1) * sum(log.(w))
 end
-@inline function _brm_cell_dirichlet_logpdf(w, alpha::AbstractVector)
+@_brm_traceable function _brm_cell_dirichlet_logpdf(w, alpha::AbstractVector)
     length(alpha) == length(w) || _brm_cell_dirichlet_length_error(length(alpha), length(w))
-    total = SpecialFunctions.loggamma(sum(alpha))
-    for k in eachindex(w, alpha)
-        total += (alpha[k] - 1) * log(w[k]) - SpecialFunctions.loggamma(alpha[k])
-    end
-    total
+    SpecialFunctions.loggamma(sum(alpha)) +
+        sum((alpha .- 1) .* log.(w) .- SpecialFunctions.loggamma.(alpha))
 end
 @noinline _brm_cell_dirichlet_length_error(K, n) = throw(DimensionMismatch(
     "a `Dirichlet` cell latent has $n entries in this cell; its concentration has $K"))

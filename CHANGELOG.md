@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.375
+
+- RKBRMI's JAX export supports a Dirichlet simplex inside a `@plate`,
+  with scalar or vector concentrations. It uses the same isometric
+  coordinates, log Jacobian and normalized density as native RKBRMI.
+
 ## 0.2.374
 
 - Model-scope `gmrf(...; neighbors=m)` terms on RKBRMI expose
