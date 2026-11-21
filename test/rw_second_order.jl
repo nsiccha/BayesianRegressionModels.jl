@@ -347,4 +347,26 @@ end
     end
 end
 
+@stestset "sparse Laplace rejects an unusable final walk precision and recovers" begin
+    t = collect(1:60)
+    model = RW_BUILDERS[(order=2, sum_to_zero=true)]
+    rk = RKBRMI(model((; t, y=sin.(t ./ 10))))
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:t,))
+    ordinary = zeros(length(p.population))
+    value, gradient = LogDensityProblems.logdensity_and_gradient(p, ordinary)
+    @test isfinite(value) && all(isfinite, gradient)
+    mode = copy(p.u)
+
+    # Only the likelihood identifies this walk's linear trend. At a
+    # vanishing walk scale its curvature is lost in the difference precision.
+    trial = copy(ordinary)
+    trial[findfirst(==(Symbol("rw_mu_t.sigma")), p.names)] = -220.0
+    @test LogDensityProblems.logdensity(p, trial) == -Inf
+    v, g = LogDensityProblems.logdensity_and_gradient(p, copy(trial))
+    @test v == -Inf && length(g) == length(trial) && all(isnan, g)
+    @test p.nonfinite == 1 && p.unconverged == 0
+    @test p.u == mode
+    @test LogDensityProblems.logdensity_and_gradient(p, ordinary) == (value, gradient)
+end
+
 println("rw_second_order.jl: all testsets passed")

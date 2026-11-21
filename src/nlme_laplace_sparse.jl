@@ -1873,9 +1873,15 @@ function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=
     any(>(0), view(search.stage_shifts, :, 2:length(stages))) && (p.folds += 1)
     F = _brm_spl_factor!(p, h)
     W = issuccess(F) ? _brm_spl_woodbury(p, F) : nothing
-    _brm_spl_definite(F, W) || _brm_nlme_error("brm_laplace_problem: the integrated " *
-        "effects' density has a stationary point that is not a maximum at population " *
-        "point $(repr(collect(φ)))")
+    if !_brm_spl_definite(F, W)
+        # A shifted Newton step can stop even when the unshifted precision
+        # cannot define the Gaussian needed for the Laplace integral.
+        p.nonfinite += 1
+        @warn("brm_laplace_problem: the integrated effects' final precision could " *
+            "not be factored as positive definite at population point " *
+            "$(repr(collect(φ))); its log density is -Inf", maxlog=3)
+        return (; finite=false, value=-Inf, iterations)
+    end
     p.u[p.integrated] .= z
     u = copy(pop.uA)
     u[p.integrated] .= z
