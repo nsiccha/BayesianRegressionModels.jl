@@ -526,7 +526,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                     rows=nothing, column=nothing))
                 continue
             end
-            (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
+            (; into, order, matrix_rows) = _brm_kernel_ragged_options(argument; prefix="RK backend")
             # Coverage and raw-response ports belong to this cell's
             # observations. Reading a completion or a response observed
             # elsewhere must instead read its value, without observing it again.
@@ -559,7 +559,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             elseif parent(value) isa DataColumn
                 columns[source] = parent(parent(value))
             end
-            push!(inputs, (; source, kind=:gather, rows, column=nothing,
+            push!(inputs, (; source, kind=:gather, rows, column=nothing, matrix_rows,
                 group=_rk_kernel_column_name(group),
                 partition=_rk_kernel_partition_source!(columns, value, group,
                     cell_column, order, partition.is_lp, cell_observed)))
@@ -961,6 +961,11 @@ function _rk_kernel_latent_family(scope, law, kernel, lhs)
     end
     callable = _rk_kernel_observation_callee(scope, law, kernel)
     callable === StanBlocks.normal && (callable = Normal)
+    # A simplex per cell (`theta ~ Dirichlet(K, a)`, cell_total_coordinates.jl).
+    if spec !== nothing && spec.bijection === :simplex
+        _brm_check_cell_bijection_family(:simplex, callable, lhs)
+        return callable
+    end
     callable isa Type && callable <: UnivariateDistribution || error(
         "RK backend: kernel `$kernel` cell latent `$lhs` needs a univariate " *
         "Distributions family such as `Normal(…)` or `LogNormal(…)`; got `$(first(law.args))`")
@@ -988,6 +993,7 @@ function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
     # A latent through `shares(total)` is drawn from `_BRMShares{Family}`, the
     # family a type parameter of the law (rkppl-use §13).
     family = _rk_value_callee!(bindings, spec === nothing ? callable :
+        spec.bijection === :simplex ? _BRMCellDirichlet :
         _brm_lower_family(callable) ? _BRMLowerShares{callable} : _BRMShares{callable}, taken)
     plain = spec === nothing ? law : spec.law
     bounded = spec === nothing ? nothing : _brm_cell_lower_parts(plain, kernel.scope)
@@ -1593,10 +1599,30 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
                 marker = last(statement.args)
                 length(marker.args) == 4 || return statement
                 lhs, law = first(statement.args), marker.args[2]
+                # A simplex `Dirichlet(K, a)` has `K` entries (RKPPL refuses at
+                # binding a `K` that reads a sampled value); `Dirichlet(alpha)`
+                # has `length(alpha)`.
+                if marker.args[3] == QuoteNode(:simplex)
+                    # RKPPL binds a data array the cell reads whole, not at its
+                    # index, as a per-index column of the plate (ReactiveKernels
+                    # snag `rkppl-joint-cell-c8a61b47`), which would give each cell
+                    # one entry of the concentration.
+                    length(law.args) == 2 && law.args[2] isa Symbol &&
+                        law.args[2] in slice.globals && error(
+                        "RK backend: kernel `$(kernel.name)` cell latent `$lhs ~ " *
+                        "Dirichlet($(law.args[2]))` reads a concentration vector shared by " *
+                        "every cell; RKBRMI does not build that yet (ReactiveKernels snag " *
+                        "`rkppl-joint-cell-c8a61b47`). Write `Dirichlet(K, a)` for a " *
+                        "symmetric concentration, or read one concentration per cell, " *
+                        "`Dirichlet($(law.args[2])[i])`; SBBRMI takes the shared vector")
+                    size = length(law.args) == 3 ? law.args[2] :
+                        Expr(:call, :length, law.args[2])
+                    return Expr(:(=), lhs, Expr(:call, marker.args..., size))
+                end
                 sizers = Any[arg for arg in law.args[2:end] if sizes_cell(arg)]
                 isempty(sizers) && error(
                     "RK backend: kernel `$(kernel.name)` cell latent " *
-                    "`$lhs::$(marker.args[3].value)(…)` takes its length from a law " *
+                    "`$(_brm_cell_bijection_shown(lhs, marker.args[3].value))` takes its length from a law " *
                     "argument computed from the cell's data alone, such as " *
                     "`LogNormal(log.(mu[i]), s)`; `$law` has none")
                 size = Expr(:call, :length, first(sizers))
@@ -1616,8 +1642,11 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         index = Symbol(index, :_)
     end
     for (param, input) in inputs
+        # Whole rows of a matrix value (`G[p, :]`) read as `G[rows[i], :]`.
         reads[param] = input.kind === :gather ?
-            Expr(:ref, input.source, Expr(:ref, input.rows, index)) :
+            (get(input, :matrix_rows, false) ?
+                Expr(:ref, input.source, Expr(:ref, input.rows, index), :(:)) :
+                Expr(:ref, input.source, Expr(:ref, input.rows, index))) :
             Expr(:ref, input.source, index)
     end
     body = Any[_rk_kernel_cell_reads(statement, reads) for statement in cell]

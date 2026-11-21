@@ -285,6 +285,8 @@ end
 # A raw column's rows, checked against its ragged group column. An absent
 # replay response (`_BRMAbsentResponse`) lies on the group column's rows.
 _brm_ragged_column_length!(lens, name, values) = push!(lens, (name, length(values)))
+# A matrix is grouped by its rows (a cell reads `X[p, :]`).
+_brm_ragged_column_length!(lens, name, values::AbstractMatrix) = push!(lens, (name, size(values, 1)))
 _brm_ragged_column_length!(lens, name, ::_BRMAbsentResponse) = lens
 
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
@@ -385,11 +387,13 @@ end
 # each `nothing` when absent.
 function _brm_kernel_ragged_options(c; prefix="BRM kernel preparation")
     kwargs = getkwargs(c)
-    unknown = [k for k in keys(kwargs) if !(k in (:into, :order))]
+    unknown = [k for k in keys(kwargs) if !(k in (:into, :order, :matrix_rows))]
     isempty(unknown) || error(
-        "$prefix: kernel(...) `ragged(...)` accepts only the `into=` and `order=` ",
-        "keywords; got ", join(("`$k`" for k in unknown), ", "), ".")
-    (; into=get(kwargs, :into, nothing), order=get(kwargs, :order, nothing))
+        "$prefix: kernel(...) `ragged(...)` accepts only the `into=`, `order=` and ",
+        "`matrix_rows=` keywords; got ", join(("`$k`" for k in unknown), ", "), ".")
+    # `matrix_rows = true`: the cell reads whole rows of a matrix (`G[p, :]`).
+    matrix_rows = _brm_data_value(get(kwargs, :matrix_rows, false)) === true
+    (; into=get(kwargs, :into, nothing), order=get(kwargs, :order, nothing), matrix_rows)
 end
 
 # `ragged(idx, group; into=target)`: `idx` holds 1-based row numbers on the flat

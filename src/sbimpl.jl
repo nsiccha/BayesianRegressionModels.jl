@@ -8931,8 +8931,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             gath_sym in dcol_names && i <= length(params) &&
                 (gath_sym = Symbol("kernel_", target, "_", params[i], "_ragged"))
             gath_sym in dcol_names && (gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_", i, "_ragged"))
-            (; into, order) = _brm_kernel_ragged_options(c; prefix="sbimpl")
-            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into, order))
+            (; into, order, matrix_rows) = _brm_kernel_ragged_options(c; prefix="sbimpl")
+            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into, order, matrix_rows))
             push!(dcol_names, gath_sym)
             continue
         end
@@ -9130,7 +9130,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # replay checks the new rows the same way.
     observed_idx = Set(spec[1] for spec in ragged_specs
         if _sb_cell_param_observed(body_stmts, params[spec[1]]))
-    for (i, arg_col, grp_arg, gath_sym, into, order) in ragged_specs
+    for (i, arg_col, grp_arg, gath_sym, into, order, matrix_rows) in ragged_specs
         rows, is_lp, is_unbound = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
             allow_unbound_observation=i in unbound_idx, order, observed=i in observed_idx)
         # An `into=` index column gathers its rebased positions, not its raw
@@ -9147,13 +9147,18 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             data[gath_sym] = rows
             rows_param = Symbol("kernel_rows_", params[i])
             slice_params[i] = rows_param
-            sliced = :($(name(arg_col))[$rows_param])
+            # Whole rows of a matrix value (`G[p, :]`) read as `G[rows, :]`.
+            sliced = matrix_rows ? :($(name(arg_col))[$rows_param, :]) :
+                :($(name(arg_col))[$rows_param])
             body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
         else
             isnothing(flat) && (flat = parent(parent(arg_col)))
-            data[gath_sym] = _brm_gather_cells(flat, rows)
+            # Whole rows of a data matrix: one matrix per cell.
+            data[gath_sym] = matrix_rows ? [flat[r, :] for r in rows] :
+                _brm_gather_cells(flat, rows)
         end
         options = (; is_lp)
+        matrix_rows && (options = merge(options, (; matrix_rows=true)))
         isnothing(into) || (options = merge(options, (; into=name(into))))
         isnothing(order) || (options = merge(options, (; order=name(order))))
         distinct && (options = merge(options, (; distinct_labels=true)))
@@ -9761,10 +9766,18 @@ end
 function _sb_emit_vector_prior!(stmts, data, target, ::Type{<:Dirichlet}, op)
     args, kwargs = getargs(op), getkwargs(op)
     isempty(kwargs) || error("sbimpl: `$target ~ Dirichlet(...)` takes no keywords")
-    if length(args) == 2 && !(last(args) isa Real)
+    # A concentration from the data is a constant (`_sb_dirichlet_alpha` below);
+    # only one the model computes, such as a sampled scalar, is emitted here.
+    if length(args) == 2 && !(_sb_dirichlet_data_value(last(args)) isa Real)
         dimension, concentration = args
+        # The dimension may be a data field (`Dirichlet(n, a)` with `n` in the
+        # data), read when the model is built, as `_sb_dirichlet_alpha` reads it.
+        dimension = _sb_dirichlet_data_value(dimension)
+        dimension isa Real && !(dimension isa Integer) && isinteger(dimension) &&
+            (dimension = Int(dimension))
         dimension isa Integer && dimension >= 1 || error(
-            "sbimpl: Dirichlet dimension for `$target` must be a positive integer")
+            "sbimpl: Dirichlet dimension for `$target` must be a positive integer ",
+            "or a data field holding one, got `$(repr(dimension))`")
         alpha = Expr(:call, :rep_vector, _sb_effect_prior_arg(concentration), dimension)
         push!(stmts, Expr(:call, :~, target, Expr(:call, :dirichlet, alpha)))
         return true
@@ -9806,8 +9819,7 @@ function _sb_dirichlet_alpha(target, args, kwargs)
         K, a = args
         # A dimension or concentration from the data (`Dirichlet(K, 1)` with
         # `K` a data field) is its value, read when the model is built.
-        data_value(x) = x isa AbstractColumn && (v = _brm_data_value(x); v isa Real) ? v : x
-        K, a = data_value(K), data_value(a)
+        K, a = _sb_dirichlet_data_value(K), _sb_dirichlet_data_value(a)
         K isa Real && !(K isa Integer) && isinteger(K) && (K = Int(K))
         (K isa Integer && a isa Real) || error(
             "sbimpl: symmetric `$target ~ Dirichlet(K, a)` needs an integer ",
@@ -9831,6 +9843,11 @@ function _sb_dirichlet_alpha(target, args, kwargs)
         "strictly positive, got $alpha.")
     alpha
 end
+
+# A `Dirichlet` argument that names a scalar data field is that field's value;
+# anything else (a literal, a model value) is returned unchanged.
+_sb_dirichlet_data_value(x) =
+    x isa AbstractColumn && (v = _brm_data_value(x); v isa Real) ? v : x
 
 # `@brm` is a MACRO over the formula block, so a bare Julia symbol on the RHS is
 # parsed as a formula LOCAL (`@getproperty` falls back to a `NamedColumn`) rather

@@ -229,6 +229,18 @@ function _brm_start_flat_values(name, output, value::AbstractArray{<:Real})
 end
 function _brm_start_flat_values(name, output, value::AbstractVector{<:AbstractVector})
     ends = output.segments
+    # A cell latent of one length in every cell is one column per cell
+    # (`matrix[K, cells]`); it takes one vector per cell too, as on RKBRMI.
+    if isnothing(ends) && output.dims isa Tuple && length(output.dims) == 2
+        K, cells = output.dims
+        length(value) == cells || throw(DimensionMismatch(
+            "brm_start: cell latent `$name` has $cells cells, got $(length(value)) vectors"))
+        for (g, v) in enumerate(value)
+            length(v) == K || throw(DimensionMismatch(
+                "brm_start: cell latent `$name` has $K values in cell $g, got $(length(v))"))
+        end
+        return reduce(vcat, value; init=Float64[])
+    end
     isnothing(ends) && error(
         "brm_start: `$name` takes one vector per cell only as a `@plate` cell " *
         "latent whose length varies by cell; give its values as one vector")
@@ -944,12 +956,14 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     # Values of a `T::shares(total)` cell latent, checked against the model's
     # once the point is built: they must sum to each cell's total.
     shares_values = Pair{Symbol,Vector{Float64}}[]
+    shares_kinds = Dict{Symbol,Symbol}()
     bounded_shares = NamedTuple[]
     for target in _brm_start_targets(parent(sb), inits)
         # A cell latent with a given total starts at its shares' coordinates.
         if target.kind === :parameter && haskey(total_latents, target.name)
             push!(shares_values, target.name =>
                 _brm_start_flat_values(target.name, brm_output(d, target.name), target.value))
+            push!(shares_kinds, target.name => total_latents[target.name])
             if !isempty(brm_outputs(d; logical=Symbol(target.name, :_shares_excess)))
                 push!(bounded_shares, target)
                 continue
@@ -996,7 +1010,7 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     for (i, value) in writes
         _brm_start_check("Stan value `$(names[i])`", check[i], value)
     end
-    isempty(shares_values) || _brm_sb_start_check_shares(stan_model, d, u, shares_values)
+    isempty(shares_values) || _brm_sb_start_check_shares(stan_model, d, u, shares_values, shares_kinds)
     u
 end
 
@@ -1016,14 +1030,16 @@ end
 
 # The start's values of a `T::shares(total)` latent are the model's only when
 # they sum to each cell's total; otherwise refused, never rescaled.
-function _brm_sb_start_check_shares(stan_model, d, u, shares_values)
+function _brm_sb_start_check_shares(stan_model, d, u, shares_values, kinds=Dict{Symbol,Symbol}())
     θ = BridgeStan.param_constrain(stan_model, u; include_tp=true)
     names = String.(BridgeStan.param_names(stan_model; include_tp=true))
     for (name, values) in shares_values
         model_values = θ[_brm_element_coordinates(brm_output(d, name), names)]
+        simplex = get(kinds, name, :shares) === :simplex
         isapprox(model_values, values; rtol=1e-8) || error(
-            "brm_start: cell latent `$name::shares(total)`'s values must sum to " *
-            "each cell's total; the model's values for this start are " *
+            "brm_start: cell latent `$(_brm_cell_bijection_shown(name, get(kinds, name, :shares)))`'s " *
+            "values must " * (simplex ? "be positive and sum to 1 in each cell" :
+                "sum to each cell's total") * "; the model's values for this start are " *
             "$(model_values), the given ones $(values)")
     end
 end

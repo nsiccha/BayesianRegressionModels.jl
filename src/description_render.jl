@@ -88,6 +88,11 @@ _brmd_call_math(::typeof(StanBlocks.stan.builtin.reshape),args,kwargs,c) = lengt
     "\\operatorname{"*_brmd_text(c,:math_reshape)*"}\\left("*join(args,",")*"\\right)"
 _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.reshape),c)=length(c.arguments)==3 ?
     BRMDescriptionFragment(prose=(_brmd_text(c,:matrix_reshape),),covers=(c.id,)) : nothing
+# Julia's `reshape(v, m, n)` in a model statement fills column by column too.
+_brmd_call_math(::typeof(Base.reshape),args,kwargs,c) =
+    _brmd_call_math(StanBlocks.stan.builtin.reshape,args,kwargs,c)
+_brmd_builtin_call(::typeof(Base.reshape),c) =
+    _brmd_builtin_call(StanBlocks.stan.builtin.reshape,c)
 function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_matrix),args,_kwargs,_c)
     length(args)==3 && return first(args)*"\\,\\mathbf1_{"*args[2]*"\\times "*args[3]*"}"
     "\\operatorname{rep}_{\\mathrm{matrix}}\\left("*join(args,",")*"\\right)"
@@ -483,6 +488,12 @@ _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
     _brmd_coordinatewise_fragment(c)
+# The coordinates of a cell latent through a bijection (cell_total_coordinates.jl):
+# their density is the cell's law, described with the cell's statements.
+_brmd_builtin_call(::typeof(brm_shares),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:cell_shares_coordinates),),covers=(c.id,))
+_brmd_builtin_call(::typeof(brm_cell_dirichlet),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:cell_simplex_coordinates),),covers=(c.id,))
 # `x[1:n] .~ Family.(...)` (`_brm_vector_prior(n, law)`): one element law,
 # itself a described component, shared by every coordinate.
 _brmd_builtin_call(::typeof(_brm_vector_prior),c)=BRMDescriptionFragment(

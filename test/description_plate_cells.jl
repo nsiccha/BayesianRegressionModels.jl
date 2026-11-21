@@ -96,6 +96,40 @@ end
     @test "`log_T` ist eine latente Größe der Zelle `y_cell`." in german.prose
 end
 
+# A cell latent through a bijection carries it as internal law keywords; the
+# description shows the law as written, states a `shares` latent's sum, and
+# describes the latent's coordinates (before, the keywords were printed in the
+# law and `brm_shares` was a coverage gap).
+@testset "a latent with a given total, and a Dirichlet simplex, read as written" begin
+    shares = @brm (; mu=[[10.0, 20.0, 5.0], [7.0, 3.0]], obs=[[1, 2], [1]],
+                     y=[[11.0, 19.0], [6.5]], total=[36.0, 10.5]) begin
+        sigma ~ Exponential(1.0)
+        @plate for i in eachindex(total)
+            T::shares(total[i]) ~ LogNormal(log.(mu[i]), 0.5)
+            y[i] ~ Normal(T[obs[i]], sigma)
+        end
+    end
+    r = describe(shares)
+    @test r.complete
+    @test "\\mathrm{T}\\sim{}\\operatorname{LogNormal}_{\\mathrm{log\\,SD}}(\\log\\left({\\mathrm{mu}}_{i}\\right),0.5)" in r.equations
+    @test "\\textstyle\\sum_k \\mathrm{T}_k={\\mathrm{total}}_{i}" in r.equations
+    @test !occursin("_brm_", brm_description_markdown(r))
+    simplex = @brm (; y=[0.1, 0.4, -0.2, 0.3], x1=[1.0, 0.5, -1.0, 0.2], x2=[0.3, -0.4, 0.8, 1.1],
+                      series=[1, 1, 2, 2], n=2, alpha0=1.5) begin
+        sigma ~ Exponential(1.0)
+        @plate for p in groups(series)
+            theta ~ Dirichlet(n, alpha0)
+            y[p] ~ Normal(theta[1] .* x1[p] .+ theta[2] .* x2[p], sigma)
+        end
+    end
+    r = describe(simplex)
+    @test r.complete
+    @test "`theta` is a latent quantity of the cell `y_cell`." in r.prose
+    @test "\\mathrm{theta}\\sim{}\\operatorname{dirichlet}(\\mathrm{n},\\mathrm{alpha0})" in r.equations
+    @test !occursin("_brm_", brm_description_markdown(r))
+    @test r.complete == describe(simplex; texts=description_texts(:de)).complete
+end
+
 @testset "a collected output and a grouped response read as written" begin
     model = @brm (; subject=[1, 2], obs_subject=[1, 2, 1], time=[0.2, 0.3, 0.8], y=[0.4, 1.2, 0.6]) begin
         sigma ~ Exponential(1)

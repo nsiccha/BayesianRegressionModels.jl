@@ -442,9 +442,10 @@ Dispatch tag only — kernel-argument lowering lives in `_sb_kernel_doblock!`
 ragged
 
 # `order=` is the kernel positional a `@plate for p in groups(g; order = t)`
-# header lowers to; it is not written on `ragged` itself.
+# header lowers to, and `matrix_rows=` a cell's whole-row read `G[p, :]`; neither
+# is written on `ragged` itself.
 _check_term_kwargs(::typeof(ragged), kwargs) =
-    all(in((:into, :order)), keys(kwargs)) || error(
+    all(in((:into, :order, :matrix_rows)), keys(kwargs)) || error(
     "@brm: ragged(...) takes only the `into=` keyword, got $(keys(kwargs)). In a ",
     "`@plate for` cell, read `x[rows[i]]` with `rows = groups(group => labels)`; ",
     "an index vector into another grouping is `indexin(idx[rows[i]], target[i])`.")
