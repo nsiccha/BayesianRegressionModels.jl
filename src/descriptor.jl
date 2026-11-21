@@ -2518,6 +2518,10 @@ function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=no
           " `brm_outputs` to take them all and select on `declaration.target`.")
 end
 
+# One member's positions in a flat carrier, from its fitted cumulative ends.
+_brm_member_segment(ends, member) =
+    ((member == 1 ? 0 : ends[member - 1]) + 1):ends[member]
+
 function _brm_emitted_coordinates(output::BRMOutput, constrained_names)
     stem = String(output.name)
     prefix = stem * "."
@@ -2527,7 +2531,7 @@ function _brm_emitted_coordinates(output::BRMOutput, constrained_names)
         # occupy columns, and a scalar occupies its own vector entry.
         ends = output.segments
         selected = member isa Vector{Int} ? Set(member) : isnothing(ends) ? (member:member) :
-            ((member == 1 ? 0 : ends[member - 1]) + 1 : ends[member])
+            _brm_member_segment(ends, member)
         return Int[i for (i, raw) in enumerate(constrained_names) if begin
             name = string(raw)
             startswith(name, prefix) && tryparse(Int, last(split(name, '.'))) in selected

@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.363
+
+- `brm_coordinate_transport` pairs the basis weights of ungrouped
+  `hsgp` curves in a repeated component, including curves with different
+  basis counts. Each weight maps to its position within its own member's
+  segment of the fitted Stan vector.
+
 ## 0.2.362
 
 - SBBRMI lowers a record component whose member returns its record's own data
