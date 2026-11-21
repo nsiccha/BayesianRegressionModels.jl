@@ -287,7 +287,7 @@ end
     taken = Set{Symbol}()
     names = [BRM._rk_ast_fresh_name("x", taken) for _ in 1:4]
     @test names == [:x, :x_, :x_2, :x_3]
-    @test BRM._rk_ast_fresh_name("y_", Set([:y_])) === :y__2
+    @test BRM._rk_ast_fresh_name("y_", Set([:y_])) === :y_1
     @test !any(name -> endswith(string(name), "__"), names)
 end
 

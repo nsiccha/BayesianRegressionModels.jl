@@ -25,11 +25,12 @@ instead of failing at run time.
   `stanc` refused the program with "Non-data variables are not allowed in top
   level size declarations": joining the plates' vectors took the first plate's
   length from its fitted values instead of its data ends.
-- A generated name that collides a second time is numbered (`x_2`, `x_3`)
-  instead of taking another underscore. `stanc` refuses an identifier that
-  ends in `__`, which a member's `@observe` clause produced when it indexed
-  two returned vectors and its record had a field named `subject_rows`, or
-  indexed three. RK programs with such a name use the numbered one.
+- A generated name never ends in `__`: a second collision is numbered (`x`,
+  `x_`, then `x_2`, `x_3`), and so is a first collision of a name that already
+  ends in `_` (`y_1`). `stanc` refuses an identifier that ends in `__`, which a
+  member's `@observe` clause produced when it indexed two returned vectors and
+  its record had a field named `subject_rows`, or indexed three. RK programs
+  with such a name use the numbered one.
 
 ## 0.2.358
 

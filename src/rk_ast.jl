@@ -776,14 +776,16 @@ end
 #
 
 # A name not in `taken`, recorded there. The first collision appends `_`, later
-# ones number the name (`x_2`, `x_3`, ...): SBBRMI emits these names as Stan
+# ones number the name (`x_2`, `x_3`, ...), as does every collision of a name
+# that already ends in `_` (`y_1`): SBBRMI emits these names as Stan
 # identifiers, and Stan reserves every identifier that ends in `__`.
 function _rk_ast_fresh_name(base::String, taken::Set{Symbol})
     name = Symbol(base)
-    n = 1
+    stem = endswith(base, "_") ? base : string(base, "_")
+    n = 0
     while name in taken
         n += 1
-        name = n == 2 && !endswith(base, "_") ? Symbol(base, "_") : Symbol(base, "_", n)
+        name = n == 1 && stem != base ? Symbol(stem) : Symbol(stem, n)
     end
     push!(taken, name)
     name
