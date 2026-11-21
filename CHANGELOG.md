@@ -12,6 +12,11 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.371
+
+- `brm_start(sb, stan_model)` now names the imports needed to compute a
+  data-based Stan start when the ReactiveKernels extension is missing.
+
 ## 0.2.370
 
 - In a model-scope assignment, `eta = X * b` now contracts a rectangular
