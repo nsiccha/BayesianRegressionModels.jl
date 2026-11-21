@@ -146,6 +146,112 @@ end
         rk_source="s[1:s_length] .~ HalfNormal.(1.0)")
 end
 
+@stestset "explicit restricted vector margins and normalized control" begin
+    data = (; n=3, y=[0.4, -0.3, 1.2])
+    restricted_model = @brm begin
+        z[1:n] .~ restricted.(Normal.(0, 1), 0.0, Inf)
+        y .~ Normal.(z, 1)
+    end
+    legacy = @brm begin
+        z[1:n] .~ Normal.(0, 1; lower=0.0)
+        y .~ Normal.(z, 1)
+    end
+    model = @test_logs restricted_model(data)
+    keyword_model = @test_logs legacy(data)
+    source = string(model)
+    @test startswith(source, "z[1:n] .~ restricted.(Normal.(0, 1), 0.0, Inf)\n")
+    @test BRM.stan_code(SBBRMI(model)) == BRM.stan_code(SBBRMI(keyword_model))
+    replay = brm(data, source; mod=@__MODULE__)
+    @test string(replay) == source
+    normalized = brm(data, replace(source, "restricted." => "truncated."); mod=@__MODULE__)
+    names = ["z.1", "z.2", "z.3"]
+    for (brmi, label, offset) in ((replay, "restricted", 0.0),
+                                  (normalized, "normalized", 3log(2)))
+        backend, problem = consumer_problem(brmi)
+        stan = consumer_stan(brmi, "vector-margins-" * label).model
+        @test coordinate_names(backend.model.layout) == Symbol.(names)
+        @test BridgeStan.param_unc_names(stan) == names
+        for u in ([-0.4, 0.25, 0.7], [0.3, -0.8, -0.1])
+            z = exp.(u)
+            expected = sum(logpdf.(Normal(), z)) + sum(logpdf.(Normal.(z, 1), data.y)) +
+                sum(u) + offset
+            derivative = 1 .+ z .* (data.y .- 2 .* z)
+            for (value, gradient) in (LogDensityProblems.logdensity_and_gradient(problem, u),
+                    BridgeStan.log_density_gradient(stan, u; propto=false, jacobian=true))
+                @test value ≈ expected atol=1e-10
+                @test gradient ≈ derivative atol=1e-10
+            end
+        end
+    end
+end
+
+@stestset "explicit restricted vector margins with asymmetric bounds" begin
+    explicit = @brm begin
+        z[1:n] .~ restricted.(Normal.(0, ws); lower=lo, upper=hi)
+        y .~ Normal.(z, 1)
+    end
+    legacy = @brm begin
+        z[1:n] .~ Normal.(0, ws; lower=lo, upper=hi)
+        y .~ Normal.(z, 1)
+    end
+    data = (; n=3, ws=[0.8, 1.4, 0.6], y=[0.4, -0.3, 1.2], lo=-0.7, hi=2.3)
+    model = explicit(data)
+    source = string(model)
+    @test startswith(source, "z[1:n] .~ restricted.(Normal.(0, ws); lower=lo, upper=hi)\n")
+    @test BRM.stan_code(SBBRMI(model)) == BRM.stan_code(SBBRMI(legacy(data)))
+    held = (; data..., y=reverse(data.y))
+    sb = reprocess(SBBRMI(model), held)
+    rk = reprocess(RKBRMI(model), held)
+    rebuilt = brm(held, source; mod=@__MODULE__)
+    @test BRM.stan_data(sb) == BRM.stan_data(SBBRMI(rebuilt))
+    stan = consumer_stan(rebuilt, "vector-margins-asymmetric")
+    problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    oracle(u) = begin
+        z = uniform_value.(u, held.lo, held.hi)
+        sum(logpdf.(Normal.(0, held.ws), z)) + sum(logpdf.(Normal.(z, 1), held.y)) +
+            sum(uniform_logjac.(u, held.lo, held.hi))
+    end
+    u = [-0.4, 0.25, 0.7]
+    check_consumer_point(problem, u, oracle)
+    mapping = [Symbol("z.", i) => "z.$i" for i in 1:3]
+    check_consumer_stan(problem, stan, mapping, rk, u)
+end
+
+@stestset "open lower endpoint in a restricted vector" begin
+    upper = @brm begin
+        z[1:n] .~ restricted.(Normal.(0, 1), -Inf, 2.0)
+        y .~ Normal.(z, 1)
+    end
+    model = upper(vp_data)
+    source = string(model)
+    @test startswith(source, "z[1:n] .~ restricted.(Normal.(0, 1), -Inf, 2.0)\n")
+    rebuilt = brm(vp_data, source; mod=@__MODULE__)
+    sb = SBBRMI(rebuilt)
+    @test brm_description(sb).complete
+    @test stan_declaration(BRM.stan_code(sb), :z) == "vector<upper=2.0>[z_n] z;"
+    rk = RKBRMI(rebuilt)
+    @test occursin("restricted.(Normal.(0", sprint(Base.show_unquoted, BRM._rk_emit_ast(rk.plan).main))
+end
+
+@stestset "per-margin declaration bounds on Stan" begin
+    data = (; n=3, y=[0.4, -0.3, 1.2], lo=[-2.0, 0.1, -1.3], hi=[1.3, 2.5, 0.6])
+    u = [-0.4, 0.25, 0.7]
+    p = LogExpFunctions.logistic.(u)
+    z = uniform_value.(u, data.lo, data.hi)
+    dz = (data.hi .- data.lo) .* p .* (1 .- p)
+    expected = sum(logpdf.(Normal(), z)) + sum(logpdf.(Normal.(z, 1), data.y)) +
+        sum(uniform_logjac.(u, data.lo, data.hi))
+    derivative = (data.y .- 2 .* z) .* dz .+ 1 .- 2 .* p
+    for law in ("Normal.(0, 1; lower=lo, upper=hi)", "restricted.(Normal.(0, 1), lo, hi)")
+        model = brm(data, "z[1:n] .~ $law\ny .~ Normal.(z, 1)"; mod=@__MODULE__)
+        stan = consumer_stan(model, "vector-margins-per-coordinate").model
+        @test BridgeStan.param_unc_names(stan) == ["z.1", "z.2", "z.3"]
+        value, gradient = BridgeStan.log_density_gradient(stan, u; propto=false, jacobian=true)
+        @test value ≈ expected atol=1e-10
+        @test gradient ≈ derivative atol=1e-10
+    end
+end
+
 @stestset "MvNormal vector parameters are priors and build on RKBRMI" begin
     oracle_iso(u) = logpdf(MvNormal(fill(-0.5, 4), 1.0), u) + likelihood(u, 1.0)
     check_vector_case(vp_mvnormal, vp_data, "mvnormal", oracle_iso;

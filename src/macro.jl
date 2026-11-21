@@ -3947,7 +3947,19 @@ function _brm_restricted_law(rhs::ExprColumn)
     base isa ExprColumn && !any(in((:lower, :upper)), keys(getkwargs(base))) || error(
         "@brm: `restricted(D, ...)` needs a distribution call `D(args...)` " *
         "without `lower`/`upper` keywords of its own")
-    ExprColumn(getf(base), getargs(base)...; getkwargs(base)..., bounds...)
+    # A literal -Inf/Inf denotes an open end. Declaration keywords carry
+    # only the sides that actually constrain the parameter.
+    declared_bounds = (key => value for (key, value) in pairs(bounds)
+                       if !_brm_open_endpoint(value, key === :lower ? -Inf : Inf))
+    ExprColumn(getf(base), getargs(base)...; getkwargs(base)..., declared_bounds...)
+end
+
+_brm_open_endpoint(value, endpoint) = value isa Real && value == endpoint
+_brm_open_endpoint(value::NamedColumn, endpoint) =
+    parent(value) isa MissingColumn && name(value) === :Inf && endpoint == Inf
+function _brm_open_endpoint(value::ExprColumn{F}, endpoint) where {F<:Union{typeof(+),typeof(-)}}
+    args = getargs(value)
+    length(args) == 1 && _brm_open_endpoint(only(args), getf(value)(endpoint))
 end
 
 Base.@nospecializeinfer function _expand_nested_predictor_formulas(
@@ -4242,6 +4254,15 @@ _brm_show_keyword_value(io::IO, x::Symbol) = show(io, x)
 # `Normal.(0.0, w_scale; lower=0.0)`, `truncated.(Normal.(0.0, 1.0), 0.0, 2.0)`.
 _brm_show_dotted(io::IO, x) = _brm_show_operand(io, x, 0)
 function _brm_show_dotted(io::IO, x::ExprColumn)
+    prefix = _brm_prefix_symbol(x)
+    if !isnothing(prefix)
+        print(io, prefix)
+        arg = only(getargs(x))
+        arg isa ExprColumn || return _brm_show_operand(io, arg, typemax(Int))
+        print(io, "(")
+        _brm_show_dotted(io, arg)
+        return print(io, ")")
+    end
     op = _brm_infix_symbol(x)
     if !isnothing(op)
         print(io, "(")

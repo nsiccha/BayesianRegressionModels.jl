@@ -9973,7 +9973,7 @@ end
 # scalar prior seam, so declaration bounds, `truncated` and affine laws keep
 # their scalar meaning; only the declaration gains its type.
 function _sb_emit_vector_prior!(stmts, data, target, ::typeof(_brm_vector_prior), op)
-    len, law = getargs(op, 2)
+    len, law = _brm_semantic_args(op)
     n_key = Symbol(target, :_n)
     haskey(data, n_key) && error(
         "sbimpl: `$target[1:n] .~ ...` reserves data key `$n_key`, but that name is ",
