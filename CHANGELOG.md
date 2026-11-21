@@ -12,6 +12,29 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.356
+
+- `brm_laplace_integration` is about six times faster on a sparse Laplace
+  target with the formula's coefficients integrated (the Latte-home-turf epil
+  model, 301 integrated effects and 236 Poisson rows: 490 ms before, 71–76 ms
+  now, one CPU on gordito; Crowder seeds 5.5–6.3 ms before, 4.0–4.7 ms now;
+  snag `brm-laplace-inte-e0991a0f`). Its results are unchanged up to rounding
+  (draws within 1e-11):
+  - the design's mode searches start from the centre's modes where the
+    conditional density is log-concave, which halves their Newton steps;
+  - its draws reuse the design's mode searches instead of searching each
+    drawn point again.
+- `brm_laplace_mode`'s first L-BFGS trial step is at most of unit length. A
+  first step as long as the gradient (65 on epil's log scales) went where the
+  conditional curvature is lost to rounding and a mode search ran to its
+  iteration limit, which took most of the mode's 250 ms. The mode found is
+  the same (to 2e-8 there), in 7 iterations instead of 12 and 11 ms.
+- Every sparse Laplace evaluation with `integrate = (..., :coefficients)` is
+  cheaper, with values and gradients unchanged to the bit: a coefficient's
+  map to the rows is read once instead of probed through the model at every
+  population point, and h's assembly indexes a coefficient's dense column
+  directly.
+
 ## 0.2.355
 
 - **Breaking:** SelectedInversion is a weak dependency too (decision
