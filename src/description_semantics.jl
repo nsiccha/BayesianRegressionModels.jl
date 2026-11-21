@@ -143,7 +143,7 @@ _brmd_value(x::JointResponseColumn,env,id) =
 
 function _brmd_value(x::ExprColumn, env, id)
     args = Tuple(_brmd_value(x, env, (id..., :argument, i))
-                 for (i,x) in enumerate(getargs(x)))
+                 for (i,x) in enumerate(_brm_semantic_args(x)))
     kwargs = _brmd_value(getkwargs(x), env, (id..., :keyword))
     included=()
     if last(id)===:expression

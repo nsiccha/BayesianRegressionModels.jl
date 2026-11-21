@@ -331,7 +331,7 @@ end
 _brm_prepare_expr(x; axes=Dict{Symbol,Symbol}()) = _brm_prepare_expr(x, axes)
 
 function _brm_prepare_call_expr(callable, expression, axes)
-    args = map(arg -> _brm_prepare_expr(arg, axes), getargs(expression))
+    args = map(arg -> _brm_prepare_expr(arg, axes), _brm_semantic_args(expression))
     kwargs = map(value -> _brm_prepare_expr(value, axes), getkwargs(expression))
     _BRMPreparedExpr(callable, args, kwargs)
 end

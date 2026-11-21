@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.375
+
+- Declared vectors accept `z[1:n] .~ restricted.(Normal.(0, 1), 0, Inf)`
+  on SBBRMI and RKBRMI. Each margin keeps the Normal density on its declared
+  support. Use `truncated.(...)` to normalize each margin. In a restricted
+  prior, `-Inf` and `Inf` denote open ends. Printed vector declarations
+  preserve the explicit wrapper and signed bounds for replay.
+
 ## 0.2.374
 
 - Model-scope `gmrf(...; neighbors=m)` terms on RKBRMI expose

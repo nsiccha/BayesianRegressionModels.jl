@@ -112,6 +112,14 @@ _brm_prior_constructor(::typeof(weighted)) = true
 # A declared vector, `name[1:n] .~ law`, is a parameter whose value is the whole
 # vector of `n` elements of `law`'s support.
 _brm_prior_constructor(::typeof(_brm_vector_prior)) = true
+# Semantic readers use the declaration-bound law. Source printing and
+# rebinding use getargs to preserve the authored wrapper.
+_brm_semantic_args(x::ExprColumn) = getargs(x)
+function _brm_semantic_args(prior::ExprColumn{typeof(_brm_vector_prior)})
+    n, law = getargs(prior, 2)
+    n, law isa ExprColumn{typeof(restricted)} ? _brm_restricted_law(law) : law
+end
+
 function _brm_distribution_shape(::typeof(_brm_vector_prior), args)
     shape = _brm_distribution_shape(last(args))
     isnothing(shape) || first(shape) === Distributions.Univariate || error(
