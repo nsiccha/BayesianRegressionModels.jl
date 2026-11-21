@@ -316,7 +316,7 @@ export Arcsine, Beta, Binomial, Categorical, Cauchy, Chisq, Dirichlet,
        NegativeBinomial, NormalCanon, Pareto, Rayleigh, SkewNormal,
        SkewedExponentialPower, TDist, Uniform, VonMises, Weibull
 export product_distribution, logpdf
-# Re-export the functions SBBRMI spells as Stan builtins (`_sb_julia_stan_name`,
+# Re-export the functions SBBRMI spells as Stan builtins (`_sb_julia_stan_builtin`,
 # sb_cell_julia.jl) and the links whose `InverseFunctions.inverse` is one of
 # them, so `logit(mu) ~ 1 + x` or `Binomial(n, logistic(eta))` needs no
 # `using LogExpFunctions` either (snag `logit-link-needs-91302d71`). These are

@@ -46,21 +46,24 @@ function _sb_cell_binding(scope::Module, head::Expr)
         getfield(owner, field) : nothing
 end
 
-# The Stan builtin a Julia callable is spelled as, for calls and dotted calls.
-_sb_julia_stan_name(callable) = nothing
-_sb_julia_stan_name(::typeof(LogExpFunctions.logistic)) = :inv_logit
-_sb_julia_stan_name(::typeof(LogExpFunctions.log1pexp)) = :log1p_exp
-_sb_julia_stan_name(::typeof(LogExpFunctions.log1mexp)) = :log1m_exp
-_sb_julia_stan_name(::typeof(LogExpFunctions.logsumexp)) = :log_sum_exp
+# The Stan builtin and its operands, shared by ordinary calls, broadcasts and links.
+_sb_julia_stan_builtin(callable, args) = (nothing, args)
+_sb_julia_stan_builtin(::typeof(LogExpFunctions.logistic), args) = (:inv_logit, args)
+_sb_julia_stan_builtin(::typeof(LogExpFunctions.log1pexp), args) = (:log1p_exp, args)
+# log(exp(x) - exp(0)) stays finite for large finite x and accurate near zero.
+_sb_julia_stan_builtin(::typeof(LogExpFunctions.logexpm1), args) =
+    length(args) == 1 ? (:log_diff_exp, (only(args), 0.0)) : (nothing, args)
+_sb_julia_stan_builtin(::typeof(LogExpFunctions.log1mexp), args) = (:log1m_exp, args)
+_sb_julia_stan_builtin(::typeof(LogExpFunctions.logsumexp), args) = (:log_sum_exp, args)
 # The standard normal CDF and its inverse, one argument each.
-_sb_julia_stan_name(::typeof(StatsFuns.normcdf)) = :Phi
-_sb_julia_stan_name(::typeof(StatsFuns.norminvcdf)) = :inv_Phi
-_sb_julia_stan_name(::typeof(cumsum)) = :cumulative_sum
+_sb_julia_stan_builtin(::typeof(StatsFuns.normcdf), args) = (:Phi, args)
+_sb_julia_stan_builtin(::typeof(StatsFuns.norminvcdf), args) = (:inv_Phi, args)
+_sb_julia_stan_builtin(::typeof(cumsum), args) = (:cumulative_sum, args)
 
 # The Stan call for a Julia call, or `nothing` to keep the authored call.
 function _sb_julia_stan_call(callable, args)
-    name = _sb_julia_stan_name(callable)
-    name === nothing ? nothing : Expr(:call, name, args...)
+    name, operands = _sb_julia_stan_builtin(callable, args)
+    name === nothing ? nothing : Expr(:call, name, operands...)
 end
 # Constructors whose Stan builtin depends on the result's rank.
 _sb_julia_stan_call(::typeof(fill), args) =
@@ -85,6 +88,11 @@ _sb_cell_combinator(head) =
     head in (:censored, :truncated, :interval_censored, :weighted)
 
 _sb_cell_keyword_argument(arg) = Meta.isexpr(arg, (:parameters, :kw))
+
+function _sb_cell_broadcast_call(head, args, scope)
+    name, operands = _sb_julia_stan_builtin(_sb_cell_binding(scope, head), args)
+    Expr(:., something(name, head), Expr(:tuple, operands...))
+end
 
 # One call argument in StanBlocks spelling; keyword names stay as written.
 _sb_cell_argument(arg, scope) = _sb_cell_value(arg, scope)
@@ -122,11 +130,8 @@ function _sb_cell_value(x::Expr, scope)
         end
         return Expr(:call, head, args...)
     elseif _brm_is_broadcast_call(x)
-        head = first(x.args)
-        callable = _sb_cell_binding(scope, head)
-        name = callable === nothing ? nothing : _sb_julia_stan_name(callable)
-        return Expr(:., something(name, head),
-            Expr(:tuple, (_sb_cell_argument(a, scope) for a in x.args[2].args)...))
+        return _sb_cell_broadcast_call(first(x.args),
+            map(a -> _sb_cell_argument(a, scope), x.args[2].args), scope)
     elseif x.head === :. && length(x.args) == 2 && x.args[2] isa QuoteNode
         return Expr(:., _sb_cell_value(x.args[1], scope), x.args[2])
     end

@@ -15,11 +15,11 @@ import StanBlocks
 const BRM = BayesianRegressionModels
 
 # The functions SBBRMI's Julia-to-Stan spelling table dispatches on through
-# `::typeof(f)` (`_sb_julia_stan_name`, src/sb_cell_julia.jl). Base functions
+# `::typeof(f)` (`_sb_julia_stan_builtin`, src/sb_cell_julia.jl). Base functions
 # are bound in every module already.
 function spelled_functions()
     fs = Set{Function}()
-    for m in methods(BRM._sb_julia_stan_name)
+    for m in methods(BRM._sb_julia_stan_builtin)
         T = Base.unwrap_unionall(m.sig).parameters[2]
         T isa DataType && T <: Function && isdefined(T, :instance) || continue
         parentmodule(T.instance) === Base || push!(fs, T.instance)
@@ -43,7 +43,7 @@ const LOWERED = union(SPELLED, lowered_links(SPELLED))
 
 @testset "every spelled function and lowered link is exported" begin
     # The reflection must see the seam; a renamed seam would read as empty.
-    for f in (LogExpFunctions.logistic, LogExpFunctions.log1pexp,
+    for f in (LogExpFunctions.logistic, LogExpFunctions.log1pexp, LogExpFunctions.logexpm1,
               StatsFuns.normcdf, StatsFuns.norminvcdf)
         @test f in SPELLED
     end
@@ -80,6 +80,16 @@ const others = @brm begin
     c ~ Binomial(n, logistic(eta))
     z ~ Normal(0, s)
 end
+const inverse_softplus = @brm begin
+    eta ~ 1 + x
+    q = logexpm1(exp(eta))
+    event ~ BernoulliLogit(q)
+    rows = groups(group => labels)
+    @plate for k in eachindex(y)
+        y[k] ~ BernoulliLogit(logexpm1(sum(exp.(eta[rows[k]]))))
+        measurements[k] ~ Normal(logexpm1.(exp.(eta[rows[k]])), 1.0)
+    end
+end
 const source = quote
     logit(mu) ~ 1 + x
     phi ~ Gamma(2, 0.1)
@@ -103,6 +113,17 @@ end
     # `brm(source; mod)` resolves its names in the same module.
     built = brm(OnlyBRMLinks.source; mod=OnlyBRMLinks)(OnlyBRMLinks.data)
     @test occursin("inv_logit(logit_mu", stan_code(SBBRMI(built; mod=OnlyBRMLinks)))
+end
+
+@testset "inverse softplus in a grouped likelihood and row-wise predictions" begin
+    data = (; x=[-1.0, 0.5, 1.5], group=[1, 2, 1], labels=[1, 2], y=[1, 0],
+              event=[0, 1, 1], measurements=[[0.1, 1.0], [0.5]])
+    sb = SBBRMI(OnlyBRMLinks.inverse_softplus(data); mod=OnlyBRMLinks)
+    code = stan_code(sb)
+    @test occursin(r"bernoulli_logit\(\s*log_diff_exp\(\s*sum\(\s*exp\(", code)
+    @test occursin(r"normal\(\s*log_diff_exp\(\s*exp\(", code)
+    @test occursin(r"q\s*=\s*log_diff_exp\(\s*exp\(eta\),\s*0\.0\)", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 end
 
 # Importing LogExpFunctions and StatsFuns as well stays unambiguous: the

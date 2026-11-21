@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.363
+
+- SBBRMI accepts `logexpm1(x)` in likelihoods and `logexpm1.(xs)` in
+  plate cells. It emits Stan's `log_diff_exp(x, 0.0)`, which stays finite
+  for large positive inputs. At model scope, `logexpm1(exp(eta))` applies
+  the transform per row.
+
 ## 0.2.362
 
 - SBBRMI lowers a record component whose member returns its record's own data
