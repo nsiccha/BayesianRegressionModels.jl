@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.356
+
+- The sparse embedded Laplace (`brm_laplace_problem(rk; integrate = (...))`)
+  stays finite and exact where a `car` field's or a sum-to-zero `rw` walk's
+  level is held only by its soft sum-to-zero: at a vanishing field scale, or
+  with `integrate = (..., :coefficients)` integrating an intercept beside the
+  field. Before, the factor of the conditional curvature failed there and
+  `brm_laplace_problem: the integrated effects' density has a stationary point
+  that is not a maximum` stopped `brm_laplace_mode`, `brm_laplace_integration`
+  and sampler chains (snag `brm-laplace-coef-2aea38ff`: the Scottish lip cancer
+  ICAR model with its coefficients integrated, at log scale below about -15).
+  The message now names the population point. Values elsewhere are unchanged
+  to rounding; draws from the conditional Gaussians follow a different random
+  stream.
+- A `car` field's Newton search no longer throws `ArgumentError: invalid
+  index: 2.0 of type Float64` when a step falls back to its blocks, a
+  regression from the second-order and sum-to-zero `rw` walks.
+
 ## 0.2.355
 
 - **Breaking:** SelectedInversion is a weak dependency too (decision
