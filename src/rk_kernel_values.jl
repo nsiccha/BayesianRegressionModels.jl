@@ -526,7 +526,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                     rows=nothing, column=nothing))
                 continue
             end
-            (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
+            (; into, order, matrix_rows) = _brm_kernel_ragged_options(argument; prefix="RK backend")
             # Coverage and raw-response ports belong to this cell's
             # observations. Reading a completion or a response observed
             # elsewhere must instead read its value, without observing it again.
@@ -559,7 +559,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             elseif parent(value) isa DataColumn
                 columns[source] = parent(parent(value))
             end
-            push!(inputs, (; source, kind=:gather, rows, column=nothing,
+            push!(inputs, (; source, kind=:gather, rows, column=nothing, matrix_rows,
                 group=_rk_kernel_column_name(group),
                 partition=_rk_kernel_partition_source!(columns, value, group,
                     cell_column, order, partition.is_lp, cell_observed)))
@@ -1642,8 +1642,11 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         index = Symbol(index, :_)
     end
     for (param, input) in inputs
+        # Whole rows of a matrix value (`G[p, :]`) read as `G[rows[i], :]`.
         reads[param] = input.kind === :gather ?
-            Expr(:ref, input.source, Expr(:ref, input.rows, index)) :
+            (get(input, :matrix_rows, false) ?
+                Expr(:ref, input.source, Expr(:ref, input.rows, index), :(:)) :
+                Expr(:ref, input.source, Expr(:ref, input.rows, index))) :
             Expr(:ref, input.source, index)
     end
     body = Any[_rk_kernel_cell_reads(statement, reads) for statement in cell]

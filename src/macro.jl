@@ -1199,13 +1199,32 @@ function _brm_plate_grouping_args(stmt)
         Meta.isexpr(arg, :kw) ? push!(keywords, arg) : push!(positional, arg)
     end
     options = Dict{Symbol,Symbol}()
+    matrix_rows = false
     for keyword in keywords
+        # `matrix_rows = true`: the cell reads whole rows of a matrix, `x[p, :]`.
+        if Meta.isexpr(keyword, :kw, 2) && keyword.args[1] === :matrix_rows &&
+                keyword.args[2] === true && !matrix_rows
+            matrix_rows = true
+            continue
+        end
         Meta.isexpr(keyword, :kw, 2) && keyword.args[1] in (:into, :order) &&
             keyword.args[2] isa Symbol && !haskey(options, keyword.args[1]) ||
             return nothing
         options[keyword.args[1]] = keyword.args[2]
     end
-    (; positional, into=get(options, :into, nothing), order=get(options, :order, nothing))
+    (; positional, into=get(options, :into, nothing), order=get(options, :order, nothing),
+       matrix_rows)
+end
+
+# `ragged(x, …)` read as whole rows of a matrix `x` (`x[p, :]`, `x[rows[i], :]`):
+# the same input with `matrix_rows = true`.
+function _brm_plate_matrix_rows(call)
+    call = copy(call)
+    k = findfirst(a -> Meta.isexpr(a, :parameters), call.args)
+    keyword = Expr(:kw, :matrix_rows, true)
+    k === nothing ? insert!(call.args, 2, Expr(:parameters, keyword)) :
+        (call.args[k] = Expr(:parameters, call.args[k].args..., keyword))
+    call
 end
 
 function _brm_plate_grouping_repr(name, (; group, cells, order)::_BRMPlateGrouping)
@@ -1321,7 +1340,7 @@ function _brm_plate_input_key(x)
     args = isxcall(x, :ragged) ? _brm_plate_grouping_args(x) : nothing
     if args !== nothing && length(args.positional) in (2, 3) &&
        all(arg -> arg isa Symbol, args.positional)
-        return (:ragged, args.positional..., args.into, args.order)
+        return (:ragged, args.positional..., args.into, args.order, args.matrix_rows)
     end
     # A property read, such as a component's returned field `kin.recovery`,
     # is a model value: name it at model scope and slice that name.
@@ -1529,6 +1548,34 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                 return source
             end
             return add_input(grouped(source))
+        end
+        # Whole rows of a matrix: `G[p, :]` in a `groups(...)` plate, or
+        # `G[rows[i], :]` through a binding. The cell reads the rows as a matrix.
+        if Meta.isexpr(ex, :ref, 3) && ex.args[3] === :(:) && ex.args[1] isa Symbol
+            source = ex.args[1]
+            row_read = Expr(:ref, source, ex.args[2])
+            shown = sprint(Base.show_unquoted, ex)
+            source in output_set && error(
+                "@brm: `$shown` reads rows of the plate output `$source`; a plate " *
+                "output has one value per cell, `$source[$i]`")
+            if _brm_plate_indexed(row_read, i)
+                header === nothing && error(
+                    "@brm: `$shown` reads whole rows at the cell index; in a plate " *
+                    "over `$header_source` read the rows of a matrix through a " *
+                    "binding, `$source[rows[$i], :]` with `rows = groups(g => labels)`, " *
+                    "or iterate `groups(g)` and read `$source[$i, :]`")
+                return add_input(_brm_plate_matrix_rows(grouped(source)), Symbol(source, :_rows))
+            end
+            read = _brm_plate_binding_read(row_read, i, groupings)
+            if read !== nothing
+                header === nothing || error(
+                    "@brm: a `@plate for $i in $header_source` cell reads its group's " *
+                    "rows as `x[$i, :]`; got `$shown`")
+                name, rows = read
+                read_grouping!(rows)
+                return add_input(_brm_plate_matrix_rows(
+                    _brm_plate_grouping_input(name, groupings[rows])), Symbol(name, :_, rows, :_rows))
+            end
         end
         # A remaining reference with the loop variable as one of ITS OWN axes
         # (`x[i, j]`) is a different slicing contract, not a kernel positional.

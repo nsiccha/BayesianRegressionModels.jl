@@ -107,12 +107,20 @@ function _brmd_plate_read_math(outer, read, value)
     bound = get(outer.provenance, :plate_rows, nothing)
     !isnothing(bound) && read.kind !== :positions && bound.rows === _brmd_plate_rows_name(read) &&
         return "{" * base * "}_{" * bound.symbol * "}"
-    entries = "{" * base * "}_{" * _brmd_plate_rows_math(plate, rows) * "}"
+    # Whole rows of a matrix (`G[p, :]`) read every column of those rows.
+    columns = _brmd_reads_matrix_rows(value) ? ",\\cdot" : ""
+    entries = "{" * base * "}_{" * _brmd_plate_rows_math(plate, rows) * columns * "}"
     read.kind === :positions || return entries
     positions = "\\operatorname{indexin}\\left(" * entries * "," *
         _brmd_plate_rows_math(plate, read.target) * "\\right)"
     read.zero ? "\\operatorname{something}\\left(" * positions * ",0\\right)" : positions
 end
+
+_brmd_reads_matrix_rows(value) = value isa BRMDescriptionComponent &&
+    (get(value.keywords, :matrix_rows, false) === true ||
+     any(x -> x isa BRMDescriptionComponent && x.kind === :syntax && x.callable === :kw &&
+         first(x.arguments) isa BRMDescriptionReference &&
+         first(x.arguments).name === :matrix_rows, value.arguments))
 
 # `sum(f.(x[rows[i]], …))` over one row set, with every operation elementwise
 # and every operand a read of those rows or a number, is the sum over the rows,

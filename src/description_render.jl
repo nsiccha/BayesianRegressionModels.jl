@@ -88,6 +88,11 @@ _brmd_call_math(::typeof(StanBlocks.stan.builtin.reshape),args,kwargs,c) = lengt
     "\\operatorname{"*_brmd_text(c,:math_reshape)*"}\\left("*join(args,",")*"\\right)"
 _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.reshape),c)=length(c.arguments)==3 ?
     BRMDescriptionFragment(prose=(_brmd_text(c,:matrix_reshape),),covers=(c.id,)) : nothing
+# Julia's `reshape(v, m, n)` in a model statement fills column by column too.
+_brmd_call_math(::typeof(Base.reshape),args,kwargs,c) =
+    _brmd_call_math(StanBlocks.stan.builtin.reshape,args,kwargs,c)
+_brmd_builtin_call(::typeof(Base.reshape),c) =
+    _brmd_builtin_call(StanBlocks.stan.builtin.reshape,c)
 function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_matrix),args,_kwargs,_c)
     length(args)==3 && return first(args)*"\\,\\mathbf1_{"*args[2]*"\\times "*args[3]*"}"
     "\\operatorname{rep}_{\\mathrm{matrix}}\\left("*join(args,",")*"\\right)"

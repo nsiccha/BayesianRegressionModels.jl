@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.359
+
+- A `@plate` cell reads whole rows of a matrix: `G[p, :]` in a `groups(g)`
+  plate, `G[rows[i], :]` through a binding `rows = groups(g => labels)`, on
+  SBBRMI and RKBRMI. `G` is a model-scope matrix (an assignment such as
+  `reshape(g, N, n)`, the n curves of a grouped HSGP side by side) or a data
+  matrix with one row per entry of `g`. With a Dirichlet cell latent this
+  spells a per-unit mixture of n curves for any n,
+  `y[p] ~ Normal(mu[p] .+ G[p, :] * theta, sigma)` (snag
+  `mixed-membership-1a1930a6`). Before, `@brm` refused it ("kernel `@plate`
+  inputs use one cell slice").
+
 ## 0.2.358
 
 - A simplex per `@plate` cell: `theta ~ Dirichlet(K, a)` or `theta ~

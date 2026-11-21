@@ -8931,8 +8931,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             gath_sym in dcol_names && i <= length(params) &&
                 (gath_sym = Symbol("kernel_", target, "_", params[i], "_ragged"))
             gath_sym in dcol_names && (gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_", i, "_ragged"))
-            (; into, order) = _brm_kernel_ragged_options(c; prefix="sbimpl")
-            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into, order))
+            (; into, order, matrix_rows) = _brm_kernel_ragged_options(c; prefix="sbimpl")
+            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into, order, matrix_rows))
             push!(dcol_names, gath_sym)
             continue
         end
@@ -9130,7 +9130,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # replay checks the new rows the same way.
     observed_idx = Set(spec[1] for spec in ragged_specs
         if _sb_cell_param_observed(body_stmts, params[spec[1]]))
-    for (i, arg_col, grp_arg, gath_sym, into, order) in ragged_specs
+    for (i, arg_col, grp_arg, gath_sym, into, order, matrix_rows) in ragged_specs
         rows, is_lp, is_unbound = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
             allow_unbound_observation=i in unbound_idx, order, observed=i in observed_idx)
         # An `into=` index column gathers its rebased positions, not its raw
@@ -9147,13 +9147,18 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             data[gath_sym] = rows
             rows_param = Symbol("kernel_rows_", params[i])
             slice_params[i] = rows_param
-            sliced = :($(name(arg_col))[$rows_param])
+            # Whole rows of a matrix value (`G[p, :]`) read as `G[rows, :]`.
+            sliced = matrix_rows ? :($(name(arg_col))[$rows_param, :]) :
+                :($(name(arg_col))[$rows_param])
             body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
         else
             isnothing(flat) && (flat = parent(parent(arg_col)))
-            data[gath_sym] = _brm_gather_cells(flat, rows)
+            # Whole rows of a data matrix: one matrix per cell.
+            data[gath_sym] = matrix_rows ? [flat[r, :] for r in rows] :
+                _brm_gather_cells(flat, rows)
         end
         options = (; is_lp)
+        matrix_rows && (options = merge(options, (; matrix_rows=true)))
         isnothing(into) || (options = merge(options, (; into=name(into))))
         isnothing(order) || (options = merge(options, (; order=name(order))))
         distinct && (options = merge(options, (; distinct_labels=true)))
