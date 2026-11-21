@@ -2,6 +2,7 @@
 # stdlibs: no model preparation, AD, posterior simulation or environment setup.
 include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra
+include(joinpath(@__DIR__, "..", "src", "nlme_svi_kernels.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_sampling.jl"))
 
 @testset "SVI work probabilities and alias distribution" begin

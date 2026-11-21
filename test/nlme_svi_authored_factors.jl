@@ -115,6 +115,7 @@ function check_authored_factor_split(rk; constrained=false)
     @test sum(length, buckets) == length(events)
     @test length(unique(vcat(buckets...))) == length(events)
     @test all(!isempty, buckets)
+    @test BRM._rk_svi_factor_buckets(owner, n, BRM._rk_svi_factors(rk, u0)) == buckets
 
     tau = factor_coordinates(select_factors(catalogue; kind=:prior, site=:tau))
     z1 = select_factors(catalogue; kind=:prior, site=:z, entries=1:1)
@@ -165,6 +166,17 @@ end
 function check_svi_authored_prior(rk; constrained=false)
     m = brm_nlme_model(rk; ad_backend=FACTOR_AD)
     target = BRM._brm_svi_target(m)
+    device_problem = BRM._brm_svi_device_problem(target)
+    @test device_problem.expected_layout === rk.model.layout
+    @test device_problem.owner == target.ownership.owner
+    @test device_problem.observation_units == target.plan.labels
+    @test Set(keys(device_problem.unit_factors)) == Set(eachindex(target.units))
+    for (selection, bucket) in zip((device_problem.global_factors,
+            (device_problem.unit_factors[i] for i in eachindex(target.units))...),
+            device_problem.factor_buckets)
+        @test factor_coordinates(selection) == factor_coordinates(
+            select_factors(target.ownership.factors.catalogue, bucket))
+    end
     t = merge(target, (; globals=BRM._brm_svi_globals(m),
         units=m.view.subject_coordinates, prior=nothing))
     u0 = [0.17sin(k) for k in eachindex(m.unit)]

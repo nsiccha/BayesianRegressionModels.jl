@@ -558,10 +558,12 @@ BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
 
 BRM.rk_bound_data(backend::BRM.RKBRMI) = _rk_bound_inputs(BRM.rk_bound_plan(backend))
 
-function BRM.rk_bound_data(backend::BRM.RKBRMI, source::ReactiveKernels.JAXSource)
+BRM.rk_bound_data(backend::BRM.RKBRMI, source::ReactiveKernels.JAXSource) =
+    BRM._rk_jax_bound_data(BRM.rk_bound_plan(backend), source)
+
+function BRM._rk_jax_bound_data(plan, source::ReactiveKernels.JAXSource)
     prepare = only(f for f in source.functions if f.name == "prepare_data")
     names = Tuple(Symbol(first(input)) for input in prepare.inputs)
-    plan = BRM.rk_bound_plan(backend)
     bound = _rk_bound_inputs(plan)
     # JAX names scalar data by their authored names; the native binding can
     # hold only their internal ports. Request exactly the missing module
@@ -958,6 +960,7 @@ end
 # the global bucket 1. Each nonempty bucket is one compact native query over
 # its own support.
 include("rk_svi_ownership.jl")
+include("rk_svi_kernels.jl")
 BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
         ad_backend, owner::Vector{Int}, n::Int) = BRM._rk_svi_factor_queries(
     backend, unit, ad_backend, owner, n, BRM._rk_svi_factors(backend, unit))

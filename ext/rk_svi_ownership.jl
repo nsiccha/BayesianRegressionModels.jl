@@ -35,8 +35,7 @@ function BRM._rk_nlme_unit_reading_factors(backend::BRM.RKBRMI,
     readers
 end
 
-function BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
-        ad_backend, owner::Vector{Int}, n::Int, factors)
+function BRM._rk_svi_factor_buckets(owner::Vector{Int}, n::Int, factors)
     buckets = [similar(factors.events, 0) for _ in 0:n]
     for (event, owned, support) in zip(factors.events, factors.owned, factors.support)
         unit_owner = 0
@@ -50,6 +49,12 @@ function BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
         end
         push!(buckets[unit_owner + 1], event)
     end
+    buckets
+end
+
+function BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
+        ad_backend, owner::Vector{Int}, n::Int, factors)
+    buckets = BRM._rk_svi_factor_buckets(owner, n, factors)
     present = findall(!isempty, buckets)
     isempty(present) && return fill(nothing, length(buckets))
     selections = [select_factors(factors.catalogue, buckets[i]) for i in present]
@@ -62,6 +67,13 @@ function BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
         queries[i] = query
     end
     queries
+end
+
+function BRM._rk_svi_device_selections(factors, buckets)
+    catalogue = factors.catalogue
+    unit_factors = Dict(i => select_factors(catalogue, bucket)
+        for (i, bucket) in enumerate(Iterators.drop(buckets, 1)))
+    (; global_factors=select_factors(catalogue, first(buckets)), unit_factors)
 end
 
 BRM._rk_constrained_draw(backend::BRM.RKBRMI, u::AbstractVector) =

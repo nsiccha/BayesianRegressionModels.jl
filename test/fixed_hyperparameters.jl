@@ -145,6 +145,13 @@ end
     @test LogDensityProblems.logdensity(c, p.position) ≈ LogDensityProblems.logdensity(p, p.position)
 end
 
+# A protocol fixture that records the exact problem passed through the public fit.
+struct RecordingDeviceSampler end
+function BRM.brm_fixed_hyper_sample(::Val{:gpu}, ::RecordingDeviceSampler, p, rng)
+    (; draws=hcat(p.position, p.position .+ 0.25), device=:gpu,
+        backend=:test, device_name="protocol fixture")
+end
+
 @stestset "an SVI fit as the start, and the fit step" begin
     rk = RKBRMI(MIXED(MIX_DATA))
     names = names_of(rk)
@@ -164,6 +171,16 @@ end
     end
     fit = brm_fixed_hyper_fit(sampler, rk, svi; ad_backend=AD, rng=MersenneTwister(2))
     @test calls[] == 1
+    @test_throws "GPU sampling method" brm_fixed_hyper_fit(sampler, rk, svi; device=:gpu, ad_backend=AD)
+    @test calls[] == 1
+    @test_throws "device must be" brm_fixed_hyper_fit(sampler, rk, svi; device=:gup, ad_backend=AD)
+    for fixed in (brm_hyperparameters(rk), ())
+        gpu = brm_fixed_hyper_fit(RecordingDeviceSampler(), rk, svi; device=:gpu, fixed, ad_backend=AD)
+        @test gpu.execution == (; device=:gpu, backend=:test, device_name="protocol fixture")
+        @test gpu.draws[:, 1] == gpu.point
+        @test gpu.draws[gpu.problem.free, 2] == gpu.problem.position .+ 0.25
+        @test gpu.draws[gpu.problem.fixed, 2] == gpu.point[gpu.problem.fixed]
+    end
     @test size(fit.draws) == (d, 7)
     @test all(fit.draws[fit.problem.fixed, k] == fit.point[fit.problem.fixed] for k in 1:7)
     @test fit.fixed == brm_hyperparameters(rk)

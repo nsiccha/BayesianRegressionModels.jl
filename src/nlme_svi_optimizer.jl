@@ -290,7 +290,7 @@ const _BRM_SVI_RESUME_MODEL_OPTIONS = (:ad_backend, :shared_point, :subject_grou
     :nested_groups, :shared_groups, :unit_partition)
 
 """
-    brm_svi_resume([save,] x, checkpoint; stop_after=nothing,
+    brm_svi_resume([save,] x, checkpoint; device=:cpu, stop_after=nothing,
         checkpoint_every=nothing, ndraws=1000, progress=nothing,
         snapshot=nothing, snapshot_every=nothing, snapshot_draws=0,
         threads=nothing, ad_backend=nothing, shared_point=nothing,
@@ -303,7 +303,9 @@ have continued without stopping: the same iterates, random stream, stopping
 decision and draws, in the same Julia and package versions, at any `threads`
 (the fit's option; a run may continue at another). The run keeps its optimizer controls, its
 `max_iterations` horizon and step-size schedule; `stop_after` bounds only this
-call. A finished checkpoint does no iterations and returns draws of its
+call. Select the execution device for this call with `device`, as in
+[`brm_svi_fit`](@ref). For exact trajectory replay, use the same runtime and
+precision as the original fit. A finished checkpoint does no iterations and returns draws of its
 result. A `laplace=GaussianBlockLaplace()` run continues its fixed update
 budget with the same method, and its carry and diagnostics (call counts,
 numerical records) equal the uninterrupted run's.
@@ -365,7 +367,7 @@ brm_svi_resume(x, checkpoint; kwargs...) = _brm_svi_resume(nothing, x, checkpoin
 brm_svi_resume(save::Function, x, checkpoint; kwargs...) =
     _brm_svi_resume(save, x, checkpoint; kwargs...)
 
-function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
+function _brm_svi_resume(save, x, checkpoint; device=:cpu, ndraws=1000, stop_after=nothing,
         checkpoint_every=nothing, progress=nothing, threads=nothing, snapshot=nothing,
         snapshot_every=nothing, snapshot_draws=0, kwargs...)
     unknown = setdiff(keys(kwargs), _BRM_SVI_RESUME_MODEL_OPTIONS)
@@ -390,6 +392,7 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
         snapshot, snapshot_every, snapshot_draws, checkpoint_completions,
         check_lowered=lowered -> _brm_svi_check_binding(_brm_svi_backend(lowered), state.identity))
     if state.run isa _BRMSVILaplaceRun
+        _brm_svi_laplace_device(device)
         threads === nothing || throw(ArgumentError(
             "GaussianBlockLaplace: whole-window fixed-budget optimization does not use " *
             "threads; omit this option"))
@@ -405,7 +408,7 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
              field_states=get(state.identity, :field_states, :global)), options)
     end
     _brm_svi_drive(save, x, state.previous; call..., description="BRM SVI resume",
-            threads, options...) do t
+            device, threads, options...) do t
         _brm_svi_restore(t, state)
     end
 end

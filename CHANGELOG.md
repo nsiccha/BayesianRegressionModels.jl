@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.385
+
+- `brm_svi_fit` and `brm_svi_resume` accept `device=:gpu` with a loaded
+  minibatch SVI runtime. BRM supplies its observation partition and authored
+  prior and Jacobian buckets, schedules optimizer windows and checkpoints,
+  and records the executor in `diagnostics.execution`. Julia on the CPU
+  remains the default.
+- `brm_fixed_hyper_fit(...; device=:gpu)` dispatches to the supplied
+  sampler's GPU method with the same free coordinates and fixed values used
+  by the CPU fit. The result includes the accelerator name in `execution`.
+
 ## 0.2.384
 
 - The sparse and per-unit regression Laplace solvers accept

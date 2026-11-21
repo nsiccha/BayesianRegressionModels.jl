@@ -448,7 +448,7 @@ brm_svi_fit(previous, x_new; kwargs...) = _brm_svi_window_fit(nothing, previous,
 brm_svi_fit(save::Function, previous, x_new; kwargs...) =
     _brm_svi_window_fit(save, previous, x_new; kwargs...)
 
-function _brm_svi_window_fit(save, previous, x_new; laplace=nothing, kwargs...)
+function _brm_svi_window_fit(save, previous, x_new; device=:cpu, laplace=nothing, kwargs...)
     state = brm_svi_checkpoint(previous)
     collapsed = state isa BRMSVILaplaceState
     collapsed || laplace===nothing || throw(ArgumentError(
@@ -462,9 +462,12 @@ function _brm_svi_window_fit(save, previous, x_new; laplace=nothing, kwargs...)
         _brm_rebind_brmi(brm_source(previous.diagnostics.model.backend), x_new)
     end
     x, options = _brm_svi_window_input(state, x, (; kwargs...); caller="brm_svi_fit")
-    collapsed && return _brm_svi_laplace_dispatch(save, x, state,
-        laplace===nothing ? state.method : laplace; options...)
-    _brm_svi_fit(save, x, state; options...)
+    if collapsed
+        _brm_svi_laplace_device(device)
+        return _brm_svi_laplace_dispatch(save, x, state,
+            laplace===nothing ? state.method : laplace; options...)
+    end
+    _brm_svi_fit(save, x, state; device, options...)
 end
 
 # The new window's model under the carried state: a BRMI is lowered with the

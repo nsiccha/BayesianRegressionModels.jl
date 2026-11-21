@@ -291,7 +291,7 @@ end
     end
 
     # Zero learning rates make the two phases' optimizer state deterministic;
-    # this exercises both final flushing paths of the production fit loop.
+    # this exercises both final flushing paths under the legacy ELBO-only policy.
     for limit in (7, 20)
         q = S._brm_svi_params(t, [0.7], S.MeanFieldGlobal();
             global_scale=0.2, unit_scale=1.0)
@@ -299,13 +299,57 @@ end
         fit = S.arithmetic_fit(Xoshiro(9), t, q; batch_size=2,
             max_iterations=limit, lr_global=0.0, unit_step=0.0,
             polish_lr=0.0, window=2, patience=1, min_windows=2,
-            polish_windows=2, unit_sampling=:work)
+            polish_windows=2, unit_sampling=:work, stationarity=false)
         @test fit.q.μ == original.μ
         @test all(isapprox.(fit.q.M, original.M))
         @test all(isapprox.(fit.q.Λ, original.Λ))
         @test all(isapprox.(fit.q.U, original.U))
         @test all(isfinite, fit.elbo)
         @test fit.converged == (limit == 20)
+    end
+end
+
+@testset "block execution preserves window, checkpoint and snapshot boundaries" begin
+    t = S.QuadraticUnits([1], [[2], [3], [4]],
+        (; footprints=[[1, i + 1] for i in 1:3]), zeros(Int, 3),
+        [0.3, 4, 9], [-2.0, 0.5, 3])
+    c = S._brm_svi_controls(3; batch_size=2, window=5, patience=1,
+        min_windows=2, polish_windows=3, settle_windows=2, max_iterations=400,
+        stationarity=false, lr_global=0.001, unit_step=0.1, polish_lr=0.01,
+        unit_sampling=:work)
+    function advance(run, step!, stop)
+        saves, observations = Int[], Tuple{Int,Symbol}[]
+        S._brm_svi_fit!(run, t, c; stop_after=stop, checkpoint_every=7,
+            save=r -> push!(saves, r.iteration), observe_every=3,
+            observe=status -> push!(observations, (run.iteration, status)),
+            device_step! = step!)
+        (; saves, observations)
+    end
+    for (family, dense_limit) in ((S.MeanFieldGlobal(), 64), (S.LowRankGlobal(1), 0))
+        q = S._brm_svi_params(t, [0.7], family; global_scale=0.2,
+            unit_scale=1.0, unit_dense_limit=dense_limit, unit_rank=1)
+        native = S._brm_svi_run(Xoshiro(9), q, c, t)
+        blocked = deepcopy(native)
+        blocks = Tuple{Int,Symbol}[]
+        function step!(n, phase)
+            push!(blocks, (n, phase))
+            for _ in 1:n
+                S._brm_svi_numerical_step!(blocked, t, c, phase)
+            end
+        end
+        for stop in (13, typemax(Int))
+            @test advance(native, nothing, stop) == advance(blocked, step!, stop)
+            @test native.iteration == blocked.iteration
+            @test native.trace == blocked.trace && native.windows == blocked.windows
+            @test native.rng == blocked.rng
+            @test native.sampling == blocked.sampling
+            @test native.q.μ == blocked.q.μ && native.q.M == blocked.q.M
+            @test native.polish_start == blocked.polish_start
+            @test native.converged == blocked.converged
+            blocked = deepcopy(blocked)  # a detached checkpoint at the mid-window stop
+        end
+        @test Set(last.(blocks)) == Set((:exploring, :settling, :polishing))
+        @test any(b -> first(b) > 1, blocks)
     end
 end
 
