@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.367
+
+- An `@plate` cell can declare independent draws as `z[1:K] .~ Normal.(0, 1)`
+  or take its width from a cell input with `z .~ Normal.(mu[i], s)`. Observe a
+  response slice with the same broadcast syntax. Both backends preserve the
+  existing parameter names, order and density.
+
 ## 0.2.366
 
 - RKBRMI resamples the grouping of a grouped `hsgp(x...; by = g)`, with or

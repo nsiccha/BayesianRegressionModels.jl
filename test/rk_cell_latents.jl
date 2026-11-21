@@ -29,9 +29,9 @@ vector_latent(data) = @brm data begin
     sigma ~ Exponential(1.0)
     @plate for i in eachindex(total)
         loc = log.(mu[i])
-        log_T ~ Normal(loc, 0.5)
+        log_T .~ Normal.(loc, 0.5)
         T = exp.(log_T)
-        y[i] ~ Normal(T[obs[i]], sigma)
+        y[i] .~ Normal.(T[obs[i]], sigma)
         total[i] ~ Normal(sum(T), 0.01 * total[i])
     end
 end
@@ -39,7 +39,7 @@ end
 bounded_latent(data) = @brm data begin
     sigma ~ Exponential(1.0)
     @plate for i in eachindex(total)
-        T ~ LogNormal(log.(mu[i]), 0.5)
+        T .~ LogNormal.(log.(mu[i]), 0.5)
         y[i] ~ Normal(T[obs[i]], sigma)
         total[i] ~ Normal(sum(T), 0.01 * total[i])
     end
@@ -51,7 +51,7 @@ parameter_law_latent(data) = @brm data begin
     b ~ Normal(0.0, 1.0)
     s ~ Exponential(2.0)
     @plate for i in eachindex(total)
-        log_T ~ Normal(log.(mu[i]) .+ b, s)
+        log_T .~ Normal.(log.(mu[i]) .+ b, s)
         T = exp.(log_T)
         y[i] ~ Normal(T[obs[i]], sigma)
         total[i] ~ Normal(sum(T), 0.01 * total[i])
@@ -143,6 +143,48 @@ end
     @test occursin("a[i] .~ Normal.(", source)
     restored = rk_restore_draws(c.rk, reshape(collect(0.1:0.1:0.3), :, 1))
     @test restored.a ≈ reshape([0.2, 0.3], 2, 1)
+end
+
+@stestset "explicit cell broadcast declarations" begin
+    data = (; y=[0.45, -0.2], K=4, mu=[[0.2, -0.3, 0.7, 1.1], [1.4, 0.3, -0.8, 0.2]],
+        one_mu=[[0.2], [-0.8]], scale=0.6)
+    function cell(law, data)
+        brm(quote
+            @plate for i in eachindex(y)
+                $law
+                y[i] ~ Normal(sum(z), 0.7)
+            end
+        end; mod=@__MODULE__)(data)
+    end
+    names = [Symbol("z.", i, ".", k) for i in 1:2 for k in 1:4]
+    for (law, control) in (
+            (:(z[1:4] .~ Normal.(0, 1)), :(z ~ Normal(zeros(K), 1))),
+            (:(z[1:K] .~ Normal.(0, 1)), :(z ~ Normal(zeros(K), 1))),
+            (:(z .~ Normal.(mu[i], scale)), :(z ~ Normal(mu[i], scale))),
+            (:(z[1:K] .~ Normal.(mu[i], scale)), :(z ~ Normal(mu[i], scale))),
+            (:(z[1:K] .~ Normal.(one_mu[i], scale)), :(z ~ Normal(fill(first(one_mu[i]), K), scale))))
+        reference = RKBRMI(cell(control, data))
+        @test coordinate_names(reference.model.layout) == names
+        problem = rk_logdensity_problem(reference; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        model = cell(law, data)
+        @test occursin(sprint(Base.show_unquoted, law), string(model))
+        backend = check_rk_source_roundtrip(RKBRMI(model))
+        @test coordinate_names(backend.model.layout) == names
+        fitted = rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        for point in (zeros(8), collect(range(-0.6, 0.8; length=8)))
+            expected, grad = LogDensityProblems.logdensity_and_gradient(problem, point)
+            actual, actual_grad = LogDensityProblems.logdensity_and_gradient(fitted, point)
+            @test actual ≈ expected
+            @test actual_grad ≈ grad
+        end
+        sb = SBBRMI(model; mod=@__MODULE__)
+        @test StanBlocks.stanc_check(BRM.stan_code(sb); warn_pedantic=false).ok
+    end
+    check_against_stan(cell(:(z[1:K] .~ Normal.(0, 1)), data), "explicit_cell_width")
+    # The declared width is a destination, including for K=1.
+    @test_throws "does not broadcast to the declared cell vector" RKBRMI(cell(:(z[1:K] .~ Normal.(mu[i], 1)),
+        merge(data, (; K=1))))
+    @test_throws "joint event" cell(:(z .~ Dirichlet.(mu[i])), data)
 end
 
 @stestset "a vector cell latent whose length varies by cell" begin

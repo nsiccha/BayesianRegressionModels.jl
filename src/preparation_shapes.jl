@@ -124,6 +124,20 @@ function _brm_declared_vector_length(target, value; prefix="BRM preparation")
     Int(value)
 end
 
+# Julia broadcasting into a declared one-dimensional cell destination.
+@_brm_traceable function _brm_cell_vector_arg(value, n::Integer)
+    if typeof(value) <: Number
+        result = fill(value, n)
+    elseif typeof(value) <: AbstractVector && length(value) == n
+        result = value
+    elseif typeof(value) <: AbstractVector && length(value) == 1
+        result = fill(value[1], n)
+    else
+        throw(DimensionMismatch("law argument does not broadcast to the declared cell vector"))
+    end
+    result
+end
+
 # `x ~ MvNormal(...)` on a non-data LHS declares a VECTOR PARAMETER (decision `187g4va`,
 # 2026-09-16: the faithful Distributions.jl surface). The constructor shapes are
 # Distributions.jl's, nothing invented on top of them; every backend reads them here:

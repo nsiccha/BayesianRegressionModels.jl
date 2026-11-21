@@ -71,6 +71,19 @@ _sb_julia_stan_call(::typeof(fill), args) =
     length(args) == 3 ? Expr(:call, :rep_matrix, args...) : nothing
 _sb_julia_stan_call(::typeof(zeros), args) = _sb_julia_stan_call(fill, Any[0.0; args])
 _sb_julia_stan_call(::typeof(ones), args) = _sb_julia_stan_call(fill, Any[1.0; args])
+_sb_julia_stan_call(::typeof(_brm_cell_vector_arg), args) =
+    Expr(:call, brm_cell_vector_arg, args...)
+
+StanBlocks.@deffun begin
+    brm_cell_vector_arg(x::real, k::int)::vector[k] = rep_vector(x, k)
+    brm_cell_vector_arg(x::vector[n], k::int)::vector[k] = begin
+        if n == 1
+            return rep_vector(x[1], k)
+        end
+        @stan_assert n == k "law argument does not broadcast to the declared cell vector"
+        return x
+    end
+end
 # Stan concatenates two values at a time.
 _sb_julia_stan_call(::typeof(vcat), args) = length(args) < 2 ? nothing :
     foldl((a, b) -> Expr(:call, :append_row, a, b), args)

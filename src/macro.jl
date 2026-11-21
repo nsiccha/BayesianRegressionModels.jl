@@ -1383,6 +1383,48 @@ function _brm_plate_check_observed(lhs, i, bare_bindings, output_set)
     end
 end
 
+_brm_sampling_statement(x) = isxcall(x, :~) || isxcall(x, :.~)
+
+function _brm_check_cell_broadcast_family(scope, head)
+    family = _sb_cell_binding(scope, head)
+    _rk_joint_observation(family) && throw(ArgumentError(
+        "@brm: a broadcast cell draw requires an elementwise law. " *
+        "For one joint event write `x ~ $head(...)`."))
+    nothing
+end
+
+# Strip only the outer broadcast. Dots in the arguments are Julia operations
+# on a cell's actual values (for example, log.(scale[i])).
+function _brm_cell_draw(stmt, checks)
+    isxcall(stmt, :.~) || return stmt
+    lhs, rhs = stmt.args[2:3]
+    _brm_is_broadcast_call(rhs) || throw(ArgumentError(
+        "@brm: write an elementwise cell law as `$lhs .~ Family.(args...)`"))
+    head, tuple = rhs.args
+    args = copy(tuple.args)
+    any(arg -> Meta.isexpr(arg, :parameters) || Meta.isexpr(arg, :kw), args) &&
+        throw(ArgumentError("@brm: a broadcast cell law takes positional arguments"))
+    scope = Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0))
+    push!(checks, Expr(:call, _brm_check_cell_broadcast_family, scope, QuoteNode(head)))
+    if Meta.isexpr(lhs, :ref, 2) && isxcall(lhs.args[2], :(:))
+        lhs.args[1] isa Symbol || throw(ArgumentError("@brm: a declared cell vector needs a name"))
+        n = _brm_declared_extent(lhs.args[2], sprint(Base.show_unquoted, stmt))
+        isempty(args) && throw(ArgumentError("@brm: give the declared cell vector's law its arguments"))
+        # A literal can use fill directly. Other arguments may be a scalar or
+        # a vector, whose broadcast must fit the declared destination.
+        for j in eachindex(args)
+            arg = args[j]
+            if arg isa Number
+                j == 1 && (args[j] = Expr(:call, :fill, arg, n))
+            else
+                args[j] = Expr(:call, GlobalRef(@__MODULE__, :_brm_cell_vector_arg), arg, n)
+            end
+        end
+        lhs = lhs.args[1]
+    end
+    Expr(:call, :~, lhs, Expr(:call, head, args...))
+end
+
 function _brm_plate_outputs(body, i)
     stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
     outputs = Symbol[]
@@ -1398,7 +1440,7 @@ function _brm_plate_outputs(body, i)
             push!(outputs, lhs)
         end
     end
-    isempty(outputs) && !any(stmt -> isxcall(stmt, :~), _brm_plate_flat_statements(stmts)) && error(
+    isempty(outputs) && !any(_brm_sampling_statement, _brm_plate_flat_statements(stmts)) && error(
         "@brm: a kernel `@plate` cell needs an indexed output (`loc[$i] = ...`) " *
         "or an observation (`y[$i] ~ ...`); this one has neither")
     stmts, outputs
@@ -1409,7 +1451,7 @@ end
 # Backends derive the cell's emitted names from it, as they do from an output's.
 function _brm_plate_effect_name(stmts, i)
     for stmt in _brm_plate_flat_statements(stmts)
-        isxcall(stmt, :~) || continue
+        _brm_sampling_statement(stmt) || continue
         base = _brm_plate_observed_name(stmt.args[2], i)
         base === nothing || return Symbol(base, :_cell)
     end
@@ -1611,6 +1653,14 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             "Observe `$name` through one binding.")
     end
 
+    function rewrite_draw(stmt)
+        draw = _brm_cell_draw(stmt, checks)
+        lhs, rhs = draw.args[2:3]
+        _brm_plate_check_observed(lhs, i, bare_bindings, output_set)
+        observe!(lhs)
+        Expr(:call, :~, rewrite(lhs), rewrite(rhs))
+    end
+
     # A `@scan` block keeps its shape: seeds, then one `for` loop of steps. Its
     # slice reads are rewritten like every other cell read; its `=`/`~` targets
     # are the scan's carried arrays and step locals, or (`y[i][t] ~ …`) entries
@@ -1629,10 +1679,8 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                 rewrite_scan(stmt.args[2]))
         elseif Meta.isexpr(stmt, :(=), 2)
             return Expr(:(=), rewrite(stmt.args[1]), rewrite(stmt.args[2]))
-        elseif isxcall(stmt, :~)
-            _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
-            observe!(stmt.args[2])
-            return Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3]))
+        elseif _brm_sampling_statement(stmt)
+            return rewrite_draw(stmt)
         end
         error(
             "@brm: a `@scan` block in a kernel `@plate` cell holds `=`/`~` seeds " *
@@ -1657,10 +1705,8 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                     "@brm: a kernel `@plate` assignment binds a bare cell local " *
                     "or `name[$i]`; got `$(repr(lhs))`")
             end
-        elseif isxcall(stmt, :~)
-            _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
-            observe!(stmt.args[2])
-            push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
+        elseif _brm_sampling_statement(stmt)
+            push!(rewritten, rewrite_draw(stmt))
         elseif _is_brm_scan(stmt)
             push!(rewritten, Expr(:macrocall, stmt.args[1:end-1]..., rewrite_scan(stmt.args[end])))
         else
