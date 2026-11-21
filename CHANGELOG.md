@@ -27,8 +27,8 @@ instead of failing at run time.
   to rounding; draws from the conditional Gaussians follow a different random
   stream.
 - A `car` field's Newton search no longer throws `ArgumentError: invalid
-  index: 2.0 of type Float64` when a step falls back to its blocks (0.2.352
-  to 0.2.354).
+  index: 2.0 of type Float64` when a step falls back to its blocks, a
+  regression from the second-order and sum-to-zero `rw` walks.
 
 ## 0.2.355
 
