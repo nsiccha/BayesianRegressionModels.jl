@@ -178,7 +178,7 @@ function _brm_component(source::Expr, scope::Module)
             for (local_name, expression) in zip(locals, last.(fields))]
     end
     statements = _brm_strip_observers(Expr(:block, body..., assignments...))
-    builder = if any(_brm_declaration_guard, body)
+    builder = if any(_brm_declaration_guard, body) || any(_brm_has_record_rhs, body)
         BRMBuilder(_BRMGuardedComponentBody(statements, inputs, scope),
             statements, inputs, scope)
     else
