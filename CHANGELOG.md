@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.358
+
+- A simplex per `@plate` cell: `theta ~ Dirichlet(K, a)` or `theta ~
+  Dirichlet(alpha)` on a bare cell name, on SBBRMI and RKBRMI. It is sampled in
+  K − 1 coordinates per cell, `theta = softmax(sum_to_zero_constrain(y))` (the
+  coordinates of `shares(total)` with the total 1), with the Dirichlet density
+  at `theta` plus the change of variables; `brm_coordinate_transport`,
+  `brm_start` (one vector per cell or one flat vector), `rk_restore_draws` and
+  the model description read it by its name. `K` is a literal or a data field;
+  the concentration may be sampled. RKBRMI refuses a concentration vector
+  shared by every cell (ReactiveKernels snag `rkppl-joint-cell-c8a61b47`), and
+  SVI keeps the simplexes global (ReactiveKernels snag
+  `joint-cell-laten-9a3ad461`). Snag `mixed-membership-1a1930a6`.
+- The model description shows a `T::shares(total)` cell latent's law as written
+  with its sum as an equation, and describes `shares` and Dirichlet cell
+  coordinates; before, it printed internal law keywords and listed `brm_shares`
+  as a coverage gap.
+- `brm_start(sb, model, (; x = …))` takes one vector per cell for a cell latent
+  of one length in every cell too, as RKBRMI does.
+
 ## 0.2.357
 
 - `brm_hyperparameters(rk)`, `brm_fixed_hyper_problem(rk, start; ad_backend,

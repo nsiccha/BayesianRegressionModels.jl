@@ -176,9 +176,35 @@ function _brmd_plate_fragment(c, plate)
     BRMDescriptionFragment(; prose=Tuple(prose), equations=Tuple(equations), covers=(c.id,))
 end
 
-# A cell latent `x ~ law` among the cell's statements, in the cell's names.
+# A cell latent `x ~ law` among the cell's statements, in the cell's names. A
+# latent through a bijection (`T::shares(total) ~ …`, `theta ~ Dirichlet(…)`,
+# cell_total_coordinates.jl) carries it as the internal law keywords
+# `_brm_bijection` and `_brm_total`: the law is shown as authored, and a
+# `shares` latent's sum as its own equation.
 function _brmd_plate_latent_fragment(c)
     lhs, rhs = c.arguments
+    bijection, total, law = _brmd_cell_bijection(rhs)
+    equations = String[_brmd_distribution_equation(c, brm_description_math(c, lhs), law)]
+    bijection === :shares && push!(equations,
+        "\\textstyle\\sum_k " * brm_description_math(c, lhs) * "_k=" * brm_description_math(c, total))
     BRMDescriptionFragment(prose=(_brmd_text(c, :cell_latent; name=lhs.name, owner=c.provenance.cell_owner),),
-        equations=(_brmd_distribution_equation(c, brm_description_math(c, lhs), rhs),), covers=(c.id,))
+        equations=Tuple(equations), covers=(c.id,))
+end
+
+_brmd_is_bijection_keyword(x, name) = x isa BRMDescriptionComponent && x.kind === :syntax &&
+    x.callable === :kw && first(x.arguments) isa BRMDescriptionReference &&
+    first(x.arguments).name === name
+function _brmd_cell_bijection(rhs)
+    rhs isa BRMDescriptionComponent || return nothing, nothing, rhs
+    find(name) = findfirst(x -> _brmd_is_bijection_keyword(x, name), rhs.arguments)
+    b, t = find(:_brm_bijection), find(:_brm_total)
+    b === nothing && return nothing, nothing, rhs
+    bijection = last(rhs.arguments[b].arguments)
+    bijection isa QuoteNode && (bijection = bijection.value)
+    total = t === nothing ? nothing : last(rhs.arguments[t].arguments)
+    keep = Tuple(x for (k, x) in enumerate(rhs.arguments) if k != b && k != t)
+    law = BRMDescriptionComponent(rhs.id, rhs.kind, rhs.callable, keep, rhs.keywords,
+        rhs.axes, rhs.outputs, rhs.priors, rhs.fitted_constants, rhs.children,
+        rhs.provenance, rhs.notation, rhs.bindings)
+    bijection, total, law
 end

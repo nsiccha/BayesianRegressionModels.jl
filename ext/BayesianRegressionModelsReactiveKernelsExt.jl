@@ -88,6 +88,25 @@ end
     total
 end
 
+# A simplex per cell, `theta ~ Dirichlet(K, a)` (src/cell_total_coordinates.jl):
+# `theta[i] ~ _BRMCellDirichlet(K, 1.0, args…)` has the geometry of `shares`
+# with the total 1 (log-Jacobian `sum(log.(theta))`) and the Dirichlet's density.
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMCellDirichlet}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry((args[1],), :($(args[1]) - 1); support=:positive,
+        constrain=(u, shape, n, total, rest...) -> BRM._brm_shares_values(u, total),
+        unconstrain=(w, shape, n, total, rest...) -> _brm_simplex_unconstrain(w),
+        logjac=(u, shape, n, total, rest...) -> sum(BRM._brm_shares_log_values(u, total)))
+
+function _brm_simplex_unconstrain(w)
+    isapprox(sum(w), 1; rtol=1e-8) && all(>(0), w) || throw(ArgumentError(
+        "a `Dirichlet` cell latent's values must be positive and sum to 1: they sum " *
+        "to $(sum(w))"))
+    BRM._brm_shares_coordinates(w)
+end
+
+@inline ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCellDirichlet, w) =
+    BRM._brm_cell_dirichlet_logpdf(w, d.args...)
+
 # The grouped entries of `mi(x)::shares(total, rows)`
 # (src/cell_total_coordinates.jl) are one joint latent of the completion,
 # `y_shares[axes(rows, 1)] ~ _BRMGroupedShares{Law}(ends, residuals, args…)`:
