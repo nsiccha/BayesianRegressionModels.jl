@@ -44,6 +44,85 @@ resample_future = (;
     y = zeros(8),
 )
 
+@brm function resample_instrument(config)
+    if config.use_site
+        level ~ 1 + (1 | parentblock(:p) | config.site)
+    else
+        level ~ 1 + (1 | parentblock(:p) | config.reader)
+    end
+    shift ~ 1 + (1 | parentblock(:p) | config.site)
+    return sum(level + shift)
+end
+
+@testset "shared component margins resample by their authored grouping field" begin
+    builder = @brm begin
+        baseline ~ 0 + (1 | p | site)
+        other ~ 0 + (1 | q | site)
+        for config in instruments
+            readings[config.id] ~ resample_instrument(config)
+        end
+        y ~ Normal(baseline + other, 1)
+        z ~ Normal(readings, 1)
+    end
+    records(site; second_uses_reader=false) = [
+        (; id=:a, use_site=true, site=site[1:2], reader=site[1:2]),
+        (; id=:b, use_site=!second_uses_reader, site=reverse(site), reader=reverse(site))]
+    fitted_sites = [1, 2, 3]
+    train = (; site=fitted_sites, instruments=records(fitted_sites), y=zeros(3), z=zeros(2))
+    fit = SBBRMI(builder(train); mod=@__MODULE__)
+    # New labels, reversed input record order, and both responses absent.
+    new_sites = [4, 5, 6, 7]
+    new = (; site=new_sites, instruments=reverse(records(new_sites)))
+    member_indices = [k for (k, e) in fit.preproc if e.kind === :group_index && k !== :site_idx]
+    @test length(member_indices) == 2
+    for design in (train, new)
+        replay = reprocess(fit, design; resample_groups=[:site])
+        kinds = Dict(o.name => o.kind for o in brm_descriptor(replay).outputs)
+        @test kinds[:b_p_site_z_flat] === :generated_quantity
+        @test kinds[:b_p_site_L] === kinds[:b_p_site_tau] === :parameter
+        @test !haskey(kinds, :b_p_site_new)
+        @test StanBlocks.stanc_check(stan_code(replay); warn_pedantic=false).ok
+        data = stan_data(replay)
+        @test data[:site_idx] == eachindex(design.site)
+        @test all(k -> data[k] == [1; 2; reverse(eachindex(design.site))], member_indices)
+        @test data[:col_idx_baseline_p_site] == fit.data[:col_idx_baseline_p_site]
+        @test replay.data[:n_site] == length(design.site)
+    end
+    fresh = reprocess(fit, merge(new, (; y=zeros(4), z=zeros(2)));
+                      resample_groups=:site, freeze_constants=false)
+    @test all(k -> fresh.preproc[k].const_.levels == new_sites, member_indices)
+
+    # Older fits recorded only the standalone block for the shared index.
+    entry = fit.preproc[:site_idx]
+    fit.preproc[:site_idx] = BayesianRegressionModels.PreprocEntry(:group_index,
+        (; entry.const_.levels, entry.const_.n_groups_key), entry.raw_ref, true)
+    more_member_sites = (; site=[5, 7], instruments=records(new_sites))
+    restored = reprocess(fit, more_member_sites; resample_groups=:site)
+    @test stan_data(restored)[:site_idx] == [2, 4]
+    @test restored.preproc[:site_idx].const_.levels == new_sites
+
+    # A differently named field participates only when requested. The
+    # conditional redraw still uses the single-column address of baseline.
+    mixed = merge(train, (; instruments=records(train.site; second_uses_reader=true)))
+    fit = SBBRMI(builder(mixed); mod=@__MODULE__)
+    a, b = mixed.instruments
+    by_site = (; site=[2, 4], instruments=[merge(a, (; site=[4, 2])), merge(b, (; site=[4, 2, 4]))])
+    by_reader = (; mixed.site, instruments=[a, merge(b, (; site=[3, 2], reader=[4, 3]))])
+    for (selected, design, n_kept, fitted_position) in
+            ((:site, by_site, 1, 2), (:reader, by_reader, 4, 3))
+        replay = reprocess(fit, design; resample_groups=selected)
+        data = stan_data(replay)
+        @test data[:b_p_site_new_n_kept] == n_kept
+        @test data[:b_p_site_new_pos] == [fitted_position, 0]
+        @test data[:col_idx_baseline_p_site] == fit.data[:col_idx_baseline_p_site]
+        @test StanBlocks.stanc_check(stan_code(replay); warn_pedantic=false).ok
+    end
+    all_new = (; new.site, instruments=reverse(records(new.site; second_uses_reader=true)))
+    together = reprocess(fit, all_new; resample_groups=[:site, :reader])
+    @test !haskey(stan_data(together), :b_p_site_new_n_kept)
+    @test together.data[:n_site] == length(new.site)
+end
+
 @testset "reprocess resample_groups — first-class new-population artifact" begin
     fitted = SBBRMI(resample_builder(resample_train); mod=@__MODULE__)
 

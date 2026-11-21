@@ -28,7 +28,7 @@ function _brm_parent_block(term)
 end
 
 function _brm_parent_margins!(out, columns, occupied, loop, records, positions, keys, variant,
-        selected, index, df)
+        selected, index, df, group_sources)
     declarations, ports, arguments = Any[], Symbol[], Any[]
     record = loop.component.inputs[loop.record]
     for stmt in selected
@@ -52,18 +52,19 @@ function _brm_parent_margins!(out, columns, occupied, loop, records, positions, 
         summands = Any[]
         for spec in filter(!isnothing, shared)
             field = _brm_observer_field(spec.group, record)
-            slices = if !isnothing(field)
-                [_brm_record_field(records[i], field) for i in positions]
+            source, slices = if !isnothing(field)
+                field, [_brm_record_field(records[i], field) for i in positions]
             else
                 p = findfirst(isequal(spec.group), loop.component.inputs)
                 isnothing(p) && throw(ArgumentError("@brm: parentblock groups come from a record field or a component input"))
                 arg = loop.arguments[p]
                 arg isa Symbol || throw(ArgumentError("@brm: parentblock needs a named grouping column"))
-                fill(getproperty(df, arg), length(positions))
+                arg, fill(getproperty(df, arg), length(positions))
             end
             all(x -> x isa AbstractVector, slices) || throw(ArgumentError("@brm: parentblock needs a grouping vector for every member"))
             group, margin, rows, effect, port = fresh(:group), fresh(:margin), fresh(:rows), fresh(:effect), fresh(:input)
             columns[group] = reduce(vcat, slices)
+            isnothing(group_sources) || (group_sources[group] = source)
             columns[margin] = _BRMMemberCodes(reduce(vcat, [fill(i, length(x)) for (i,x) in enumerate(slices)]),
                 fresh(:members), loop.target, keys[positions], target, effect, spec.id)
             ends = cumsum(length.(slices))

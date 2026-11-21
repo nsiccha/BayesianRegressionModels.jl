@@ -137,7 +137,7 @@ function _brm_variant_component(loop, selected, value, ports)
 end
 
 function _brm_collection_variant!(out, frame, observers, builder, occupied, loop, records, keys,
-        positions, selected, value, variant, df)
+        positions, selected, value, variant, df, group_sources)
     name = loop.target
     fresh(parts...) = _rk_ast_fresh_name(string(parts...), occupied)
     axis_name = fresh(name, "_axis_", variant)
@@ -145,7 +145,7 @@ function _brm_collection_variant!(out, frame, observers, builder, occupied, loop
     declarations = filter(st -> !_brm_is_observer(st), selected)
     index = fresh("brm_entry")
     declarations, ports, shared = _brm_parent_margins!(out, frame, occupied, loop,
-        records, positions, keys, variant, declarations, index, df)
+        records, positions, keys, variant, declarations, index, df, group_sources)
     component, fields = _brm_variant_component(loop, declarations, value, ports)
     args = Any[arg for (i, arg) in enumerate(loop.arguments) if i != loop.record]
     append!(args, shared)
@@ -175,7 +175,7 @@ function _brm_collection_variant!(out, frame, observers, builder, occupied, loop
     member_results
 end
 
-function _brm_lower_collection!(out, frame, observers, fields, builder, occupied, loop, df)
+function _brm_lower_collection!(out, frame, observers, fields, builder, occupied, loop, df, group_sources)
     records = getproperty(df, loop.source)
     records isa Union{AbstractVector,Tuple} ||
         throw(ArgumentError("@brm: `$(loop.source)` must be a vector or tuple of records"))
@@ -232,7 +232,7 @@ function _brm_lower_collection!(out, frame, observers, fields, builder, occupied
         positions = groups[group]
         sort!(positions; by=i -> (keys[i] isa Symbol, keys[i]))
         push!(results, _brm_collection_variant!(out, frame, observers, builder, occupied, loop, records, keys,
-            positions, selected_bodies[group], value, variant, df))
+            positions, selected_bodies[group], value, variant, df, group_sources))
         append!(order, positions)
     end
     permutation = _rk_ast_fresh_name(string(loop.target, "_row_order"), occupied)
@@ -253,7 +253,7 @@ function _brm_read_collection_fields(ex, fields)
     Expr(ex.head, map(x -> _brm_read_collection_fields(x, fields), ex.args)...)
 end
 
-function _brm_collection_design(builder, df)
+function _brm_collection_design(builder, df; group_sources=nothing)
     statements, columns = Any[], Dict{Symbol,Any}()
     occupied = copy(builder.occupied)
     observers = Dict{Symbol,Vector{NamedTuple}}()
@@ -261,7 +261,7 @@ function _brm_collection_design(builder, df)
     for st in builder.statements
         if st isa _BRMCollectionLoop
             observers[st.target] = NamedTuple[]
-            _brm_lower_collection!(statements, columns, observers[st.target], fields, builder, occupied, st, df)
+            _brm_lower_collection!(statements, columns, observers[st.target], fields, builder, occupied, st, df, group_sources)
         else
             push!(statements, st)
         end
@@ -319,10 +319,10 @@ function _brm_collection_public_records(brmi, records)
     Tuple(result)
 end
 
-function _brm_collection_replay_data(brmi, df)
+function _brm_collection_replay_data(brmi, df; group_sources=nothing)
     axes = _brm_collection_axes(brmi)
     isempty(axes) && return df
-    _, columns = _brm_collection_design(first(axes).builder, df)
+    _, columns = _brm_collection_design(first(axes).builder, df; group_sources)
     layout(axes) = Dict((axis.collection, axis.path) => axis.keys for axis in axes)
     training = layout(axes)
     rebound = layout(value for value in values(columns) if value isa _BRMCollectionAxis)
