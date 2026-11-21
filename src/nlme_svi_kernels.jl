@@ -59,6 +59,31 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         result = (lambda, axis)
         return result
     end),
+    pair_stack=:(function _svi_pair_stack(root, precision, lambda, axis, rate, trust)
+        lower = LowerTriangular(root)
+        v = lower * axis
+        gap = Symmetric(lambda .* (v * transpose(v)) .- precision)
+        radius = max(abs(lambda - 1), length(axis) > 1 ? 1.0 : 0.0)
+        step = min(rate, trust / radius)
+        stack = vcat(Matrix(transpose(lower)), lower \ (precision .+ step .* gap))
+        result = (stack, step)
+        return result
+    end),
+    orthogonal_stack=:(function _svi_orthogonal_stack(root, gap, radius, rate, trust)
+        step = radius > 0 ? min(rate, trust / radius) : rate
+        upper = Matrix(transpose(LowerTriangular(root)))
+        stack = vcat(upper, (I + step .* gap) * upper)
+        result = (stack, step)
+        return result
+    end),
+    dense_update=:(function _svi_dense_update(mean, old_root, stack, gradient, rate, trust)
+        factor = qr(stack).R
+        root = LowerTriangular(_svi_precision_root(factor, sqrt(2)))
+        delta = rate .* (transpose(root) \ (root \ gradient))
+        next_mean = mean .+ _svi_mean_trust(old_root, delta, trust) .* delta
+        result = (next_mean, root * transpose(root), Matrix(root))
+        return result
+    end),
     adam=:(function _svi_adam(x, moment, variance, gradient, beta1, beta2, correction1, correction2, rate)
         next_moment = beta1 .* moment .+ (1 - beta1) .* gradient
         next_variance = beta2 .* variance .+ (1 - beta2) .* gradient .^ 2

@@ -23,6 +23,12 @@ const BRM = BayesianRegressionModels
         :curvature_axis => (ε, μ),
         :curvature_axis => (ε, -ε),
         :curvature_axis => (zero(ε), ε),
+        :pair_stack => ([1.0 0.0; 0.2 1.1], [1.0 0.2; 0.2 1.25],
+            2.0, [1.0, 0.0], 0.75, 1.0),
+        :orthogonal_stack => (Matrix{Float64}(I, 2, 2), [1.0 0.2; 0.2 1.25],
+            1.4, 0.75, 1.0),
+        :dense_update => (μ, Matrix{Float64}(I, 2, 2),
+            [1.0 0.0; 0.1 1.0; 1.1 -0.2; 0.3 0.9], ε, 0.75, 1.0),
         :adam => (μ, [0.2, -0.1], [0.3, 0.9], ε, 0.9, 0.999, 0.19, 0.001999, 0.1),
     ]
     @test Set(first.(cases)) == Set(keys(kernels))

@@ -706,18 +706,17 @@ function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β; rank=1.0)
     isempty(q.M[i]) && return q
     U = LowerTriangular(q.U[i])
     λ, e = _brm_svi_unit_curvature(U, gd, εi)
-    v = U * e
-    G = Symmetric(λ .* (v * v') .- q.Λ[i])
     # U⁻¹ G U⁻ᵀ = λ e eᵀ - I: its eigenvalues are λ - 1 and, above d = 1, -1.
-    r = max(abs(λ - 1), length(e) > 1 ? 1.0 : 0.0)
-    β = min(β, _BRM_SVI_UNIT_TRUST / r)
-    R = qr(vcat(Matrix(U'), U \ (q.Λ[i] .+ β .* G))).R
-    L = LowerTriangular(_svi_precision_root(R, sqrt(2)))
-    Δ = β .* (L' \ (L \ gz))
-    Δ .*= _svi_mean_trust(U, Δ, _BRM_SVI_UNIT_MEAN_TRUST)
-    q.U[i] .= L
-    q.Λ[i] .= L * L'
-    q.M[i] .+= Δ
+    stack, step = _svi_pair_stack(U, q.Λ[i], λ, e, β, _BRM_SVI_UNIT_TRUST)
+    _brm_svi_commit_dense_step!(q, i, U, stack, gz, step)
+end
+
+function _brm_svi_commit_dense_step!(q, i, root, stack, gradient, step)
+    mean, precision, next_root = _svi_dense_update(q.M[i], root, stack, gradient,
+        step, _BRM_SVI_UNIT_MEAN_TRUST)
+    copyto!(q.M[i], mean)
+    copyto!(q.Λ[i], precision)
+    copyto!(q.U[i], next_root)
     q
 end
 
@@ -970,16 +969,9 @@ function _brm_svi_unit_step_full!(q, i, gz, S, β; positive=true)
     Ŝ = Symmetric((S .+ S') ./ 2)
     Ĝ = Symmetric((positive ? _brm_svi_positive_part(Ŝ) : Ŝ) - I)
     r = maximum(abs, eigvals(Ĝ))
-    β = r > 0 ? min(β, _BRM_SVI_UNIT_TRUST / r) : β
     # U⁻¹(Λ + βG) = (I + βĜ) Uᵀ.
-    R = qr(vcat(Matrix(U'), (I + β .* Ĝ) * Matrix(U'))).R
-    L = LowerTriangular(_svi_precision_root(R, sqrt(2)))
-    Δ = β .* (L' \ (L \ gz))
-    Δ .*= _svi_mean_trust(U, Δ, _BRM_SVI_UNIT_MEAN_TRUST)
-    q.U[i] .= L
-    q.Λ[i] .= L * L'
-    q.M[i] .+= Δ
-    q
+    stack, step = _svi_orthogonal_stack(U, Ĝ, r, β, _BRM_SVI_UNIT_TRUST)
+    _brm_svi_commit_dense_step!(q, i, U, stack, gz, step)
 end
 
 # A symmetric matrix's positive part; itself, to the last bit, when it has no

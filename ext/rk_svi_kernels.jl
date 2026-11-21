@@ -1,5 +1,5 @@
 # Use exactly the equations compiled for BRM's native iteration.
-using LinearAlgebra: diag, dot, norm
+using LinearAlgebra: I, LowerTriangular, Symmetric, diag, dot, norm, qr
 
 const _SVI_KERNELS = map(BRM._BRM_SVI_KERNEL_DEFINITIONS) do definition
     Core.eval(@__MODULE__, Expr(:macrocall, GlobalRef(ReactiveKernels, Symbol("@kernel")),
