@@ -129,9 +129,16 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
     isfinite(v0) || _brm_nlme_error(
         "brm_laplace_integration: the Laplace marginal is not finite at the point")
     calls = Ref(1)
+    # each design point's mode search, kept for the draws there (`_brm_lint_draws`)
+    states = Dict{Vector{Float64},Any}()
+    draws > 0 && (states[θ(zeros(d))] = _brm_lint_draw_state(p))
+    # and started from the centre's modes (`_brm_lint_logdensity`)
+    start = _brm_lint_start(p)
     function value(z)
         calls[] += 1
-        v = LogDensityProblems.logdensity(p, θ(z))
+        φ = θ(z)
+        v = _brm_lint_logdensity(p, φ, start)
+        draws > 0 && (states[φ] = _brm_lint_draw_state(p))
         isfinite(v) ? Float64(v) : -Inf
     end
     evaluated = design === :grid ?
@@ -154,7 +161,7 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
         nothing
     marginals = _brm_lint_marginals(p, design, Z, v, w, Θ, μ, σ, θstar, A,
         Float64(step), Int(marginal_points))
-    packed, newton_steps = _brm_lint_draws(p, Θ, w, Int(draws), rng, conditional)
+    packed, newton_steps = _brm_lint_draws(p, Θ, w, Int(draws), rng, conditional, states)
     isempty(evaluated.truncated) || @warn("brm_laplace_integration: the grid walk along " *
         "standardized axes $(evaluated.truncated) stopped at its step limit before the log " *
         "marginal dropped by max_log_drop; the marginal may be improper or very flat there")
@@ -344,13 +351,48 @@ function _brm_lint_table(name, x, unnormalized)
 end
 
 # R-INLA's sampler: draw design points by weight, then the integrated effects
-# at each from its conditional Gaussian. Equal points are drawn together, so
-# each point's mode search runs once, and the columns are then shuffled.
-function _brm_lint_draws(p, Θ, w, n, rng, conditional)
+# at each from its conditional Gaussian. The design already ran each point's
+# mode search, so the draws reuse its state (`states`, by point) where it was
+# kept, and otherwise search the point again: equal points are drawn together,
+# so that search runs once per point. The columns are then shuffled. Either
+# way the draws are the same numbers: a point's mode search does not depend on
+# earlier ones (`_brm_spl_mode!`).
+function _brm_lint_draws(p, Θ, w, n, rng, conditional, states=Dict{Vector{Float64},Any}())
     n == 0 && return Matrix{Float64}(undef, length(p.u), 0), Int[]
     c = cumsum(w)
     picks = sort!([min(searchsortedfirst(c, rand(rng) * c[end]), length(w)) for _ in 1:n])
-    out = brm_laplace_draws(p, Θ[:, picks]; rng, conditional)
+    out = _brm_lint_draws_at(p, Θ, picks, rng, conditional, states)
     order = Random.randperm(rng, n)
     out.draws[:, order], out.diagnostics.newton_steps[order]
 end
+
+_brm_lint_draws_at(p, Θ, picks, rng, conditional, states) =
+    brm_laplace_draws(p, Θ[:, picks]; rng, conditional)
+function _brm_lint_draws_at(p::BRMSparseLaplaceProblem, Θ, picks, rng, conditional, states)
+    P = Θ[:, picks]
+    function state_at(k)
+        state = get(states, P[:, k], nothing)
+        state === nothing ? _brm_spl_mode!(p, view(P, :, k)) : state
+    end
+    _brm_spl_draws(p, length(picks), state_at; rng, conditional)
+end
+
+# The Laplace marginal at a design point. A sparse problem's mode search there
+# starts from the integrated effects' modes at the design's centre (`start`,
+# `_brm_spl_search!`): neighbouring points' modes are close, so it takes about
+# half the Newton steps of a search from the prior's mode (epil, 301 effects:
+# 4.1 instead of 8.1 per point, the marginal within 4e-12; snag
+# `brm-laplace-inte-e0991a0f`). The start is fixed for the whole design, so
+# each point's value does not depend on the order the design visits them.
+_brm_lint_start(p) = nothing
+_brm_lint_start(p::BRMSparseLaplaceProblem) =
+    p.last === nothing || !p.last.state.finite ? nothing : copy(p.last.state.z)
+_brm_lint_logdensity(p, φ, start) = LogDensityProblems.logdensity(p, φ)
+_brm_lint_logdensity(p::BRMSparseLaplaceProblem, φ, start) =
+    _brm_spl_value(p, _brm_spl_mode!(p, φ; start))
+
+# The last mode search's state, kept for drawing at its point
+# (`_brm_spl_draw_state`); `nothing` where the problem keeps none.
+_brm_lint_draw_state(p) = nothing
+_brm_lint_draw_state(p::BRMSparseLaplaceProblem) =
+    p.last === nothing ? nothing : _brm_spl_draw_state(p, p.last.state)

@@ -130,6 +130,13 @@ mutable struct BRMSparseLaplaceProblem{K}
     rentry::Vector{Int}
     coff::Vector{Int}
     block_reads::Vector{Vector{Int}}
+    # Blocks whose C is the same at every population point (`cfixed`, checked
+    # in `_brm_spl_design!`: no coordinate of their own and none of another's
+    # moves it, as for a formula coefficient's design column), and their C
+    # entries (`C0`, C's layout, zero elsewhere), which `_brm_spl_cmaps` then
+    # copies instead of probing the model once per such block.
+    cfixed::Vector{Bool}
+    C0::Vector{Float64}
     # Each term's effects (`tz[tptr[t]:tptr[t+1]-1]`, ascending), the local
     # position of read r's first effect (`rloc[r]`, its K effects consecutive
     # and in margin order). Pair locations are looked up in the sparse column;
@@ -513,7 +520,8 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     p = BRMSparseLaplaceProblem(backend, population, names[population], integrate,
         integrated, blocks, kernels, nothing, nothing, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
-        Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], (;),
+        Int[], Int[], Int[], Int[], Int[], Vector{Int}[], fill(false, length(blocks)), Float64[],
+        Int[], Int[], Int[], (;),
         spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
@@ -565,11 +573,11 @@ function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA)
     A = p.affine ? _brm_slap_affine_A(p, view(uA, p.population)) :
         _brm_slap_psi!(zeros(nψ), p, values)
     nc = isempty(p.coff) ? 0 : p.coff[end] + p.blocks[p.rblock[end]].K
-    C = zeros(nc)
+    C = length(p.C0) == nc ? copy(p.C0) : zeros(nc)
     dC = [zeros(nc) for _ in p.omega]
     ψ = zeros(nψ)
     for (j, b) in enumerate(p.blocks), k in 1:b.K
-        isempty(p.block_reads[j]) && continue
+        (isempty(p.block_reads[j]) || p.cfixed[j]) && continue
         # A native field's entries read several of its levels: probe them
         # one level color at a time (`_brm_gmrf_level_colors`).
         colors = _brm_spl_gmrf_colors(p, j)
@@ -713,6 +721,34 @@ function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
             "population coordinates other than their own scales and correlations, " *
             "which the sparse Laplace does not differentiate")
     end
+    _brm_spl_fixed_cmaps!(p, uA, C1, rng)
+end
+
+# The blocks whose C no population coordinate moves (`p.cfixed`, `p.C0`): a
+# block with no coordinate of its own (a formula coefficient, a declared
+# vector), whose C stays put, up to the rounding of the probe's difference
+# from A, at two more points where every population coordinate moves. Any
+# other block is probed at every point, as before.
+function _brm_spl_fixed_cmaps!(p::BRMSparseLaplaceProblem, uA, C1, rng)
+    candidates = [isempty(b.omega) && !isempty(p.block_reads[j])
+        for (j, b) in enumerate(p.blocks)]
+    any(candidates) || return p
+    entries(j) = (p.coff[r] + k for r in p.block_reads[j] for k in 1:p.blocks[j].K)
+    fixed = copy(candidates)
+    for _ in 1:2
+        u = copy(uA)
+        u[p.population] .+= 0.3 .* randn(rng, length(p.population))
+        C, _, _, _ = _brm_spl_cmaps(p, u)
+        for j in findall(fixed)
+            fixed[j] = all(i -> isapprox(C[i], C1[i]; rtol=1e-12, atol=1e-12), entries(j))
+        end
+    end
+    C0 = zeros(length(C1))
+    for j in findall(fixed), i in entries(j)
+        C0[i] = C1[i]
+    end
+    p.C0 = C0
+    p.cfixed = fixed
     p
 end
 
@@ -989,9 +1025,17 @@ function _brm_spl_pattern(footprints, n, edges)
     (; pattern, stats)
 end
 
+# A column whose rows are one consecutive run is indexed directly: an
+# integrated formula coefficient's column holds every effect its predictor's
+# rows read, and those lookups were most of h's assembly. Others by binary
+# search.
 @inline function _brm_spl_nzindex(pattern, i, j)
     span = nzrange(pattern, j)
-    first(span) - 1 + searchsortedfirst(view(rowvals(pattern), span), i)
+    rows = rowvals(pattern)
+    lo = rows[first(span)]
+    hi = rows[last(span)]
+    hi - lo == length(span) - 1 && lo <= i <= hi && return first(span) + (i - lo)
+    first(span) - 1 + searchsortedfirst(view(rows, span), i)
 end
 
 # h's pattern (the identity and every pair of effects a term reads), each
@@ -1670,10 +1714,7 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
         r === nothing && return (; status=:nonfinite, iterations, h)
         δ, shift = r
         all(isfinite, δ) || return (; status=:nonfinite, iterations, h)
-        fill!(λ, 0.0)
-        for i in 1:n
-            λ[p.component[i]] += g[i] * δ[i]
-        end
+        _brm_spl_decrements!(λ, p.component, g, δ)
         candidate = [!converged[c] && shift[c] == 0 &&
             _brm_lap_floor_candidate(λ[c], previous[c], tol) for c in 1:nc]
         floor = any(candidate) ? _brm_spl_at_floor(p, pop, z, δ, g, h, λ; weight=s) : candidate
@@ -1701,6 +1742,17 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
     end
 end
 
+# Each component's Newton decrement gᵀδ over its effects. A function of its
+# own: the direction's type is known only at run time (exact or operator
+# algebra), and this loop runs once per effect and Newton step.
+function _brm_spl_decrements!(λ, component, g, δ)
+    fill!(λ, 0.0)
+    for i in eachindex(g)
+        λ[component[i]] += g[i] * δ[i]
+    end
+    λ
+end
+
 # One evaluation's mode-search record, per component: Newton steps, shifted
 # steps per stage, the largest shift, steps whose full Newton step was refused,
 # and the last stage's final decrement and stop (`:tol`, or `:floor` for the
@@ -1719,10 +1771,14 @@ _brm_spl_search(nc, stages) = (; stages=collect(stages), steps=zeros(Int, nc),
 # evaluation's steps per component; `p.folds` counts evaluations in which a
 # component's followed mode needed a shifted step after the first stage.
 # At the last search's point, that search's state (`_brm_laplace_last!`).
-_brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector) =
-    _brm_laplace_last!(_brm_spl_search!, p, φ)
+#
+# `start` (`brm_laplace_integration`'s design, from its centre's modes) starts
+# Newton there instead, where the density is log-concave (one stage): its mode
+# is then unique, so only the number of steps changes.
+_brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing) =
+    _brm_laplace_last!((p, φ) -> _brm_spl_search!(p, φ; start), p, φ)
 
-function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
+function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing)
     p.algebra === nothing || empty!(p.algebra.diagnostics)
     pop = _brm_spl_population(p, φ)
     if !(all(isfinite, pop.A) && all(isfinite, pop.C))
@@ -1733,7 +1789,8 @@ function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     stages = _brm_lap_stages(_brm_spl_concave(p))
     search = _brm_spl_search(nc, stages)
     p.search = search
-    z = _brm_spl_prior_mode(p, pop)
+    z = start === nothing || length(stages) > 1 ? _brm_spl_prior_mode(p, pop) :
+        collect(Float64, start)
     iterations = 0
     h = nothing
     for (k, s) in enumerate(stages)
@@ -2168,16 +2225,25 @@ function brm_laplace_draws(p::BRMSparseLaplaceProblem, P::AbstractMatrix;
     size(P, 1) == length(p.population) || throw(DimensionMismatch(
         "population draws have $(size(P, 1)) rows, the problem has " *
         "$(length(p.population)) population coordinates"))
+    _brm_spl_draws(p, size(P, 2), k -> _brm_spl_mode!(p, view(P, :, k)); rng, conditional)
+end
+
+# The draws at `m` population points, `state(k)` the mode search's state at
+# the k-th: `brm_laplace_draws`, or `brm_laplace_integration`'s draws at its
+# design points from the searches the design already ran
+# (`_brm_spl_draw_state`).
+function _brm_spl_draws(p::BRMSparseLaplaceProblem, m::Integer, state_at;
+        rng=Random.default_rng(), conditional::Integer=0)
     conditional >= 0 || throw(ArgumentError(
         "brm_laplace_draws: conditional = $conditional proposals; pass 0 for " *
         "Laplace draws or a positive count for importance resampling"))
     n = length(p.integrated)
     nc = length(p.components)
-    draws = Matrix{Float64}(undef, length(p.u), size(P, 2))
-    newton_steps = Vector{Int}(undef, size(P, 2))
-    importance_ess = Matrix{Float64}(undef, conditional > 0 ? nc : 0, size(P, 2))
-    for k in axes(P, 2)
-        state = _brm_spl_mode!(p, view(P, :, k))
+    draws = Matrix{Float64}(undef, length(p.u), m)
+    newton_steps = Vector{Int}(undef, m)
+    importance_ess = Matrix{Float64}(undef, conditional > 0 ? nc : 0, m)
+    for k in 1:m
+        state = state_at(k)
         state.finite || _brm_nlme_error(
             "brm_laplace_draws: population draw $k has a nonfinite density")
         newton_steps[k] = state.iterations
@@ -2218,4 +2284,14 @@ function brm_laplace_draws(p::BRMSparseLaplaceProblem, P::AbstractMatrix;
     end
     diagnostics = conditional > 0 ? (; newton_steps, importance_ess) : (; newton_steps)
     (; draws, diagnostics)
+end
+
+# A mode search's state that outlives the next search, for drawing at its
+# point later: the problem refactors h in place (`_brm_spl_factor!`), so the
+# factor is copied; every other field is the search's own. Only an exact
+# CHOLMOD factor is kept (`nothing` otherwise: search again at the point).
+function _brm_spl_draw_state(p::BRMSparseLaplaceProblem, state)
+    (state.finite && state.F isa SparseArrays.CHOLMOD.Factor) || return nothing
+    (; state.finite, state.z, state.u, state.uA, state.A, state.C, state.h,
+        F=copy(state.F), state.W, state.iterations)
 end
