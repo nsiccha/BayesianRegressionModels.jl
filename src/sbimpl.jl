@@ -393,7 +393,7 @@ _sb_vector_prior_coordinates(family::StanBlocks.ValueFamily) =
 # coefficient's, so an array-valued argument is refused as on the plain
 # Normal path (`_brm_normal_effect_args`) instead of vectorising over the block.
 function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
-                            mod::Module=base.mod)
+                            mod::Module=base.mod, matrix_inputs=nothing)
     for prior in priors
         isnothing(prior) || !any(_brm_is_array_value, getargs(prior)) || error(
             "sbimpl: each coefficient's `$(sprint(_show_call_head, getf(prior)))` " *
@@ -405,7 +405,7 @@ function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
         node.head === :(::) && node.args[1] === target)
     prior = _sb_vector_prior_statement(target, target, priors, length(priors);
                                        positive=false, mod, scope=base.mod,
-                                       declaration=deepcopy(declaration))
+                                       declaration=deepcopy(declaration), matrix_inputs)
     _sb_merge_bound_vector_prior(base, prior)
 end
 
@@ -466,7 +466,7 @@ end
 # generated family. A `vcat` call names no size, so that statement's LHS
 # declares it: `declaration` (the target's existing typed declaration), else
 # `target::vector[nvalue]`, which keeps the plan's `dimension`.
-function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool,
+function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool, matrix_inputs=nothing,
                                  declaration=Expr(:(::), target, Expr(:ref, :vector, nvalue)))
     length(priors) > 1 || return nothing
     all(prior -> _brm_distribution_shape(prior) ==
@@ -490,13 +490,15 @@ function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool,
         reference = calls[first(run)]
         args = map(eachindex(reference.names)) do j
             column = Any[actuals[offsets[i] + j] for i in run]
-            allequal(column) ? first(column) : Expr(:vect, column...)
+            whole = matrix_inputs === nothing ? nothing : _brm_prior_vector_argument(column, matrix_inputs)
+            whole !== nothing ? whole : allequal(column) ? first(column) : Expr(:vect, column...)
         end
         # One run covers the whole vector and is sized by the caller's `n`.
         # A `vcat` block's length is its own: a vector-literal argument sizes
         # it, otherwise `n` does, and a lone scalar call is one coordinate.
         n = length(runs) == 1 ? nvalue :
-            length(run) > 1 && !any(a -> a isa Expr && a.head === :vect, args) ?
+            length(run) > 1 && !any(a -> Meta.isexpr(a, :vect) ||
+                (matrix_inputs !== nothing && a isa Symbol && get(matrix_inputs, a, nothing) isa AbstractVector), args) ?
                 length(run) : nothing
         kws = Any[]
         isnothing(n) || push!(kws, Expr(:kw, :n, n))
@@ -531,7 +533,7 @@ function _sb_vector_prior_statement(lhs, target::Symbol, priors, nvalue;
                                     positive::Bool, mod::Module, scope::Module,
                                     declaration=lhs isa Symbol ?
                                         Expr(:(::), lhs, Expr(:ref, :vector, nvalue)) : lhs,
-                                    vcat::Bool=true)
+                                    vcat::Bool=true, matrix_inputs=nothing)
     priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior for prior in priors]
     # Stan's native univariate families vectorise over their variate. When every
     # margin has the exact same mapped distribution, retain that natural Stan
@@ -553,7 +555,7 @@ function _sb_vector_prior_statement(lhs, target::Symbol, priors, nvalue;
             isnothing(direct) || return direct
         end
     end
-    native = _sb_native_vector_prior(target, priors, nvalue; positive, declaration)
+    native = _sb_native_vector_prior(target, priors, nvalue; positive, declaration, matrix_inputs)
     isnothing(native) || (!vcat && _sb_is_vcat_prior(native.statement)) || return native
     family, args = _sb_vector_prior_family(priors; positive, mod)
     # Intrinsic bounds belong to the value family, including when this
@@ -5018,8 +5020,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing,
     interaction_map_of(lp::Symbol) = get!(resolved_interactions, lp) do
         _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Symbol}}()
         try
-            # A design-coded string column's block address fans out over its
-            # level columns exactly like an interaction term over its columns.
+            # Bare string and matrix terms address their design columns as a block.
             merge(_sb_interaction_address_map(brmi, lp; frozen_preproc),
                   _sb_design_block_address_map(brmi, lp; frozen_preproc))
         catch err
@@ -5309,9 +5310,9 @@ end
 
 # `mod` is the SBBRMI caller's module: the `_popefs_generic` bases are
 # BRM-owned, so their `base.mod` cannot see consumer-defined custom families.
-function _sb_population_prior_model(priors; coefficients::Bool=false, mod::Module=@__MODULE__)
+function _sb_population_prior_model(priors; coefficients::Bool=false, mod::Module=@__MODULE__, matrix_inputs=nothing)
     base = coefficients ? _popefs_generic_coefs : _popefs_generic
-    _sb_vector_priors(base, :beta_pop, priors; mod)
+    _sb_vector_priors(base, :beta_pop, priors; mod, matrix_inputs)
 end
 
 """
@@ -5321,12 +5322,12 @@ Return `(; model, kwargs)` for a population coefficient block. Default and
 Normal-only vectors retain the established named submodels; other callable
 prior ASTs use a configured generic model while preserving `beta_pop`.
 """
-function _sb_population_prior_rhs(priors; coefficients::Bool=false, mod::Module=@__MODULE__)
+function _sb_population_prior_rhs(priors; coefficients::Bool=false, mod::Module=@__MODULE__, matrix_inputs=nothing)
     default_model = coefficients ? :_popefs_coefs : :popefs
     normal_model = coefficients ? :_popefs_normal_coefs : :_popefs_normal
     (isnothing(priors) || all(isnothing, priors)) &&
         return (; model=default_model, kwargs=NamedTuple())
-    if all(_sb_is_normal_effect_prior, priors)
+    if matrix_inputs === nothing && all(_sb_is_normal_effect_prior, priors)
         beta_loc = Any[0.0 for _ in priors]
         beta_scale = Any[1.0 for _ in priors]
         for i in eachindex(priors)
@@ -5337,7 +5338,7 @@ function _sb_population_prior_rhs(priors; coefficients::Bool=false, mod::Module=
                 kwargs=(; beta_loc=Expr(:vect, beta_loc...),
                          beta_scale=Expr(:vect, beta_scale...)))
     end
-    configured = _sb_population_prior_model(priors; coefficients, mod)
+    configured = _sb_population_prior_model(priors; coefficients, mod, matrix_inputs)
     (; model=configured.model, kwargs=(; configured.inputs...))
 end
 
@@ -5702,7 +5703,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     pop!(data, _SB_SKIPPED_ROWS_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
-    _sb_prune_cell_formula_inputs!(data, preproc, stmts)
+    _sb_prune_prepared_inputs!(data, preproc, stmts)
     _sb_prune_guard_inputs!(data, preproc, stmts)
     for column in _brm_operation_values(brmi)
         column isa NamedColumn && parent(column) isa DataColumn || continue
@@ -7422,6 +7423,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$right_key`")
         replay_and_bind((new_data[left_key], new_data[right_key]), :primary => key;
                         prefix="sbimpl: reprocess: interaction `$key`")
+    elseif e.kind === :matrix_predictor
+        raw = _brm_check_matrix_width(_sb_df_column(df, e.raw_ref), e.raw_ref, e.const_)
+        new_data[key] = raw isa Matrix{Float64} ? raw : Matrix{Float64}(raw)
+        new_preproc[key] = e
     elseif e.kind === :population_factor_dummy
         raw = _sb_df_column(df, e.raw_ref)
         raw isa AbstractVector || error(
@@ -8271,7 +8276,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     end
     # The cell recipes above use raw labels/coordinates to regenerate their
     # numeric inputs. StanBlocks types every data key, including unused ones.
-    _sb_prune_cell_formula_inputs!(new_data, new_preproc, sb.model.model.args)
+    _sb_prune_prepared_inputs!(new_data, new_preproc, sb.model.model.args)
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
         SBBRMI(sb.parent, new_model, new_data, new_preproc, forecast, sb.bindings,
@@ -10652,14 +10657,39 @@ _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
 # with only some levels, rebuilds the fitted columns instead of refitting them.
 # `factor(...)` terms never reach it: `_sb_terms` lowers them first.
 _sb_population_columns(data) = (term; cellmeans::Bool=false) ->
-    _brm_population_columns(term; cellmeans, fitted=(label, kind, raw_ref) -> begin
+    _brm_design_columns(term; cellmeans, fitted=(label, kind, raw_ref) -> begin
         entry = _sb_frozen_preproc_entry(data, label, kind, raw_ref)
         isnothing(entry) ? nothing : entry.const_
     end)
 
+# Keep the original matrix as one data field. Its replay record checks the
+# fitted width. A generated real matrix also permits an integer-valued input
+# to keep its original integer meaning elsewhere in the model.
+function _sb_matrix_operand!(data, ref::_BRMMatrixColumn)
+    key = Symbol("brm_matrix_", ref.source)
+    rec = PreprocEntry(:matrix_predictor, ref.width, ref.source, false)
+    frozen = _sb_frozen_preproc_entry(data, key, rec.kind, ref.source)
+    raw = _brm_check_matrix_width(data[ref.source], ref.source,
+        frozen === nothing ? ref.width : frozen.const_)
+    recorded = get(data, _SB_PREPROC_KEY, nothing)
+    records = recorded isa _SBPreprocContext ? recorded.recorded : recorded
+    if haskey(data, key)
+        records !== nothing && haskey(records, key) && records[key].kind === rec.kind ||
+            throw(ArgumentError("matrix predictor `$(ref.source)` collides with data field `$key`"))
+    else
+        data[key] = raw isa Matrix{Float64} ? raw : Matrix{Float64}(raw)
+        _sb_record_preproc!(data, key, rec)
+    end
+    _BRMMatrixColumn(key, ref.index, ref.width)
+end
+
 function _sb_shared_population_column!(data, column)
     isnothing(column.source) && return nothing
     p = column.preprocess
+    if p !== nothing && p.kind === :matrix_column
+        ref = _sb_matrix_operand!(data, p.const_)
+        return :($(ref.source)[:, $(ref.index)])
+    end
     if !isnothing(p)
         for dependency in p.dependencies
             _sb_shared_population_column!(data, dependency)
@@ -10688,6 +10718,13 @@ function _sb_shared_population_extent(data, design::_BRMPopulationDesign)
     source = design.row_source
     row_value = data[source]
     row_value isa Integer && !(row_value isa Bool) && return source
+    if row_value isa AbstractMatrix
+        index = findfirst(c -> c.source === source && c.preprocess !== nothing &&
+            c.preprocess.kind === :matrix_column, design.columns)
+        matrix = index === nothing ? source :
+            _sb_matrix_operand!(data, design.columns[index].preprocess.const_).source
+        return :(dims($matrix)[1])
+    end
     _sb_probe_is_live_numeric(data, source) && return :(num_elements($source))
     for column in design.columns
         isnothing(column.source) || return :(num_elements($(column.label)))
@@ -10704,6 +10741,8 @@ function _sb_shared_population_cols!(cols, data,
             push!(cols, isnothing(intercept) ?
                 :(rep_vector(1.0, $(_sb_shared_population_extent(data, design)))) :
                 intercept)
+        elseif column.preprocess !== nothing && column.preprocess.kind === :matrix_column
+            push!(cols, _sb_matrix_operand!(data, column.preprocess.const_))
         else
             push!(cols, _sb_shared_population_column!(data, column))
         end
@@ -10783,6 +10822,13 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                 # tier-1d / tier-1c length probes: a categorical peer or a group
                 # term names this formula's row axis, and one of them is the only
                 # signal available when the intercept is the sole population term.
+                if _brm_numeric_matrix_term(t)
+                    for col in _brm_design_columns(t)
+                        push!(col_exprs, _sb_matrix_operand!(data, col.preprocess.const_))
+                        push!(description_columns, _sb_design_column_record(col))
+                    end
+                    continue
+                end
                 first_column=length(col_exprs)+1
                 _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms;
                               obs_n, ran_terms, direct_terms, target,
@@ -10812,10 +10858,15 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             # reporting. Values stay in Stan data; metadata retains the fitted
             # transforms and column identities without rebuilding the design.
             design_columns=isnothing(shared_design) ? Tuple(description_columns) :
-                map(_sb_design_column_record, Tuple(shared_design.columns))
-            # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
-            # append_col for two-or-more columns, so we can always just emit hcat.
-            push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
+                Tuple(map(_sb_design_column_record, shared_design.columns))
+            # A matrix term already has rank two, including at width one.
+            has_matrix = any(c -> c isa _BRMMatrixColumn, col_exprs)
+            matrix = if has_matrix
+                reduce((a, b) -> :(append_col($a, $b)), _brm_design_operands(col_exprs))
+            else
+                Expr(:call, :hcat, col_exprs...)
+            end
+            push!(stmts, :($X_name = $matrix))
             overrides = _sb_pop_effect_overrides(effect_overrides, brmi_key)
             r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
             scheme = if !isnothing(joint_spec)
@@ -10871,7 +10922,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                 length(overrides) == length(col_exprs) || error(
                     "sbimpl: internal effect-prior alignment error for `$brmi_key`: " *
                     "$(length(overrides)) priors for $(length(col_exprs)) columns")
-                prior = _sb_population_prior_rhs(overrides; mod)
+                prior = _sb_population_prior_rhs(overrides; mod,
+                    matrix_inputs=has_matrix ? data : nothing)
                 call = Expr(:call, prior.model, Expr(:parameters,
                     Expr(:kw, :X, X_name),
                     (Expr(:kw, key, value) for (key, value) in pairs(prior.kwargs))...))
@@ -11130,6 +11182,10 @@ categorical term by K cell means instead; the column name then covers all K,
 and each is also addressable on its own as `<c>_lvl_<k>` (`k` = the level's
 position in the fitted level order). Everything else in the EXCLUDED list above
 still owns parameters no `effect(...)` address reaches.
+
+A numeric matrix `X` contributes one coefficient per column in input order.
+The labels are `X_col_1`, `X_col_2`, … . The address `effect(lhs, X)` reaches
+all of them, and `effect(lhs, X_col_2)` refines the second one.
 
 An interaction term is also addressable WHOLE, the way the formula spells
 it: `effect(lhs, a & b)` sets one shared Normal prior over every `beta_pop`
@@ -12316,25 +12372,19 @@ function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol; frozen_preproc=not
     out
 end
 
-# The population columns of the terms only the shared design codes (a bare
-# string column: its level indicators, `<c>_lvl_<k>`), aligned with
-# `pop_terms`, `nothing` elsewhere. SBBRMI emits such a predictor through
-# `_brm_population_design`, so its labels and block addresses come from the
-# same columns, with the design's own cell-means choice. `population_columns`
-# is the emitter's column hook (`_sb_population_columns`), so a frozen
-# re-emission codes the fitted level set.
-function _sb_design_coded_columns(pop_terms; population_columns=_brm_population_columns)
+# The shared design expands a string term into its fitted level indicators
+# and a matrix term into its ordered features. Use those same columns for
+# public labels and block addresses.
+function _sb_design_coded_columns(pop_terms; population_columns=_brm_design_columns)
     flags = _brm_cellmeans_term_flags(Tuple(pop_terms))
     map(pop_terms, flags) do t, cellmeans
         t isa NamedColumn && parent(t) isa DataColumn &&
-            _brm_is_string_categorical_data(parent(parent(t))) || return nothing
+            (_brm_is_string_categorical_data(parent(parent(t))) || _brm_numeric_matrix_term(t)) || return nothing
         population_columns(t; cellmeans)
     end
 end
 
-# block address -> the ordered `beta_pop` labels of a design-coded categorical
-# term, for one linear predictor: `effect(lp, c)` claims every level column of
-# a bare string column `c`, and `effect(lp, c_lvl_<k>)` refines one of them.
+# Map a term's block address to its ordered population-coefficient labels.
 function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     out = Dict{Symbol,Vector{Symbol}}()
     op = linear_predictor_op(brmi, lhs)

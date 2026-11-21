@@ -217,7 +217,7 @@ function _rk_model_population_columns(term; cellmeans=false, context=nothing)
     term isa ExprColumn && getf(term) === offset && length(getargs(term)) == 1 &&
         _rk_offset_is_summand(only(getargs(term))) && return ()
     column = _rk_model_population_column(term, context)
-    column === nothing ? _brm_population_columns(term; cellmeans) : (column,)
+    column === nothing ? _brm_design_columns(term; cellmeans) : (column,)
 end
 
 function _rk_model_random_effect_columns(term; cellmeans=false, context)

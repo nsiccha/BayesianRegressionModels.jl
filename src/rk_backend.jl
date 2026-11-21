@@ -498,9 +498,8 @@ struct _RKStructuralPlan
     vector_parameters::Vector{_RKVectorParameter}
     r2d2_priors::Vector{_RKR2D2Prior}
     horseshoe_priors::Vector{_RKHorseshoePrior}
-    # The data's numeric scalars. A statement reads one by name, and
-    # `_rk_source_data_columns` binds those read: a number is a runtime input of
-    # the program, not a literal of it (user principle `0ikeidi`).
+    # Numeric scalars and whole predictor matrices that statements read by
+    # name. The binding supplies their current values at runtime.
     inputs::Dict{Symbol,Any}
     # What priors read from the data's arrays (`_rk_prior_read_values!`).
     prior_reads::Dict{Symbol,Any}
@@ -3492,6 +3491,14 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
             "data column; slice 1 admits raw data columns only")
         source = name(term)
         raw = get(data, source, nothing)
+        if _brm_numeric_matrix_term(term)
+            return map(_brm_design_columns(term)) do c
+                key = _rk_mint_generated!(taken, columns, string(c.label))
+                columns[key] = c.values
+                _RKTermSpec(:continuous, [key], (; matrix_column=c.preprocess.const_),
+                    c.label, c.label)
+            end
+        end
         raw isa AbstractVector || error(
             "$prefix: predictor `$target` column `$source` is not a vector")
         if _brm_is_categorical_data(raw)
@@ -3595,7 +3602,7 @@ function _rk_design_addressee_groups(design, target::Symbol;
         kind = isnothing(column.preprocess) ? nothing :
             column.preprocess.kind
         addressee = if kind in (:interaction, :zscale, :standardize,
-                :center, :protect, :model_value)
+                :center, :protect, :model_value, :matrix_column)
             column.label
         elseif kind === :population_factor_dummy || isnothing(kind)
             isnothing(column.source) ? column.label : column.source
@@ -3622,7 +3629,7 @@ end
 # defaults there either). Design cells and the mo/ar/me latent cells share
 # this one rewrite; anything else fails closed naming the admitted set.
 function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
-        prefix="RK backend")
+        prefix="RK backend", spell=_rk_effect_spelling)
     expression isa ExprColumn || error(
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` must be a callable prior expression")
@@ -3630,7 +3637,7 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
     head === Flat && return _rk_effect_flat_args(
         expression, target, label; prefix)
     head === LocationScale && return _rk_effect_studentt_args(
-        expression, target, label; prefix)
+        expression, target, label; prefix, spell)
     head in (Normal, Cauchy, Laplace, Logistic) || error(
         "$prefix: predictor `$target` population-effect priors must be " *
         "`Normal`/`Cauchy`/`Laplace`/`Logistic(location, scale)`, " *
@@ -3672,11 +3679,11 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
     isfinite(scale) && scale > 0 || error(
         "$prefix: predictor `$target` population-effect `$head` scale " *
         "for `$label` must be finite and positive")
-    (nameof(head), (_rk_effect_spelling(raw[1], location), _rk_effect_spelling(raw[2], scale)))
+    (nameof(head), (spell(raw[1], location), spell(raw[2], scale)))
 end
 
 function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
-        label::Symbol; prefix="RK backend")
+        label::Symbol; prefix="RK backend", spell=_rk_effect_spelling)
     isempty(getkwargs(expression)) || error(
         "$prefix: predictor `$target` population-effect `LocationScale` " *
         "prior cannot have keywords in slice 1")
@@ -3711,8 +3718,7 @@ function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
     isfinite(s) && s > 0 || error(
         "$prefix: predictor `$target` population-effect StudentT " *
         "scale for `$label` must be finite and positive")
-    (:StudentT, (_rk_effect_spelling(only(bargs), nu), _rk_effect_spelling(mu_raw, mu),
-        _rk_effect_spelling(s_raw, s)))
+    (:StudentT, (spell(only(bargs), nu), spell(mu_raw, mu), spell(s_raw, s)))
 end
 
 function _rk_effect_flat_args(expression::ExprColumn, target::Symbol,
@@ -3723,10 +3729,21 @@ function _rk_effect_flat_args(expression::ExprColumn, target::Symbol,
     (:Flat, ())
 end
 
+function _rk_matrix_prior_arg(arg, value)
+    if arg isa ExprColumn{typeof(getindex)}
+        args = getargs(arg)
+        if length(args) == 2 && first(args) isa NamedColumn && last(args) isa Int &&
+                _brm_data_value(first(args)) isa AbstractVector
+            return Expr(:ref, _rk_prior_array_name(name(first(args))), last(args))
+        end
+    end
+    _rk_effect_spelling(arg, value)
+end
+
 # One rewrite for a whole design column vector: stated cells materialize
 # to `(family, args)`, unstated cells take the Normal(0, 1) default.
 function _rk_materialize_effect_prior_cells(overrides, n::Integer,
-        target::Symbol, labels::Vector{Symbol}; prefix="RK backend")
+        target::Symbol, labels::Vector{Symbol}, columns; prefix="RK backend")
     cells = Tuple{Symbol,Tuple}[(:Normal, (0.0, 1.0)) for _ in 1:n]
     isnothing(overrides) && return cells
     length(overrides) == n || error(
@@ -3734,8 +3751,9 @@ function _rk_materialize_effect_prior_cells(overrides, n::Integer,
         "$(length(overrides)) priors for $n population columns")
     for i in eachindex(overrides)
         isnothing(overrides[i]) && continue
-        cells[i] = _rk_materialize_effect_prior(
-            overrides[i], target, labels[i]; prefix)
+        p = columns[i].preprocess
+        spell = p !== nothing && p.kind === :matrix_column ? _rk_matrix_prior_arg : _rk_effect_spelling
+        cells[i] = _rk_materialize_effect_prior(overrides[i], target, labels[i]; prefix, spell)
     end
     cells
 end
@@ -3797,7 +3815,7 @@ Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI)
             cell for cell in overrides]
     labels = Symbol[c.label for c in design.columns]
     cells = _rk_materialize_effect_prior_cells(
-        mat_overrides, n, target, labels; prefix)
+        mat_overrides, n, target, labels, design.columns; prefix)
     groups, order = _rk_design_addressee_groups(design, target; prefix)
     priors = _RKPopulationPrior[]
     for addressee in order
@@ -4133,6 +4151,9 @@ function _rk_gate_cross_identified!(terms::Vector{_RKTermSpec},
         spec.kind === :continuous || continue
         dname = only(spec.columns)
         haskey(spines, dname) && continue
+        # A matrix column reads a slice of its named input. The raw matrix
+        # cannot be a categorical interaction operand.
+        haskey(spec.options, :matrix_column) && continue
         identity = haskey(data, dname) ? dname :
             _rk_gate_derived_expr(dname, derived, target)
         push!(mains, (spec.addressee, identity))
@@ -7521,6 +7542,17 @@ _rk_data_scalar(name::Symbol, data::AbstractDict) = _rk_scalar_value(get(data, n
 _rk_scalar_inputs(data::AbstractDict) = Dict{Symbol,Any}(key => value
     for (key, value) in data if _rk_scalar_value(value))
 
+# Whole matrices read by population components travel with the other named inputs.
+function _rk_predictor_inputs(data, predictors)
+    inputs = _rk_scalar_inputs(data)
+    for predictor in predictors, term in predictor.terms
+        haskey(term.options, :matrix_column) || continue
+        source = term.options.matrix_column.source
+        inputs[source] = data[source]
+    end
+    inputs
+end
+
 function _rk_fold_assignment_consts!(kept, data::AbstractDict,
         parameters::Set{Symbol})
     prefix = "RK backend"
@@ -9809,6 +9841,6 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
         [vector_specs; implicit_vectors; components.vectors],
-        r2d2_specs, hs_specs, _rk_scalar_inputs(context.data),
-        _rk_prior_read_values!(derived, columns, taken, prepared, context.data))
+        r2d2_specs, hs_specs, _rk_predictor_inputs(context.data, predictor_specs),
+        _rk_prior_read_values!(derived, columns, taken, prepared, context.data, prior_specs))
 end

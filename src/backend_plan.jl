@@ -690,12 +690,15 @@ Base.@nospecializeinfer function _brm_collect_target_axes(@nospecialize(brmi::BR
     foreach((@nospecialize(node)) -> _brm_collect_target_axes!(axes, node), _brm_operation_values(brmi))
     axes
 end
+_brm_data_rows(values) = length(values)
+_brm_data_rows(values::AbstractMatrix) = size(values, 1)
+
 function _brm_declared_row_axis(context::_BRMBackendContext, target::Symbol)
     sources = get(context.target_axes, target, Symbol[])
     isempty(sources) && return nothing
     all(source -> haskey(context.data, source), sources) || error(
         "BRM preparation: declared row-axis data for predictor `$target` are absent")
-    lengths = length.([context.data[source] for source in sources])
+    lengths = [_brm_data_rows(context.data[source]) for source in sources]
     all(==(first(lengths)), lengths) || error(
         "BRM preparation: predictor `$target` has declared consumer axes of " *
         "different lengths: $(collect(zip(sources, lengths)))")
@@ -1266,7 +1269,7 @@ struct _BRMPopulationFixedTerm{V<:AbstractVector,P}
     preprocess::P
 end
 
-struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix,T<:Tuple,V<:AbstractVector}
+struct _BRMPopulationDesign{C<:Union{Tuple,AbstractVector},M<:AbstractMatrix,T<:Tuple,V<:AbstractVector}
     target::Symbol
     columns::C
     matrix::M
@@ -1339,7 +1342,7 @@ _brm_population_replay_input(::Union{
 _brm_population_replay_input(::Val{:protect}, _column, preprocess, data, _cache) =
     _brm_replay_expression(preprocess.raw_ref, data)
 
-_brm_population_replay_input(::Val{:population_factor_dummy},
+_brm_population_replay_input(::Union{Val{:matrix_column},Val{:population_factor_dummy}},
         column, _preprocess, data, _cache) = data[column.source]
 
 function _brm_population_replay_input(::Val{:interaction}, _column,
@@ -2682,6 +2685,79 @@ function _brm_population_level_value(column, level::Union{Nothing,Integer}=nothi
     value == 1 ? c.ref : value == c.ref ? 1 : value
 end
 
+# A matrix term has one public coefficient label per column, but the backend
+# can pass the full matrix to the predictor in one piece.
+struct _BRMMatrixColumn
+    source::Symbol
+    index::Int
+    width::Int
+end
+_brm_matrix_label(c::_BRMMatrixColumn) = Symbol(c.source, "_col_", c.index)
+_brm_numeric_matrix_term(term) = term isa NamedColumn && parent(term) isa DataColumn &&
+    parent(parent(term)) isa AbstractMatrix{<:Real}
+
+function _brm_check_matrix_width(raw, source, width)
+    raw isa AbstractMatrix{<:Real} && size(raw, 2) == width || throw(ArgumentError(
+        "matrix predictor `$source` expects a numeric matrix with $width columns; got " *
+        (raw isa AbstractMatrix ? "$(size(raw, 2)) columns of $(eltype(raw))" : string(typeof(raw)))))
+    raw
+end
+
+# A block prior's component arguments may read consecutive elements of a
+# named data vector. Retain the vector when the run covers it exactly.
+function _brm_prior_vector_argument(args, data)
+    isempty(args) && return nothing
+    ref = first(args)
+    ref isa Expr || return nothing
+    operands(x) = Meta.isexpr(x, :ref, 2) ? x.args :
+        Meta.isexpr(x, :call, 3) && x.args[1] === getindex ? view(x.args, 2:3) : ()
+    firstref = operands(ref)
+    length(firstref) == 2 || return nothing
+    source = first(firstref)
+    source isa Symbol && haskey(data, source) || return nothing
+    values = data[source]
+    values isa AbstractVector && length(values) == length(args) || return nothing
+    for (j, arg) in enumerate(args)
+        ix = operands(arg)
+        length(ix) == 2 && ix[1] === source && isequal(ix[2], j) || return nothing
+    end
+    source
+end
+
+function _brm_design_columns(term; cellmeans=false, fitted=_brm_unfitted)
+    _brm_numeric_matrix_term(term) || return _brm_population_columns(term; cellmeans, fitted)
+    raw, source = parent(parent(term)), name(term)
+    width = _brm_fitted(matrix -> size(matrix, 2), :matrix_width, source, raw)
+    _brm_check_matrix_width(raw, source, width)
+    width > 0 || throw(ArgumentError("matrix predictor `$source` has no columns"))
+    [begin
+        ref = _BRMMatrixColumn(source, j, width)
+        label = _brm_matrix_label(ref)
+        preprocess = _BRMPopulationPreprocess(:matrix_column, ref, source)
+        (; label, effect_addresses=(label, source), effect_block=source, source,
+           values=view(raw, :, j), preprocess)
+    end for j in 1:width]
+end
+
+# Reconstitute contiguous whole matrix terms after assigning a prior and a
+# label to each column. Other terms remain in their original formula order.
+function _brm_design_operands(columns)
+    operands = Any[]
+    i = 1
+    while i <= length(columns)
+        col = columns[i]
+        if col isa _BRMMatrixColumn && col.index == 1 && i + col.width - 1 <= length(columns) &&
+                all(j -> columns[i+j-1] == _BRMMatrixColumn(col.source, j, col.width), 1:col.width)
+            push!(operands, col.source)
+            i += col.width
+        else
+            push!(operands, col isa _BRMMatrixColumn ? :($(col.source)[:, $(col.index)]) : col)
+            i += 1
+        end
+    end
+    operands
+end
+
 function _brm_population_columns(term::NamedColumn; cellmeans::Bool=false,
                                  fitted=_brm_unfitted)
     backing = parent(term)
@@ -2935,7 +3011,7 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                                 row_source::Union{Nothing,Symbol}=nothing,
                                 fallback_row_source=nothing,
                                 implicit_intercept::Bool=false,
-                                population_columns=_brm_population_columns)
+                                population_columns=_brm_design_columns)
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
     cellmeans_flags = _brm_cellmeans_term_flags(terms; implicit_intercept)
@@ -3002,7 +3078,7 @@ function _brm_population_design(target::Symbol, terms::Tuple,
     end
     row_value = data[row_source]
     n = row_value isa Integer && !(row_value isa Bool) ?
-        Int(row_value) : length(row_value)
+        Int(row_value) : _brm_data_rows(row_value)
 
     columns = map(raw_columns) do column
         values = isnothing(column.source) ? ones(Float64, n) : column.values
@@ -3013,8 +3089,13 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             column.label, column.effect_addresses, column.effect_block,
             column.source, values, column.preprocess)
     end
+    has_matrix = any(c -> c.preprocess !== nothing && c.preprocess.kind === :matrix_column, columns)
+    if has_matrix
+        labels = [c.label for c in columns]
+        allunique(labels) || throw(ArgumentError("predictor `$target` has duplicate coefficient labels: $labels"))
+    end
     matrix = isempty(columns) ? zeros(Float64, n, 0) :
-        hcat((c.values for c in columns)...)
+        reduce(hcat, [c.values for c in columns])
     fixed = zeros(Float64, n)
     for term in fixed_terms
         length(term.values) == n || error(
@@ -3022,8 +3103,10 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             "lengths $n and $(length(term.values)) in fixed offset `$(term.label)`")
         fixed .+= term.values
     end
+    # A matrix's width comes from data. Keep it out of the types compiled
+    # by the predictor and prior planners.
     _BRMPopulationDesign(
-        target, Tuple(columns), matrix, row_source, Tuple(fixed_terms), fixed)
+        target, has_matrix ? columns : Tuple(columns), matrix, row_source, Tuple(fixed_terms), fixed)
 end
 
 # The population design of a predictor that carries a block of grouping
