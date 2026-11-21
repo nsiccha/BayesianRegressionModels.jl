@@ -14,9 +14,9 @@ device used. The fit exposes it as `diagnostics.execution`.
 `problem.partition` holds the built RK model, binding, observation names, key
 mapping and partition declarations. `problem.bound_data(source)` provides the
 inputs of the partition module's `prepare_data` in its declared order.
-The `kernels` named tuple contains RK graphs for the global draw and
-gradient, antithetic pair, work weights, Adam, clipping, scale updates and
-dense-factor curvature and trust bounds.
+The `kernels` named tuple contains RK graphs for the global draw, entropy
+gradient, variance bound, antithetic pair, work weights, Adam, clipping,
+dense-factor triangular solves, curvature and trust bounds.
 `global_factors` and the unit-indexed `unit_factors` are selections on
 the model's original factor catalogue. `expected_layout` is that model's
 packed layout. Their underlying events are in `factor_buckets[1]` for global

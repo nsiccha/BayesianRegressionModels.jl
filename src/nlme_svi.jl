@@ -484,7 +484,7 @@ end
 _brm_svi_draw_global(q, ε, η) = _svi_global_draw(q.μ, q.ρ, q.Β, ε, η)
 # A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
 # factor of the precision Λ_i.
-_brm_svi_unit_offset(U::AbstractMatrix, ε) = LowerTriangular(U)' \ ε
+_brm_svi_unit_offset(U::AbstractMatrix, ε) = _svi_unit_offset(U, ε)
 _brm_svi_unit_offset(q, i, εi) = _brm_svi_unit_offset(q.U[i], εi)
 _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
@@ -564,7 +564,8 @@ end
 # coordinates, the draw's (ε, η), and the entropy's own gradient.
 function _brm_svi_global_gradient(q, w, ε, η)
     h = _brm_svi_global_geometry(q)
-    diagonal, loading = _brm_svi_entropy_gradients(h, q.Β)
+    diagonal, loading = h isa _BRMSVIQRGeometry ? _brm_svi_entropy_gradients(h, q.Β) :
+        _svi_global_entropy(q.ρ, q.Β)
     _svi_global_gradient(w, ε, η, h.s, diagonal, loading)
 end
 
@@ -642,7 +643,7 @@ _brm_svi_rank_step_ratio(c) = min(1.0, c.lr_global / c.polish_lr)
 # whose only nonzero eigenvalues are (wᵀε ± ‖w‖‖ε‖)/2, on ŵ ± ε̂, so it needs no
 # eigensolver and costs O(d²) for the triangular solve.
 function _brm_svi_unit_curvature(U, gd, εi)
-    w = -(U \ gd)
+    w = _svi_whitened_difference(U, gd)
     λ, e = _svi_curvature_axis(w, εi)
     isfinite(λ) || throw(ArgumentError(
         "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
@@ -1003,7 +1004,7 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
     gc, adjoint = nothing, nothing
     problem = nothing
     for k in 1:d
-        δ = U' \ view(E, :, k)
+        δ = _svi_unit_offset(U, view(E, :, k))
         z₊, z₋ = _svi_antithetic_pair(m, δ)
         fill!(gz₊, 0.0)
         fill!(gz₋, 0.0)
@@ -1033,7 +1034,7 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
         problem === nothing || break
         value += (v₊ + v₋) / 2d
         gz .+= (gz₊ .+ gz₋) ./ 2d
-        W[:, k] .= -(U \ ((gz₊ .- gz₋) ./ 2))
+        W[:, k] .= _svi_whitened_difference(U, (gz₊ .- gz₋) ./ 2)
     end
     S = (W * E' .+ E * W') ./ 2d
     centered = centering === nothing ? nothing :
@@ -2478,11 +2479,12 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   (the unit partition gradient and the start), Stochastic optimization (its
   message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
   next window.
-- `threads` — how many tasks evaluate a batch's subjects and step their factors,
+- `threads` — how many Julia tasks evaluate a CPU batch's subjects and step their factors,
   capped at the batch size. Each further task prepares its own copy of the
   compact cell samplers before the first iteration, which costs time and retained
   memory. The default is `Threads.nthreads()`, or 1 on an Enzyme without the
-  concurrent-GC repair, which refuses an explicit `threads` above one.
+  concurrent-GC repair, which refuses an explicit `threads` above one. A GPU
+  fit prepares one host worker and the device runtime batches the subjects.
   The result does not depend on it: the draws come from the one `rng` in batch
   order and the subjects' results are summed in batch order, so a run and its
   checkpoints are the same to the last bit at any `threads`, and
@@ -2820,7 +2822,12 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
     _brm_svi_check_snapshot(caller, snapshot, snapshot_every, snapshot_draws)
     runner = _brm_svi_runner(device)
-    threads = runner === nothing ? _brm_svi_threads(caller, threads, ad_backend) : 1
+    if runner === nothing
+        threads = _brm_svi_threads(caller, threads, ad_backend)
+    else
+        _brm_svi_threads(caller, threads, ad_backend; repaired=true)
+        threads = 1
+    end
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             lowered = _brm_svi_lowered(x, phases.lower; completions=checkpoint_completions,

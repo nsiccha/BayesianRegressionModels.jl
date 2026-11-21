@@ -174,6 +174,7 @@ end
     @test_throws "GPU sampling method" brm_fixed_hyper_fit(sampler, rk, svi; device=:gpu, ad_backend=AD)
     @test calls[] == 1
     @test_throws "device must be" brm_fixed_hyper_fit(sampler, rk, svi; device=:gup, ad_backend=AD)
+    @test_throws ArgumentError brm_fixed_hyper_fit(sampler, rk, svi; device=missing, ad_backend=AD)
     for fixed in (brm_hyperparameters(rk), ())
         gpu = brm_fixed_hyper_fit(RecordingDeviceSampler(), rk, svi; device=:gpu, fixed, ad_backend=AD)
         @test gpu.execution == (; device=:gpu, backend=:test, device_name="protocol fixture")

@@ -298,7 +298,7 @@ The GPU fit includes `execution.device`, `execution.backend` and
 """
 function brm_fixed_hyper_fit(sampler, rk::RKBRMI, start; ad_backend, device=:cpu,
         fixed=brm_hyperparameters(rk), rng=Random.default_rng())
-    device in (:cpu, :gpu) || throw(ArgumentError(
+    device === :cpu || device === :gpu || throw(ArgumentError(
         "brm_fixed_hyper_fit: device must be :cpu or :gpu, got $(repr(device))"))
     problem = brm_fixed_hyper_problem(rk, start; ad_backend, fixed)
     execution = if device === :gpu

@@ -112,21 +112,9 @@ _brm_svi_prior_mean_of(t) = hasproperty(t, :prior_mean) ? getproperty(t, :prior_
 _brm_svi_bound_sd!(q, bound) = _brm_svi_bound_sd!(q, bound, 1.0)
 function _brm_svi_bound_sd!(q, sd, factor)
     (sd === nothing || factor === nothing) && return q
-    r = size(q.Β, 2)
-    for k in eachindex(sd)
-        b = factor * sd[k]
-        isfinite(b) || continue
-        v = exp(2q.ρ[k])
-        for j in 1:r
-            v += q.Β[k, j]^2
-        end
-        f = _svi_sd_shrink(v, b)
-        f == 1.0 && continue
-        q.ρ[k] += log(f)
-        for j in 1:r
-            q.Β[k, j] *= f
-        end
-    end
+    log_scale, loading = _svi_bound_sd(q.ρ, q.Β, factor .* sd)
+    copyto!(q.ρ, log_scale)
+    copyto!(q.Β, loading)
     q
 end
 

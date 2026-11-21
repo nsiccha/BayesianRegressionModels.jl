@@ -1,5 +1,7 @@
 # These equations run as ordinary Julia on the CPU. The RK extension passes
 # the same definitions to @kernel so a device method can compose their graphs.
+_svi_lower_cholesky(A) = cholesky(Symmetric(A, :L)).L
+
 const _BRM_SVI_KERNEL_DEFINITIONS = (
     global_draw=:(function _svi_global_draw(mean, log_scale, loading, epsilon, eta)
         result = mean .+ exp.(log_scale) .* epsilon .+ loading * eta
@@ -7,6 +9,14 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
     end),
     antithetic_pair=:(function _svi_antithetic_pair(mean, offset)
         result = (mean .+ offset, mean .- offset)
+        return result
+    end),
+    unit_offset=:(function _svi_unit_offset(root, epsilon)
+        result = transpose(LowerTriangular(root)) \ epsilon
+        return result
+    end),
+    whitened_difference=:(function _svi_whitened_difference(root, difference)
+        result = -(LowerTriangular(root) \ difference)
         return result
     end),
     work_weight=:(function _svi_work_weight(count, batch_size, probability)
@@ -17,6 +27,22 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         grad_scale = w .* epsilon .* scale .+ entropy_diagonal
         grad_loading = w * transpose(eta) .+ entropy_loading
         result = vcat(w, grad_scale, vec(grad_loading))
+        return result
+    end),
+    global_entropy=:(function _svi_global_entropy(log_scale, loading)
+        result = if size(loading, 2) == 0
+            (ones(length(log_scale)), loading)
+        else
+            scale = exp.(log_scale)
+            V = loading ./ scale
+            eye = diagm(ones(size(loading, 2)))
+            lower = _svi_lower_cholesky(transpose(V) * V .+ eye)
+            # With L L' = I + V'V, the two derivatives are the diagonal
+            # of I - V (L L')⁻¹ V' and diag(1/scale) V (L L')⁻¹.
+            projection = lower \ transpose(V)
+            diagonal = 1 .- vec(sum(projection .* projection; dims=1))
+            (diagonal, (transpose(projection) * (lower \ eye)) ./ scale)
+        end
         return result
     end),
     global_step_scale=:(function _svi_global_step_scale(log_scale, loading, mean_scale, rank_step)
@@ -36,6 +62,13 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
     end),
     sd_shrink=:(function _svi_sd_shrink(variance, bound)
         result = ifelse.(isfinite.(bound) .& (variance .> bound .^ 2), bound ./ sqrt.(variance), 1.0)
+        return result
+    end),
+    bound_sd=:(function _svi_bound_sd(log_scale, loading, bound)
+        variance = exp.(2 .* log_scale) .+ vec(sum(loading .* loading; dims=2))
+        shrink = _svi_sd_shrink(variance, bound)
+        next_log_scale = ifelse.(shrink .== 1, log_scale, log_scale .+ log.(shrink))
+        result = (next_log_scale, loading .* shrink)
         return result
     end),
     # Both curvature designs use the same positive-diagonal root and cap the
@@ -72,7 +105,7 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
     orthogonal_stack=:(function _svi_orthogonal_stack(root, gap, radius, rate, trust)
         step = radius > 0 ? min(rate, trust / radius) : rate
         upper = Matrix(transpose(LowerTriangular(root)))
-        stack = vcat(upper, (I + step .* gap) * upper)
+        stack = vcat(upper, (I(size(gap, 1)) + step .* gap) * upper)
         result = (stack, step)
         return result
     end),
