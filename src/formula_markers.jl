@@ -96,21 +96,39 @@ function dar end
 
 """
     rw(time)
+    rw(time; order = 2)
+    rw(time; order = 1 | 2, sum_to_zero = true)
 
-Random-walk trajectory marker. The StanBlocks backend emits the path
+Random-walk trajectory marker over the sorted distinct values of `time`; each
+row reads the point of its own time value, so rows may share a time (several
+groups per day get one shared walk). Only the order of the values matters, not
+their gaps. It is a direct predictor summand: no additional population
+coefficient multiplies the path. `sd(lp, rw(time))` addresses the innovation
+scale `sigma > 0` whatever the keywords; the term has no persistence, so
+`ar(lp, rw(time))` is refused.
 
-`x[1] = 0`, `x[t+1] = x[t] + sigma * z[t]`,
+`order` (1, the default, or 2) is the order of the differences that are
+innovations, and `sum_to_zero` (default `false`) how the walk's level is
+pinned:
 
-over the sorted distinct values of `time` — i.e. `dar(time)` with the
-differences' persistence fixed at zero — with `sigma > 0` and standardized
-innovations `z`; each row reads the point of its own time value, so rows may
-share a time (several groups per day get one shared walk). It is a direct
-predictor summand: a formula intercept supplies the initial level and no
-additional population coefficient multiplies the path. `sd(lp, rw(time))`
-addresses `sigma`; the term has no persistence, so `ar(lp, rw(time))` is
-refused. On replay, times after the last fitted one are appended (a forecast):
-their innovations are drawn in generated quantities, so the walk continues
-from its fitted end. Dispatch tag — see `_sb_rw1`.
+- **Zero start** (`sum_to_zero = false`). `x[1] = 0` at the first time and
+  each step adds a standardized innovation `z[t]`: order 1 is
+  `x[t+1] = x[t] + sigma * z[t]`; order 2 is `x[2] = sigma * z[1]` and
+  `x[t+1] - 2x[t] + x[t-1] = sigma * z[t]`, the law of `dar(time)` with its
+  persistence fixed at 1. A formula intercept is the level at the first time.
+- **Sum to zero** (`sum_to_zero = true`). The intrinsic walk: the values have
+  log density `-(n - order) * log(sigma) - sum(d .^ 2) / (2 sigma^2)`, `d` the
+  `order`-th differences of the `n` values, times the soft sum-to-zero `car`
+  uses, `sum(x) ~ Normal(0, 0.001 n sigma)` (`car`'s `Normal(0, 0.001 n)` on the
+  standardized values `x / sigma`, which are its coordinates). A formula intercept is the
+  walk's mean level, and an order-2 walk's linear trend has a flat prior
+  (identified by the data): R-INLA's `rw1` / `rw2` with `constr = TRUE`. The
+  walk needs at least `order + 1` distinct times.
+
+On replay, times after the last fitted one are appended (a forecast): their
+innovations are drawn in generated quantities, so the walk continues from its
+fitted end by its recurrence. Dispatch tag — see `_sb_rw1`, `_sb_rw2` and
+`_sb_rw_sum`.
 """
 function rw end
 
@@ -148,7 +166,7 @@ see [`reprocess`](@ref). Dispatch tag — see `_sb_cdar` and `_sb_cdar_iid`.
 function cdar end
 
 """
-    car(area; edges=(from, to), type=:icar | :bym2)
+    car(area; edges=(from, to), type=:icar | :bym2, scaled=false)
 
 Areal spatial effect over an adjacency graph. `area` is the grouping column of
 the rows; `edges` names two equal-length data vectors whose `k`-th entries are
@@ -166,12 +184,18 @@ standard-normal `theta`, the mixing share `rho` in `[0, 1]`, and `s` the scaling
 factor of each component (the geometric mean of the diagonal of the generalized
 inverse of its ICAR precision), computed from the graph at preparation; an
 island's effect is `sigma * theta` (Freni-Sterrantino et al. 2018).
+`type=:icar, scaled=true` emits the variance-scaled ICAR field, R-INLA's `besag`
+with `scale.model = TRUE`: `sigma * phi[area] / sqrt(s)` for an area with
+neighbours and `sigma * theta[island]` for an island, one standard-normal
+`theta` per island. It is the BYM2 field with `rho = 1`, and `sigma` is its
+marginal SD. `:bym2` is always scaled, so `scaled=false` is refused there.
 
 It is a direct predictor summand: the formula intercept carries the level and no
 population coefficient multiplies it. `sd(lp, car(area))` addresses `sigma`
 (default half-`Normal(0, 1)`), `mixing(lp, car(area))` the BYM2 `rho` (default
 `Beta(0.5, 0.5)`). On replay the graph is frozen from the fit and every row must
-name a fitted area. Dispatch tag — see `_sb_car_icar` / `_sb_car_bym2`.
+name a fitted area. Dispatch tag — see `_sb_car_icar` / `_sb_car_icar_scaled` /
+`_sb_car_bym2`.
 """
 function car end
 
@@ -201,6 +225,15 @@ present. The term adds its field directly, without a population coefficient.
 Frozen replay retains the mesh, times and channels, and can evaluate new
 spatial locations inside that mesh. New state times or channels require a
 conditional prediction law and are refused by frozen replay.
+
+    gmrf((east, north); mesh=(vertices=xy, cells=triangles))
+
+A spatial field: the same Matérn field with no time axis, and so no temporal
+length, one channel and no `cor`. Its state is one coordinate per mesh vertex,
+its hyperparameters `sd(lp, gmrf((east, north)))` and
+`length_scale(lp, gmrf((east, north)))` (`, space)` may be added). Like the
+space-time field, its mesh form also works in `@plate` cells, and it takes the
+read-support forms below (`neighbors=m`, `multiresolution=m`) at model scope.
 
     gmrf((east, north), time[, channel]; neighbors=m, cor=Omega)
 
@@ -409,9 +442,10 @@ Dispatch tag only — kernel-argument lowering lives in `_sb_kernel_doblock!`
 ragged
 
 # `order=` is the kernel positional a `@plate for p in groups(g; order = t)`
-# header lowers to; it is not written on `ragged` itself.
+# header lowers to, and `matrix_rows=` a cell's whole-row read `G[p, :]`; neither
+# is written on `ragged` itself.
 _check_term_kwargs(::typeof(ragged), kwargs) =
-    all(in((:into, :order)), keys(kwargs)) || error(
+    all(in((:into, :order, :matrix_rows)), keys(kwargs)) || error(
     "@brm: ragged(...) takes only the `into=` keyword, got $(keys(kwargs)). In a ",
     "`@plate for` cell, read `x[rows[i]]` with `rows = groups(group => labels)`; ",
     "an index vector into another grouping is `indexin(idx[rows[i]], target[i])`.")

@@ -1199,13 +1199,32 @@ function _brm_plate_grouping_args(stmt)
         Meta.isexpr(arg, :kw) ? push!(keywords, arg) : push!(positional, arg)
     end
     options = Dict{Symbol,Symbol}()
+    matrix_rows = false
     for keyword in keywords
+        # `matrix_rows = true`: the cell reads whole rows of a matrix, `x[p, :]`.
+        if Meta.isexpr(keyword, :kw, 2) && keyword.args[1] === :matrix_rows &&
+                keyword.args[2] === true && !matrix_rows
+            matrix_rows = true
+            continue
+        end
         Meta.isexpr(keyword, :kw, 2) && keyword.args[1] in (:into, :order) &&
             keyword.args[2] isa Symbol && !haskey(options, keyword.args[1]) ||
             return nothing
         options[keyword.args[1]] = keyword.args[2]
     end
-    (; positional, into=get(options, :into, nothing), order=get(options, :order, nothing))
+    (; positional, into=get(options, :into, nothing), order=get(options, :order, nothing),
+       matrix_rows)
+end
+
+# `ragged(x, …)` read as whole rows of a matrix `x` (`x[p, :]`, `x[rows[i], :]`):
+# the same input with `matrix_rows = true`.
+function _brm_plate_matrix_rows(call)
+    call = copy(call)
+    k = findfirst(a -> Meta.isexpr(a, :parameters), call.args)
+    keyword = Expr(:kw, :matrix_rows, true)
+    k === nothing ? insert!(call.args, 2, Expr(:parameters, keyword)) :
+        (call.args[k] = Expr(:parameters, call.args[k].args..., keyword))
+    call
 end
 
 function _brm_plate_grouping_repr(name, (; group, cells, order)::_BRMPlateGrouping)
@@ -1321,7 +1340,7 @@ function _brm_plate_input_key(x)
     args = isxcall(x, :ragged) ? _brm_plate_grouping_args(x) : nothing
     if args !== nothing && length(args.positional) in (2, 3) &&
        all(arg -> arg isa Symbol, args.positional)
-        return (:ragged, args.positional..., args.into, args.order)
+        return (:ragged, args.positional..., args.into, args.order, args.matrix_rows)
     end
     # A property read, such as a component's returned field `kin.recovery`,
     # is a model value: name it at model scope and slice that name.
@@ -1364,6 +1383,48 @@ function _brm_plate_check_observed(lhs, i, bare_bindings, output_set)
     end
 end
 
+_brm_sampling_statement(x) = isxcall(x, :~) || isxcall(x, :.~)
+
+function _brm_check_cell_broadcast_family(scope, head)
+    family = _sb_cell_binding(scope, head)
+    _rk_joint_observation(family) && throw(ArgumentError(
+        "@brm: a broadcast cell draw requires an elementwise law. " *
+        "For one joint event write `x ~ $head(...)`."))
+    nothing
+end
+
+# Strip only the outer broadcast. Dots in the arguments are Julia operations
+# on a cell's actual values (for example, log.(scale[i])).
+function _brm_cell_draw(stmt, checks)
+    isxcall(stmt, :.~) || return stmt
+    lhs, rhs = stmt.args[2:3]
+    _brm_is_broadcast_call(rhs) || throw(ArgumentError(
+        "@brm: write an elementwise cell law as `$lhs .~ Family.(args...)`"))
+    head, tuple = rhs.args
+    args = copy(tuple.args)
+    any(arg -> Meta.isexpr(arg, :parameters) || Meta.isexpr(arg, :kw), args) &&
+        throw(ArgumentError("@brm: a broadcast cell law takes positional arguments"))
+    scope = Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0))
+    push!(checks, Expr(:call, _brm_check_cell_broadcast_family, scope, QuoteNode(head)))
+    if Meta.isexpr(lhs, :ref, 2) && isxcall(lhs.args[2], :(:))
+        lhs.args[1] isa Symbol || throw(ArgumentError("@brm: a declared cell vector needs a name"))
+        n = _brm_declared_extent(lhs.args[2], sprint(Base.show_unquoted, stmt))
+        isempty(args) && throw(ArgumentError("@brm: give the declared cell vector's law its arguments"))
+        # A literal can use fill directly. Other arguments may be a scalar or
+        # a vector, whose broadcast must fit the declared destination.
+        for j in eachindex(args)
+            arg = args[j]
+            if arg isa Number
+                j == 1 && (args[j] = Expr(:call, :fill, arg, n))
+            else
+                args[j] = Expr(:call, GlobalRef(@__MODULE__, :_brm_cell_vector_arg), arg, n)
+            end
+        end
+        lhs = lhs.args[1]
+    end
+    Expr(:call, :~, lhs, Expr(:call, head, args...))
+end
+
 function _brm_plate_outputs(body, i)
     stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
     outputs = Symbol[]
@@ -1379,7 +1440,7 @@ function _brm_plate_outputs(body, i)
             push!(outputs, lhs)
         end
     end
-    isempty(outputs) && !any(stmt -> isxcall(stmt, :~), _brm_plate_flat_statements(stmts)) && error(
+    isempty(outputs) && !any(_brm_sampling_statement, _brm_plate_flat_statements(stmts)) && error(
         "@brm: a kernel `@plate` cell needs an indexed output (`loc[$i] = ...`) " *
         "or an observation (`y[$i] ~ ...`); this one has neither")
     stmts, outputs
@@ -1390,7 +1451,7 @@ end
 # Backends derive the cell's emitted names from it, as they do from an output's.
 function _brm_plate_effect_name(stmts, i)
     for stmt in _brm_plate_flat_statements(stmts)
-        isxcall(stmt, :~) || continue
+        _brm_sampling_statement(stmt) || continue
         base = _brm_plate_observed_name(stmt.args[2], i)
         base === nothing || return Symbol(base, :_cell)
     end
@@ -1530,6 +1591,34 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             end
             return add_input(grouped(source))
         end
+        # Whole rows of a matrix: `G[p, :]` in a `groups(...)` plate, or
+        # `G[rows[i], :]` through a binding. The cell reads the rows as a matrix.
+        if Meta.isexpr(ex, :ref, 3) && ex.args[3] === :(:) && ex.args[1] isa Symbol
+            source = ex.args[1]
+            row_read = Expr(:ref, source, ex.args[2])
+            shown = sprint(Base.show_unquoted, ex)
+            source in output_set && error(
+                "@brm: `$shown` reads rows of the plate output `$source`; a plate " *
+                "output has one value per cell, `$source[$i]`")
+            if _brm_plate_indexed(row_read, i)
+                header === nothing && error(
+                    "@brm: `$shown` reads whole rows at the cell index; in a plate " *
+                    "over `$header_source` read the rows of a matrix through a " *
+                    "binding, `$source[rows[$i], :]` with `rows = groups(g => labels)`, " *
+                    "or iterate `groups(g)` and read `$source[$i, :]`")
+                return add_input(_brm_plate_matrix_rows(grouped(source)), Symbol(source, :_rows))
+            end
+            read = _brm_plate_binding_read(row_read, i, groupings)
+            if read !== nothing
+                header === nothing || error(
+                    "@brm: a `@plate for $i in $header_source` cell reads its group's " *
+                    "rows as `x[$i, :]`; got `$shown`")
+                name, rows = read
+                read_grouping!(rows)
+                return add_input(_brm_plate_matrix_rows(
+                    _brm_plate_grouping_input(name, groupings[rows])), Symbol(name, :_, rows, :_rows))
+            end
+        end
         # A remaining reference with the loop variable as one of ITS OWN axes
         # (`x[i, j]`) is a different slicing contract, not a kernel positional.
         # Nested indexed lanes remain valid: `catalog[index[i]]` recursively
@@ -1564,6 +1653,14 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             "Observe `$name` through one binding.")
     end
 
+    function rewrite_draw(stmt)
+        draw = _brm_cell_draw(stmt, checks)
+        lhs, rhs = draw.args[2:3]
+        _brm_plate_check_observed(lhs, i, bare_bindings, output_set)
+        observe!(lhs)
+        Expr(:call, :~, rewrite(lhs), rewrite(rhs))
+    end
+
     # A `@scan` block keeps its shape: seeds, then one `for` loop of steps. Its
     # slice reads are rewritten like every other cell read; its `=`/`~` targets
     # are the scan's carried arrays and step locals, or (`y[i][t] ~ …`) entries
@@ -1582,10 +1679,8 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                 rewrite_scan(stmt.args[2]))
         elseif Meta.isexpr(stmt, :(=), 2)
             return Expr(:(=), rewrite(stmt.args[1]), rewrite(stmt.args[2]))
-        elseif isxcall(stmt, :~)
-            _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
-            observe!(stmt.args[2])
-            return Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3]))
+        elseif _brm_sampling_statement(stmt)
+            return rewrite_draw(stmt)
         end
         error(
             "@brm: a `@scan` block in a kernel `@plate` cell holds `=`/`~` seeds " *
@@ -1610,10 +1705,8 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                     "@brm: a kernel `@plate` assignment binds a bare cell local " *
                     "or `name[$i]`; got `$(repr(lhs))`")
             end
-        elseif isxcall(stmt, :~)
-            _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
-            observe!(stmt.args[2])
-            push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
+        elseif _brm_sampling_statement(stmt)
+            push!(rewritten, rewrite_draw(stmt))
         elseif _is_brm_scan(stmt)
             push!(rewritten, Expr(:macrocall, stmt.args[1:end-1]..., rewrite_scan(stmt.args[end])))
         else
@@ -2003,6 +2096,10 @@ function _term_address_qualifiers(x::Expr)
     isempty(entries) ? "" : ";" * join(("$k=$(repr(v))" for (k, v) in entries), ",")
 end
 
+_is_record_field_address(a) =
+    Meta.isexpr(a, :., 2) && a.args[1] isa Symbol &&
+    a.args[2] isa QuoteNode && a.args[2].value isa Symbol
+
 function _term_address_key(x::Expr)
     head = x.args[1]::Symbol
     names = Symbol[]
@@ -2015,6 +2112,12 @@ function _term_address_key(x::Expr)
             push!(names, a.value)
         elseif head === :gmrf && Meta.isexpr(a, :tuple, 2) && all(v -> v isa Symbol, a.args)
             push!(names, Symbol("(", join(a.args, ","), ")"))
+        elseif _is_record_field_address(a)
+            # A record component's `hsgp(entry.time)`, spelled as its formula
+            # spells the term. Binding the component over records makes each
+            # field read one data input before the body is parsed again
+            # (`_brm_project_record`), so this spelling only has to parse here.
+            push!(names, Symbol(a.args[1], ".", a.args[2].value))
         else
             error("@brm: `$head(...)` in a prior address takes plain column " *
                   "names; got $(repr(a)). Address the term the way the formula " *

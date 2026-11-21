@@ -180,3 +180,53 @@ end
         end
     end
 end
+
+# An intercept has no rows of its own. Beside an offset that gathers a model
+# value at data rows, the predictor has that index's rows, whether its
+# response reads it row for row or a plate reads it by index.
+@stestset "an intercept beside a gathered model offset agrees with compiled Stan" begin
+    for observed in (true, false)
+        position = observed ? [1, 2, 3, 4] : [2, 4, 4, 1, 3]
+        data = (; unit=["u", "v", "w"], pick=[3, 1, 1, 2], primary=[0.2, -0.1, 0.4],
+            position, y=[0.1, 0.3, -0.2, 0.5, 0.0][eachindex(position)])
+        reader = observed ? :(y ~ Normal(mu, 0.5)) : quote
+            @plate for j in eachindex(position)
+                y[j] ~ Normal(mu[position[j]], 0.5)
+            end
+        end
+        model = brm(quote
+            level ~ 0 + (1 | g | unit)
+            mu ~ 1 + offset(level[pick])
+            effect(mu, Intercept) ~ Normal(0.2, 0.7)
+            primary ~ Normal(level, 1)
+            $reader
+        end; mod=@__MODULE__)(data)
+        rk = RKBRMI(model)
+        problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
+        stan = BRM.stan_instantiate(sb;
+            path=joinpath(mktempdir(), "gathered-offset-$observed.stan"))
+        names = BridgeStan.param_unc_names(stan.model)
+        n = length(names)
+        @test n == rk.model.layout.total == 5
+        transport = brm_coordinate_transport(rk, sb, names)
+        for s in (zeros(n), collect(range(-0.32, 0.41; length=n)), [0.3sin(i) for i in 1:n])
+            sv, sg = BridgeStan.log_density_gradient(stan.model, s; propto=false, jacobian=true)
+            r = brm_stan_point_to_rk(transport, s)
+            rv, rg = LogDensityProblems.logdensity_and_gradient(problem, r)
+            @test rv ≈ brm_stan_logdensity_to_rk(transport, r, sv)
+            @test rg ≈ brm_stan_gradient_to_rk(transport, r, sg)
+            # The gathered effect reaches each response through its own row.
+            log_scale = s[coordinate(names, "b_g_unit_tau.1")]
+            z = [s[coordinate(names, "b_g_unit_z_flat.$i")] for i in 1:3]
+            intercept = s[coordinate(names, "pop_mu_beta_pop.1")]
+            level = exp(log_scale) .* z
+            mu = intercept .+ level[data.pick]
+            oracle = logpdf(Normal(0, 1), exp(log_scale)) + log_scale +
+                sum(logpdf.(Normal(0, 1), z)) + logpdf(Normal(0.2, 0.7), intercept) +
+                sum(logpdf.(Normal.(level, 1), data.primary)) +
+                sum(logpdf.(Normal.(mu[data.position], 0.5), data.y))
+            @test sv ≈ oracle
+        end
+    end
+end

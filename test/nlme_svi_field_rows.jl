@@ -4,6 +4,7 @@
 # of parents. The printed cost is a measurement, not an assertion: until
 # ReactiveKernels snag native-reverse-r-b8de62b9 lands, one reverse call copies
 # the fixed footprint geometry, so a row's derivative cost grows with the field.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, LinearAlgebra, Random, Statistics
 const BRM = BayesianRegressionModels

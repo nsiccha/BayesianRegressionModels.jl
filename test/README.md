@@ -17,6 +17,18 @@ that groups by its input names the caller's columns for its fit-role inputs.
 Run it with
 `julia --startup-file=no --project=test test/rk_descriptor.jl`.
 
+`lazy_dependencies.jl` checks BRM's fitting-time weak dependencies
+(`src/fitting_extensions.jl`: KLU, Krylov, KrylovKit, LimitedLDLFactorizations,
+MCMCDiagnosticTools, MUMPS, SelectedInversion, SparseMatrixColorings). No code
+in `src/` or `ext/` outside package X's own extension names X, read from the
+parsed source so comments and strings do not count; each is a weak dependency
+whose one-trigger extension defines every function BRM calls; and, in fresh
+processes, `using BayesianRegressionModels` loads none of them, a call before
+its package is loaded names it, and a call works once it is, also when it loads
+during the call. A test that fits, or builds a `car` term, includes
+`fitting_packages.jl`, which imports them. Run it with
+`julia --startup-file=no --project=test test/lazy_dependencies.jl`.
+
 `hsgp_basis_js.jl` checks `StatisticalPreparation.hsgp_basis`:
 - **Exactness.** It equals bit for bit an independent oracle, SB's per-axis
   `_brm_apply_hsgp` tensored in `CartesianIndices(k)` order. This covers one to
@@ -58,8 +70,8 @@ re-evaluates retained draws for finite densities and gradients. Its short fit
 does not establish convergence or reproduce the paper's analysis.
 `seal_joint_support.jl` checks both authored helper sets against the original
 joint density, finite-difference coordinate Jacobians and native gradients
-across four age counts. The test environment pins StanBlocks `c3912742`
-(0.2.53), which includes differentiable algebraic roots and native evaluation
+across four age counts. The test environment pins StanBlocks `c83e3c4e`
+(0.2.57), which includes differentiable algebraic roots and native evaluation
 of the data-only support bound during descriptor construction.
 
 `rk_distribution_statistics.jl` checks native LogNormal moments and log tails:
@@ -298,9 +310,32 @@ ReactiveKernelsPPL 0.1.93 retains authored documentation.
 `component_settings.jl` and `component_collections.jl` cover declaration
 guards, keyed replay, independent time grids and fitted smooths.
 `component_collection_groups.jl` compares shared and local intercept
-blocks with explicit models. `component_collection_observations.jl` checks
+blocks with explicit models. `component_member_population.jl` addresses each
+member's population coefficients by its key against the model that writes
+each member out, and checks the coordinate transport of member coefficients,
+including the scalar coefficient of an intercept-only member and a member
+whose intercept sits beside its margin in the parent's block, addressed by
+unconstrained and constrained names. `component_collection_observations.jl` checks
 Gaussian, Student-t and censored readings of a shared subject trajectory,
 including readings indexed into each instrument's fitted curve.
+`component_length_scale_floor.jl` checks `length_scale_floor` in a record
+member's own `length_scale(trend, hsgp(config.time))` prior, with and without
+a declaration guard: each member against the same smooth fitted alone
+(compiled Stan density and gradient, the floor read back with
+`brm_length_scale_floor(...; submodel)`), native RK against compiled Stan, a
+member beside a `parentblock` margin, and the name's refusals elsewhere.
+
+`component_collection_named_returns.jl` checks record components whose named
+return holds a per-member vector: a curve beside a fitted scale, and a margin
+of the parent's correlated block beside two scalars. It prepares the native
+program under `type_stability = :error` and compares densities and gradients
+with a hand-written density, an explicit model without components and compiled
+Stan. It needs StanBlocks 0.2.57 and MutatingFunctions 0.1.2. Its last two
+testsets return a curve that is the record's own data: ragged across members,
+beside a member whose curve is fitted (two plates), and with no guard. Their
+`@observe` clauses index two returned vectors and their records name a field
+`subject_rows`, which needs generated names that never end in `__` (checked
+directly too). Replay on new curves binds them as a fresh build does.
 
 `component_cell_returns.jl` checks returned plate collections through direct,
 aliased and nested component calls. It

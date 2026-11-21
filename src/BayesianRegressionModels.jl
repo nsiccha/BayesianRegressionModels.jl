@@ -26,13 +26,14 @@ using LogExpFunctions, InverseFunctions, Distributions, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StaticArrays: SMatrix, SVector, MMatrix, MVector
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
-using SelectedInversion: selinv_diag, selinv, selinv_extract
 using Bessels: besselk, besselk0, besselk1
-import SparseArrays, SelectedInversion, KLU, MUMPS
-import KrylovKit, PowerScaling
-import Krylov
-import MCMCDiagnosticTools
-import LimitedLDLFactorizations
+import SparseArrays
+import PowerScaling
+# Fitting-time packages (KLU, Krylov, KrylovKit, LimitedLDLFactorizations,
+# MCMCDiagnosticTools, MUMPS, SelectedInversion, SparseMatrixColorings) are weak
+# dependencies: a consumer that fits loads them, and BRM's extension for each;
+# a `car` term needs SelectedInversion to build.
+include("fitting_extensions.jl")
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
@@ -167,6 +168,7 @@ include("nlme_view.jl")
 include("nlme_connected.jl")
 include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
+include("fixed_hyper.jl")
 include("nlme_start.jl")
 include("nlme_laplace_coloring.jl")
 include("nlme_laplace.jl")
@@ -189,6 +191,7 @@ include("start_prior.jl")
 include("start_components.jl")
 include("laplace_start.jl")
 include("laplace_mode.jl")
+include("laplace_integration.jl")
 include("laplace_ladder.jl")
 include("nlme_fit.jl")
 include("nlme_two_stage.jl")
@@ -314,7 +317,7 @@ export Arcsine, Beta, Binomial, Categorical, Cauchy, Chisq, Dirichlet,
        NegativeBinomial, NormalCanon, Pareto, Rayleigh, SkewNormal,
        SkewedExponentialPower, TDist, Uniform, VonMises, Weibull
 export product_distribution, logpdf
-# Re-export the functions SBBRMI spells as Stan builtins (`_sb_julia_stan_name`,
+# Re-export the functions SBBRMI spells as Stan builtins (`_sb_julia_stan_builtin`,
 # sb_cell_julia.jl) and the links whose `InverseFunctions.inverse` is one of
 # them, so `logit(mu) ~ 1 + x` or `Binomial(n, logistic(eta))` needs no
 # `using LogExpFunctions` either (snag `logit-link-needs-91302d71`). These are
@@ -376,12 +379,14 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_two_stage_fit,
        BRMNLMEConditionalProblem, brm_nlme_conditional_problem,
        brm_nlme_conditional_point,
+       brm_hyperparameters, BRMFixedHyperProblem, brm_fixed_hyper_problem,
+       brm_fixed_hyper_point, brm_fixed_hyper_fit,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,
        BRMLaplaceProblem, BRMStructuredLaplaceProblem, BRMSparseLaplaceProblem,
        brm_laplace_problem, brm_laplace_mode, brm_laplace_plan, BRMLaplacePlan,
-       brm_ladder_fit,
+       brm_ladder_fit, brm_laplace_integration,
        brm_laplace_draws,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 export brm_transform_constants
@@ -458,7 +463,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        ranef_correlated_draws_completion,
        brm_col_variances, brm_r2d2_scale, brm_cat_variances, brm_member_effects,
        multi_membership_intercept, multi_membership_correlated,
-       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
+       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_rw2, _sb_rw_sum, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_icar_scaled, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
        _sb_interval_censored_predictor,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,

@@ -2518,6 +2518,10 @@ function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=no
           " `brm_outputs` to take them all and select on `declaration.target`.")
 end
 
+# One member's positions in a flat carrier, from its fitted cumulative ends.
+_brm_member_segment(ends, member) =
+    ((member == 1 ? 0 : ends[member - 1]) + 1):ends[member]
+
 function _brm_emitted_coordinates(output::BRMOutput, constrained_names)
     stem = String(output.name)
     prefix = stem * "."
@@ -2527,7 +2531,7 @@ function _brm_emitted_coordinates(output::BRMOutput, constrained_names)
         # occupy columns, and a scalar occupies its own vector entry.
         ends = output.segments
         selected = member isa Vector{Int} ? Set(member) : isnothing(ends) ? (member:member) :
-            ((member == 1 ? 0 : ends[member - 1]) + 1 : ends[member])
+            _brm_member_segment(ends, member)
         return Int[i for (i, raw) in enumerate(constrained_names) if begin
             name = string(raw)
             startswith(name, prefix) && tryparse(Int, last(split(name, '.'))) in selected
@@ -2690,7 +2694,8 @@ _brm_term_label(::typeof(car), t, target) =
     Symbol(:car_, target, :_, name(_sb_named_inner(:car, only(getargs(t)))))
 function _brm_term_label(::typeof(gmrf), t, target)
     a = _brm_gmrf_arguments(t)
-    columns = (a.axes..., a.time, (a.channel === nothing ? () : (a.channel,))...)
+    columns = (a.axes..., (a.time === nothing ? () : (a.time,))...,
+        (a.channel === nothing ? () : (a.channel,))...)
     Symbol(:gmrf_, target, :_, join(name.(columns), "_"))
 end
 
@@ -2768,18 +2773,25 @@ function _brm_term_parameter_bindings(::typeof(hsgp), t)
 end
 _brm_term_parameter_bindings(::typeof(dar), _t) =
     (; ar=:beta, sd=:sigma, innovations=:z)
-_brm_term_parameter_bindings(::typeof(rw), _t) =
-    (; sd=:sigma, innovations=:z)
+# A zero-start walk samples its innovations; a sum-to-zero walk its standardized
+# values `phi`, which (as `car`'s ICAR field) are `:structured`.
+_brm_term_parameter_bindings(::typeof(rw), t) =
+    _brm_rw_options(getkwargs(t)).sum_to_zero ? (; sd=:sigma, structured=:phi) :
+        (; sd=:sigma, innovations=:z)
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
-_brm_term_parameter_bindings(::typeof(gmrf), _t) =
-    _BRM_GMRF_PARAMETER_BINDINGS
+_brm_term_parameter_bindings(::typeof(gmrf), t) = _brm_gmrf_parameter_bindings(t)
 # `effects` is the per-area field in the order of the fitted graph's sorted area
-# labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`.
-_brm_term_parameter_bindings(::typeof(car), t) =
-    getkwargs(t).type === :bym2 ?
+# labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`,
+# and a scaled ICAR field's `phi` and its islands' `theta`.
+function _brm_term_parameter_bindings(::typeof(car), t)
+    _, _, _, type, scaled = _brm_car_arguments(t)
+    type === :bym2 ?
         (; sd=:sigma, mixing=:rho, structured=:phi, unstructured=:theta, effects=:effects) :
+    scaled ?
+        (; sd=:sigma, structured=:phi, unstructured=:theta, effects=:effects) :
         (; sd=:sigma, structured=:phi, effects=:effects)
+end
 _brm_term_parameter_bindings(_f, _t) = NamedTuple()
 
 # Terms whose owner output is the summand the linear predictor adds as is, so
@@ -2901,16 +2913,21 @@ not term labels. Supported parameter roles are:
 | grouped `hsgp(...; by=...)` | `:length_scale`, `:sd`, `:value` |
 | `hsgp(...)` with hyper-predictor(s) | `:length_scale_intercept`, `:length_scale_ranef_sd`, `:length_scale_ranef_z`, `:sd_intercept`, `:sd_ranef_sd`, `:sd_ranef_z` — only the planned pieces — and `:value` |
 | `dar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
-| `rw(...)` | `:sd`, `:innovations`, `:value` |
+| `rw(...)`, `rw(...; order = 2)` | `:sd`, `:innovations`, `:value` |
+| `rw(...; sum_to_zero = true)` | `:sd`, `:structured`, `:value` |
 | `cdar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
 | `car(...; type=:bym2)` | `:sd`, `:mixing`, `:structured`, `:unstructured`, `:effects`, `:value` |
+| `car(...; type=:icar, scaled=true)` | `:sd`, `:structured`, `:unstructured`, `:effects`, `:value` |
 | `car(...; type=:icar)` | `:sd`, `:structured`, `:effects`, `:value` |
 
 A `car` term's label is `:car_<logical>_<area>`. `:effects` is its per-area field
 (one coordinate per area of the fitted graph, in sorted label order, islands
 included) and, like `:value`, a transformed parameter; `:structured` is the
 standardized ICAR field over the areas with neighbours, grouped by connected
-component.
+component. `:unstructured` is BYM2's standard-normal noise per area, and a scaled
+ICAR field's per island (one per island in sorted label order; empty when the
+graph has none). A sum-to-zero `rw` term's `:structured` is its
+standardized values `x / sigma`, one per fitted time in sorted order.
 
 `:value` is the term's own collected contribution: the per-row vector this
 predictor's occurrence of the term adds to the linear predictor. It is a
@@ -2970,15 +2987,8 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
                               submodel=nothing)
     inner = d
     call = nothing
-    if !isnothing(submodel)
-        call = _brm_submodel_entry(d, submodel)
-        axis = get(_brm_collection_paths(d.plan.parent), call.native_path, nothing)
-        isnothing(axis) && throw(ArgumentError("brm_term_coordinates: `$submodel` is not a repeated formula component"))
-        recipes = [e for e in values(d.plan.preproc) if e.kind === :collection_cells && e.raw_ref === first(axis.path)]
-        isempty(recipes) && throw(ArgumentError("brm_term_coordinates: member `$submodel` has no fitted formula terms"))
-        pos = findfirst(==(call.target), axis.keys)
-        inner = brm_descriptor(only(recipes).const_.fits[pos])
-    end
+    isnothing(submodel) ||
+        ((call, inner) = _brm_member_descriptor(d, submodel, "brm_term_coordinates"))
     entry = _brm_term_entry(inner, logical, e -> isnothing(term) || e.term === term,
         isnothing(term) ? "formula term" : "term `$term`")
     term = entry.term
@@ -2990,11 +3000,8 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         only(o for o in call.outputs if o.name === emitted)
     end
 
-    coordinates = _brm_element_coordinates(output, constrained_names)
-    if !isnothing(call)
-        selected = _brm_emitted_coordinates(output, constrained_names)
-        filter!(in(Set(selected)), coordinates)
-    end
+    coordinates = isnothing(call) ? _brm_element_coordinates(output, constrained_names) :
+        _brm_member_element_coordinates(output, constrained_names)
     expected_count = _brm_term_coordinate_count(
         getf(entry.value), entry.value, Val(parameter), inner_output)
     if isnothing(expected_count)
@@ -3014,8 +3021,44 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
        link=entry.link, inverse_link=InverseFunctions.inverse(entry.link))
 end
 
+# The SB fit of each member of a repeated formula component, in the order of
+# the collection axis's keys, or `nothing` when its members fit no formula.
+_brm_member_fits(d::BRMDescriptor, axis) = _brm_member_fits(d.plan.preproc, axis)
+function _brm_member_fits(preproc, axis)
+    recipes = [e for e in values(preproc)
+               if e.kind === :collection_cells && e.raw_ref === first(axis.path)]
+    isempty(recipes) ? nothing : only(recipes).const_.fits
+end
+
+# One member of a repeated formula component, addressed `(collection, key)`:
+# its `d.submodels` entry and its own SB fit, whose formula addresses the
+# member-scoped resolvers read before selecting the member's elements of the
+# parent's stacked carrier.
+function _brm_member_fit(d::BRMDescriptor, submodel, caller::AbstractString)
+    call = _brm_submodel_entry(d, submodel)
+    axis = get(_brm_collection_paths(d.plan.parent), call.native_path, nothing)
+    isnothing(axis) && throw(ArgumentError("$caller: `$submodel` is not a repeated formula component"))
+    fits = _brm_member_fits(d, axis)
+    isnothing(fits) && throw(ArgumentError("$caller: member `$submodel` has no fitted formula terms"))
+    call, fits[findfirst(==(call.target), axis.keys)]
+end
+
+# The same member with the descriptor of its own SB fit.
+function _brm_member_descriptor(d::BRMDescriptor, submodel, caller::AbstractString)
+    call, fit = _brm_member_fit(d, submodel, caller)
+    call, brm_descriptor(fit)
+end
+
+# The member's elements of a parent carrier, in element order: the carrier's
+# element-ordered coordinates restricted to the member's own entries.
+function _brm_member_element_coordinates(output::BRMOutput, constrained_names)
+    selected = Set(_brm_emitted_coordinates(output, constrained_names))
+    filter(in(selected), _brm_element_coordinates(output, constrained_names))
+end
+
 """
-    brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
+    brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol,
+                           submodel=nothing)
 
 The fitted length-scale validity floor of one `hsgp` term: the value
 `length_scale_floor` stands for in that term's `length_scale(...)` prior and
@@ -3037,18 +3080,32 @@ floor = brm_length_scale_floor(d, :mu; term=:hsgp_t)
 "allowed length-scale interval [\$(round(floor; sigdigits=3)), 24.0]"
 ```
 
+`submodel=(collection, key)` reads one member of a component bound over
+records (`for entry in records; blocks[entry.id] ~ comp(entry); end`): the
+floor of that member's own term, which `length_scale_floor` stands for in the
+member's `length_scale(trend, hsgp(entry.time))` prior. Its term label spells
+the record field as the member's formula reads it, `term=:hsgp_entry_time`.
+
 A term that is not an `hsgp` term, or an address that names no unique term,
 errors with the available labels.
 """
-function brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
-    entry = _brm_term_entry(d, logical, e -> e.term === term, "term `$term`")
+function brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol,
+                                submodel=nothing)
+    # A member's own program reads ports that only the parent's call binds, so
+    # it cannot be traced alone; its floor is read from that program untraced.
+    plan = isnothing(submodel) ? d.plan :
+        _brm_plan_of(last(_brm_member_fit(d, submodel, "brm_length_scale_floor")))
+    entry = _brm_term_entry(plan.parent, logical, e -> e.term === term, "term `$term`")
     getf(entry.value) === hsgp || error(
         "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
         "is a `$(nameof(getf(entry.value)))` term; only an `hsgp` term has a " *
         "length-scale validity floor")
-    owner = _brm_term_owner_output(d, logical, entry).declaration
-    floor = get(owner.keywords, :rho_lower, nothing)
-    value = floor isa Symbol ? get(d.plan.data, floor, nothing) : floor
+    floor = if isnothing(submodel)
+        get(_brm_term_owner_output(d, logical, entry).declaration.keywords, :rho_lower, nothing)
+    else
+        _brm_term_call_keyword(plan, logical, entry, :rho_lower)
+    end
+    value = floor isa Symbol ? get(plan.data, floor, nothing) : floor
     value isa Union{Real,AbstractVector{<:Real}} || error(
         "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
         "has no fitted validity floor (found $(repr(floor))). Re-reflect the " *
@@ -3059,15 +3116,17 @@ end
 # The one formula term on `logical` that `select` accepts. `what` names the
 # selection in the error, so a public label lookup and an internal semantic
 # lookup (e.g. by HSGP axes) report the same available labels.
-function _brm_term_entry(d::BRMDescriptor, logical::Symbol, select, what)
-    predictors = [lp for lp in linear_predictors(d.plan.parent)
+_brm_term_entry(d::BRMDescriptor, logical::Symbol, select, what) =
+    _brm_term_entry(d.plan.parent, logical, select, what)
+function _brm_term_entry(brmi, logical::Symbol, select, what)
+    predictors = [lp for lp in linear_predictors(brmi)
                   if lp.name === logical]
     length(predictors) == 1 || error(
         "brm_descriptor: logical predictor `$logical` resolves to " *
         "$(length(predictors)) formula declarations; expected exactly one " *
         "public term-parameter address.")
 
-    all_entries = _brm_term_coordinate_entries(d.plan.parent, logical)
+    all_entries = _brm_term_coordinate_entries(brmi, logical)
     entries = [e for e in all_entries if select(e)]
     length(entries) == 1 || error(
         "brm_descriptor: $what occurs $(length(entries)) times on logical " *
@@ -3125,6 +3184,36 @@ function _brm_term_owners(d, logical::Symbol, entry)
     owners
 end
 
+# A keyword argument of the call that binds a term's carrier in `plan`'s
+# untraced program, `carrier ~ submodel(; key = value, ...)`. The carrier is the
+# one the emitter recorded for this occurrence of the term, as in
+# `_brm_term_owners`.
+function _brm_term_call_keyword(plan, logical::Symbol, entry, key::Symbol)
+    emitted_lp = _sb_lp_emitted_name(logical, entry.link)
+    term_key = _brm_term_full_key(entry.value)
+    carriers = Set(k for (k, b) in plan.bindings if
+        get(b, :term_predictor, nothing) === emitted_lp &&
+        get(b, :term_key, nothing) === term_key &&
+        get(b, :term_scope, :population) === :population &&
+        get(b, :term_occurrence, entry.occurrence) == entry.occurrence)
+    found = Any[]
+    for statement in plan.model.model.args
+        Meta.isexpr(statement, :call, 3) && statement.args[1] === :~ &&
+            _sb_plan_lhs_name(statement.args[2]) in carriers || continue
+        call = statement.args[3]
+        Meta.isexpr(call, :call) && length(call.args) >= 2 &&
+            Meta.isexpr(call.args[2], :parameters) || continue
+        for argument in call.args[2].args
+            Meta.isexpr(argument, :kw, 2) && argument.args[1] === key &&
+                push!(found, argument.args[2])
+        end
+    end
+    length(found) == 1 || error(
+        "brm_descriptor: term `$(entry.term)` on logical predictor `$logical` " *
+        "binds $(length(found)) `$key` arguments in its program; expected one.")
+    only(found)
+end
+
 # The term-prior class behind each public parameter role a known value can hold.
 const _BRM_TERM_ROLE_CLASS = (; sd=:term_sd, length_scale=:term_length_scale,
                                spatial_length=:term_length_scale,
@@ -3160,7 +3249,7 @@ function _brm_term_assigned_value(brmi::BRMI, logical::Symbol, term, parameter::
     term isa ExprColumn || return nothing
     component = parameter === :spatial_length ? :space :
                 parameter === :temporal_length ? :time : nothing
-    slots = [slot for slot in _brm_term_prior_slots(getf(term))
+    slots = [slot for slot in _brm_term_prior_slots(term)
              if slot.class === class && slot.component === component]
     length(slots) == 1 || return nothing
     per_term = _brm_term_override(
@@ -3378,6 +3467,10 @@ _brm_is_level_indicator(column) =
     column.preprocess isa _BRMPopulationPreprocess &&
     column.preprocess.kind === :population_factor_dummy
 
+_brm_is_design_block_column(column) =
+    column.preprocess isa _BRMPopulationPreprocess &&
+    column.preprocess.kind in (:population_factor_dummy, :matrix_column)
+
 function _brm_design_block_columns(d::BRMDescriptor, logical::Symbol,
                                    coefficient::Symbol, entry)
     bindings = hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict()
@@ -3385,24 +3478,23 @@ function _brm_design_block_columns(d::BRMDescriptor, logical::Symbol,
     isnothing(columns) && return nothing
     claimed = [c for c in columns
                if c.label !== coefficient && coefficient in c.effect_addresses &&
-                  _brm_is_level_indicator(c)]
+                  _brm_is_design_block_column(c)]
     isempty(claimed) && return nothing
     blocks = unique(c.effect_block for c in claimed)
     length(blocks) == 1 || error(
-        "brm_descriptor: categorical address `$coefficient` on logical " *
-        "predictor `$logical` claims the level columns of $(length(blocks)) " *
+        "brm_descriptor: block address `$coefficient` on logical " *
+        "predictor `$logical` claims columns of $(length(blocks)) " *
         "design terms $(Tuple(blocks)); address one of them by its own name.")
     claimed
 end
 
-function _brm_design_categorical_coordinates(d::BRMDescriptor, logical::Symbol,
-                                             coefficient::Symbol,
-                                             constrained_names, entry, columns)
+function _brm_design_block_coordinates(d::BRMDescriptor, logical::Symbol,
+                                       coefficient::Symbol, constrained_names, entry, columns)
     idxs = _brm_carrier_indices(d.outputs,
                o -> o.role === :population_effect && !isnothing(o.declaration) &&
                     o.declaration.target === entry.block && o.name !== entry.block)
     length(idxs) == 1 || error(
-        "brm_descriptor: categorical address `$coefficient` on logical " *
+        "brm_descriptor: block address `$coefficient` on logical " *
         "predictor `$logical` resolves to population block `$(entry.block)`, " *
         "which owns $(length(idxs)) parameter carriers; expected exactly one.")
     output = d.outputs[only(idxs)]
@@ -3420,10 +3512,14 @@ function _brm_design_categorical_coordinates(d::BRMDescriptor, logical::Symbol,
     positions = map(columns) do c
         p = findall(==(c.label), labels)
         length(p) == 1 || error(
-            "brm_descriptor: level column `$(c.label)` of categorical address " *
+            "brm_descriptor: design column `$(c.label)` of block address " *
             "`$coefficient` occurs $(length(p)) times on population carrier " *
             "`$(output.name)`; re-reflect the model.")
         only(p)
+    end
+    if first(columns).preprocess.kind === :matrix_column
+        return (; logical, coefficient, output, coordinates=all_coordinates[positions],
+                   link=entry.link, inverse_link=InverseFunctions.inverse(entry.link), recovered=false)
     end
     # Treatment coding starts at level 2; cell means keep level 1.
     cellmeans = first(columns).preprocess.const_.level == 1
@@ -3466,7 +3562,7 @@ end
 """
     brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                       constrained_names;
-                                      coefficient=:Intercept)
+                                      coefficient=:Intercept, submodel=nothing)
 
 Resolve one formula-level population coefficient or categorical contrast block
 to its exact constrained posterior coordinates without constructing or parsing
@@ -3502,6 +3598,18 @@ but the result has the same shape and its levels are the column's strings.
 For `log(Vc) ~ 1 + weight`, ask for `logical=:Vc`. The returned intercept is on
 the log scale, `link === log`, and `inverse_link === exp`; the emitted
 `pop_log_Vc_beta_pop` spelling remains private.
+
+A member of a component repeated over records
+(`for entry in records; blocks[entry.id] ~ component(entry); end`) is
+addressed by its keyed `submodel`, as in [`brm_term_coordinates`](@ref) and
+[`brm_ranef_sd_coordinates`](@ref): with `shift ~ 1 + (1 | q | entry.site)`
+in the component,
+`brm_population_effect_coordinates(d, :shift, names; submodel=(:blocks, :left))`
+returns the left member's intercept. `logical` and `coefficient` are the
+member formula's own addresses, the result also carries `submodel` (the
+member's address), and `recovered` is `false`. The member's numeric
+coefficients are addressed; a categorical contrast block inside a member is
+not.
 
 Resolution is fail-closed. Missing or duplicate logical predictors, missing or
 duplicate population carriers, unavailable/duplicate coefficient labels, and
@@ -3550,7 +3658,9 @@ value. Names without generated quantities are refused with the remedy
 """
 function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                            constrained_names;
-                                           coefficient::Symbol=:Intercept)
+                                           coefficient::Symbol=:Intercept, submodel=nothing)
+    isnothing(submodel) || return _brm_member_population_effect_coordinates(
+        d, logical, constrained_names, coefficient, submodel)
     entries = [e for e in _brm_population_effect_entries(d.plan.parent)
                if e.logical === logical]
     length(entries) == 1 || error(
@@ -3574,7 +3684,7 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
             categorical_block)
     end
     design_block = _brm_design_block_columns(d, logical, coefficient, entry)
-    isnothing(design_block) || return _brm_design_categorical_coordinates(
+    isnothing(design_block) || return _brm_design_block_coordinates(
         d, logical, coefficient, constrained_names, entry, design_block)
 
     # The coefficient vector is the block INTERNAL (name !== target); the block
@@ -3650,7 +3760,7 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     design_columns = _brm_population_design_columns(
         hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict(), entry.block)
     design_blocks = isnothing(design_columns) ? Symbol[] :
-        sort!(unique!(Symbol[a for c in design_columns if _brm_is_level_indicator(c)
+        sort!(unique!(Symbol[a for c in design_columns if _brm_is_design_block_column(c)
                              for a in c.effect_addresses if a !== c.label]))
     available = unique!(vcat(copy(labels), sort!(collect(keys(categorical))),
                              design_blocks, recovered_labels))
@@ -3660,6 +3770,80 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         "$(Tuple(available)).")
     # Unreachable: one carrier with present labels and exactly one match
     # returned from the conventional attempt above.
+end
+
+# One member's population block, read from the plan of the member's own SB fit:
+# its formula entry, binding, prior scheme, coefficient labels and the name of
+# its coefficient carrier, as `_brm_label_population!` labels it. The member's
+# fit is never transpiled: a member that puts a margin in the parent's block
+# reads it through inputs only the parent's call binds, so that fit alone is
+# no Stan program.
+function _brm_member_population_block(fit, logical::Symbol, address, caller::AbstractString)
+    plan = _brm_plan_of(fit)
+    entries = [e for e in _brm_population_effect_entries(plan.parent) if e.logical === logical]
+    length(entries) == 1 || error(
+        "$caller: logical predictor `$logical` of member `$address` resolves " *
+        "to $(length(entries)) formula declarations; expected exactly one public " *
+        "population-effect address.")
+    entry = only(entries)
+    absorbing = [b for b in Iterators.flatten((total_effect_blocks(plan), s2z_effect_blocks(plan)))
+                 if b.predictor === logical]
+    isempty(absorbing) || error(
+        "$caller: logical predictor `$logical` of member `$address` has its " *
+        "coefficients in a $(_brm_absorbing_block_kind(first(absorbing))) block, " *
+        "which a member does not address yet.")
+    binding = get(plan.bindings, entry.block, nothing)
+    kind = !isnothing(binding) && hasproperty(binding, :prior_scheme) ?
+        binding.prior_scheme.kind : :ordinary
+    classes = _brm_population_classes(plan.bindings, entry.block)
+    labels = _brm_population_labels(plan.bindings, plan.parent, entry.block, logical)
+    isnothing(labels) && error(
+        "$caller: population block of logical predictor `$logical` of member " *
+        "`$address` has no coefficient labels; this formula shape does not expose a " *
+        "stable population-coordinate address.")
+    isnothing(classes) || (labels = _brm_class_labels(labels, classes))
+    carrier = Symbol(entry.block, isnothing(classes) ? :_beta_pop : :_beta_flat)
+    (; entry, kind, labels, carrier)
+end
+
+# The parent's stacked carrier of one member's coefficients: the member's own
+# carrier name under the call's native path, which must name exactly one
+# output of the call.
+function _brm_member_population_carrier(call, block, address, caller::AbstractString)
+    emitted = Symbol(join((call.native_path..., block.carrier), "_"))
+    outputs = [o for o in call.outputs if o.name === emitted]
+    length(outputs) == 1 || error(
+        "$caller: member `$address` population carrier `$(block.carrier)` " *
+        "resolves to $(length(outputs)) carriers of the parent model; expected exactly one.")
+    only(outputs)
+end
+
+# One member's population coefficient: the label resolves on the member's own
+# fit, whose coefficient carrier the parent stacks over members, and the
+# member's elements of that stacked carrier hold its coefficients in label
+# order. Each mismatch between the two is refused, never guessed.
+function _brm_member_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
+                                                   constrained_names, coefficient::Symbol,
+                                                   submodel)
+    caller = "brm_population_effect_coordinates"
+    call, fit = _brm_member_fit(d, submodel, caller)
+    address = _brm_submodel_address(call)
+    block = _brm_member_population_block(fit, logical, address, caller)
+    (; entry, labels) = block
+    label_indices = findall(==(coefficient), labels)
+    length(label_indices) == 1 || error(
+        "brm_descriptor: coefficient `$coefficient` occurs $(length(label_indices)) " *
+        "times on logical predictor `$logical` of member `$address`; available " *
+        "labels are $(Tuple(labels)).")
+    output = _brm_member_population_carrier(call, block, address, caller)
+    coordinates = _brm_member_element_coordinates(output, constrained_names)
+    length(coordinates) == length(labels) || error(
+        "brm_descriptor: member `$address` population carrier has $(length(labels)) " *
+        "coefficient labels but resolves to $(length(coordinates)) constrained " *
+        "coordinates. Re-reflect the model that produced the posterior draws.")
+    (; logical, coefficient, output, coordinates=coordinates[label_indices],
+       link=entry.link, inverse_link=InverseFunctions.inverse(entry.link),
+       recovered=false, submodel=address)
 end
 
 # The recovered generated carrier of an absorbing block, indexed like its

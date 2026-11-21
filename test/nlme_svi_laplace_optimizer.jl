@@ -6,6 +6,7 @@
 # The state round-trips through Serialization.
 #
 # RUN: julia --project=test test/nlme_svi_laplace_optimizer.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, DifferentiationInterface, Random, LinearAlgebra, Serialization
 const BRM = BayesianRegressionModels

@@ -1,6 +1,7 @@
 # Connected SVI's `cell_units` on real models: what the units hold, that their
 # terms still sum to the full density and gradient, and that fits, checkpoints and
 # streaming windows work over them.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "..", "research", "svi_cell_units", "toy.jl"))
 using LogDensityProblems, Random

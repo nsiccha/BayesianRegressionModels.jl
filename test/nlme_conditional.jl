@@ -1,6 +1,7 @@
 # One NLME model's compiled Stan and RK targets, conditioned on a checked
 # start: only the standardized subject draws are free.
 # RUN: julia --project=test test/nlme_conditional.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using BridgeStan, LinearAlgebra, LogDensityProblems, Random, WarmupHMC
 

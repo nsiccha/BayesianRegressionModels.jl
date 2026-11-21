@@ -176,7 +176,7 @@ end
 
 function _brm_start_prior_term_targets(inventory, explicit, value; lenient=false)
     targets = NamedTuple[]
-    for r in inventory, slot in _brm_term_prior_slots(getf(r.term))
+    for r in inventory, slot in _brm_term_prior_slots(r.term)
         slot.support === :simplex && continue # retain the valid neutral simplex
         haskey(r, :bindings) && get(r.bindings, slot.name, nothing) === nothing && continue
         any(t -> t.predictor === r.predictor && t.slot.name === slot.name &&
@@ -230,7 +230,7 @@ function _brm_sb_start_term_inventory(d, context)
         hyper = _brm_term_hyper_plans(d.plan, lp.name, term)
         bindings = (; (slot.name => (any(p -> p.hyper ===
             Symbol(_brm_term_prior_label(Val(slot.class))), hyper) ? nothing : true)
-            for slot in _brm_term_prior_slots(getf(term)))...)
+            for slot in _brm_term_prior_slots(term))...)
         push!(inventory, (; predictor=lp.name, term, prepared, floor, lower, bindings))
     end
     inventory

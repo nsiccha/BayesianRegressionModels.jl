@@ -210,6 +210,9 @@ brm_gmrf_cell_locator(fitted) = _brm_gmrf_locator(first(fitted.supports).mesh)
 # `brm_gmrf_cell_read.(Ref(locator), Ref(support), east, north, time[, channel])`,
 # so ReactiveKernels prepares each read at its own rows (a dotted call) while
 # the locator and support are read whole.
+# A spatial cell field's rows all read its one time.
+brm_gmrf_cell_read(locator, support, east, north) =
+    brm_gmrf_cell_read(locator, support, east, north, _BRM_GMRF_SPATIAL_TIME)
 function brm_gmrf_cell_read(locator, support, east, north, time, channel=1)
     isfinite(east) && isfinite(north) ||
         throw(ArgumentError("gmrf spatial coordinates must be finite"))
@@ -238,6 +241,17 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
     end
     id = _rk_mint_smooth_id!(taken, columns,
         string("gmrf_", target, "_", join(sources, "_")))
+    spatial = _brm_gmrf_spatial(prepared.source)
+    if spatial
+        # A spatial field's rows all read its one time, a generated column.
+        time = _rk_mint_generated!(taken, columns, string(id, "_time"))
+        columns[time] = fill(_BRM_GMRF_SPATIAL_TIME, length(columns[sources[1]]))
+        push!(sources, time)
+    end
+    # The fit-role rows' times of a spatial field: its one time, at every
+    # training row (`_brm_fit_input_source` reads the training rows on replay).
+    spatial_fit_time() = _rk_fit_input!(derived, columns, taken, sources[3],
+        fill(_BRM_GMRF_SPATIAL_TIME, length(_brm_fit_input_source(sources[1], data[sources[1]]))))
     if length(sources) == 3
         channel = _rk_mint_generated!(taken, columns, string(id, "_channel"))
         columns[channel] = ones(Int, length(columns[sources[3]]))
@@ -246,10 +260,10 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
     if get(state, :multiresolution, nothing) !== nothing
         fit = (; east=_rk_fit_twin!(derived, columns, taken, data, sources[1]),
             north=_rk_fit_twin!(derived, columns, taken, data, sources[2]),
-            time=_rk_fit_twin!(derived, columns, taken, data, sources[3]),
-            channel=length(prepared.source) == 3 ?
-                _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
-                _rk_fit_twin!(derived, columns, taken, data, sources[4]))
+            time=spatial ? spatial_fit_time() : _rk_fit_twin!(derived, columns, taken, data, sources[3]),
+            channel=_brm_gmrf_has_channel(prepared.source) ?
+                _rk_fit_twin!(derived, columns, taken, data, sources[4]) :
+                _rk_fit_input!(derived, columns, taken, sources[4], [1]))
         # The rank is an input of the program, not a number it spells: one
         # program serves every rank (user principle `0ikeidi`).
         rank = _rk_fit_input!(derived, columns, taken, Symbol(id, :_rank),
@@ -266,8 +280,11 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
         support = _brm_fitted_value(:gmrf_footprint_support, Symbol(id)) do
             brm_gmrf_footprint_support(_brm_fit_input_source(sources[1], data[sources[1]]),
                 _brm_fit_input_source(sources[2], data[sources[2]]),
-                _brm_fit_input_source(sources[3], data[sources[3]]),
-                length(prepared.source) == 3 ? [1] : _brm_fit_input_source(sources[4], data[sources[4]]),
+                spatial ? fill(_BRM_GMRF_SPATIAL_TIME,
+                    length(_brm_fit_input_source(sources[1], data[sources[1]]))) :
+                    _brm_fit_input_source(sources[3], data[sources[3]]),
+                _brm_gmrf_has_channel(prepared.source) ?
+                    _brm_fit_input_source(sources[4], data[sources[4]]) : [1],
                 state.neighbors)
         end
         fitted = _rk_fit_input!(derived, columns, taken, Symbol(id, :_footprint), [support])
@@ -278,10 +295,12 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
                state_axes=(; times=state.times, channels=state.channels)),
             id, id)
     end
-    fit_time = _rk_fit_twin!(derived, columns, taken, data, sources[3])
-    fit_channel = length(prepared.source) == 3 ?
-        _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
-        _rk_fit_twin!(derived, columns, taken, data, sources[4])
+    # The mesh support reads only the fitted times: one for a spatial field.
+    fit_time = spatial ? _rk_fit_input!(derived, columns, taken, sources[3], [_BRM_GMRF_SPATIAL_TIME]) :
+        _rk_fit_twin!(derived, columns, taken, data, sources[3])
+    fit_channel = _brm_gmrf_has_channel(prepared.source) ?
+        _rk_fit_twin!(derived, columns, taken, data, sources[4]) :
+        _rk_fit_input!(derived, columns, taken, sources[4], [1])
     vertices = _rk_fit_input!(derived, columns, taken, state.vertices_source, [state.vertices])
     cells = _rk_fit_input!(derived, columns, taken, state.cells_source, [state.cells])
     _RKTermSpec(:gmrf, sources,
@@ -341,7 +360,8 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
            channel=_rk_value_callee!(bindings, factors.channel, taken))
     end
     locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
-        footprint, multiresolution_functions, conditional_functions)
+        footprint, multiresolution_functions, conditional_functions,
+        spatial=_brm_gmrf_spatial(options.source))
     push!(statements, Expr(:call, :~, options.id, locals.call))
     merge((; locals.sigma, locals.spatial_length, locals.temporal_length, locals.field,
         geometry, support, rows, priors=prior), locals.conditionals)
@@ -357,7 +377,7 @@ _rk_ast_property(value, name) = Expr(:., value, QuoteNode(name))
 # geometry (RKPPL cell submodels bind bare names only).
 function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
         cell::Bool=false, accessors=nothing, footprint::Bool=false, multiresolution_functions=nothing,
-        conditional_functions=nothing)
+        conditional_functions=nothing, spatial::Bool=false)
     sigma = _rk_block_local!(block, :sigma)
     spatial_length = _rk_block_local!(block, :spatial_length)
     temporal_length = _rk_block_local!(block, :temporal_length)
@@ -394,13 +414,20 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
         "each row reads the field through its multiresolution basis weights" : footprint ?
         "each row reads the field's state at its own index" :
         "each row reads a weighted sum of three field states (its interpolation weights)"
-    doc = @_rk_definition_doc """
+    doc = spatial ? @_rk_definition_doc("""
+        A spatial Gaussian Markov random field (`gmrf`) with no time axis.
+
+        Draws the marginal scale `$sigma` and the spatial length `$spatial_length` from
+        their priors, then the field `$field ~ $law($spatial_length, $temporal_length, …)`
+        on the support `$geometry`, which holds one time: `$temporal_length` is a
+        constant that one time never reads; $reads_doc. Returns `$sigma` times those
+        reads, one value per row.""") : @_rk_definition_doc("""
         A Gaussian Markov random field (`gmrf`) over a space-time mesh.
 
         Draws the marginal scale `$sigma`, the spatial length `$spatial_length` and the
         temporal length `$temporal_length` from their priors, then the field
         `$field ~ $law($spatial_length, $temporal_length, …)` on the mesh `$geometry`;
-        $reads_doc. Returns `$sigma` times those reads, one value per row."""
+        $reads_doc. Returns `$sigma` times those reads, one value per row.""")
     call = _rk_ast_block_call!(definitions, taken, "brm_gmrf", block, value; doc)
     (; call, sigma, spatial_length, temporal_length, field, conditionals)
 end
@@ -463,7 +490,7 @@ mutable struct _RKCellGMRF
     target::Symbol
     id::String
     group::Symbol
-    time::Symbol
+    time::Union{Nothing,Symbol}
     channel::Union{Nothing,Symbol}
     vertices::Symbol
     cells::Symbol
@@ -536,7 +563,8 @@ function _rk_kernel_cell_formulas(@nospecialize(brmi::BRMI), program, kernel, sc
         arguments = _brm_gmrf_arguments(term)
         arguments.mesh !== nothing || error(
             "$prefix: cell field `$target` needs mesh=; read-support forms are model-scope fields")
-        positional = (name.(arguments.axes)..., name(arguments.time),
+        positional = (name.(arguments.axes)...,
+            (arguments.time === nothing ? () : (name(arguments.time),))...,
             (arguments.channel === nothing ? () : (name(arguments.channel),))...)
         sources = map(positional) do param
             k = findfirst(==(param), params)
@@ -560,13 +588,14 @@ function _rk_kernel_cell_formulas(@nospecialize(brmi::BRMI), program, kernel, sc
                 default=ExprColumn(LogNormal, 0.0, 1.0)),
             spatial_length=_brm_term_prior_expression(term, target, context, :term_length_scale;
                 component=:space, default=ExprColumn(LogNormal, 0.0, 1.0)),
-            temporal_length=_brm_term_prior_expression(term, target, context, :term_length_scale;
-                component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
+            temporal_length=arguments.time === nothing ? _BRM_GMRF_SPATIAL_TEMPORAL_LENGTH :
+                _brm_term_prior_expression(term, target, context, :term_length_scale;
+                    component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
         reads = copy(prior_reads)
         correlation !== nothing && correlation.kind === :parameter && push!(reads, correlation.name)
         inputs_read = sort!(collect(intersect(reads, union(bound, available))))
         spec = _RKCellGMRF(target, string("gmrf_", target, "_", join(positional, "_")),
-            only(groups), sources[3].source,
+            only(groups), arguments.time === nothing ? nothing : sources[3].source,
             arguments.channel === nothing ? nothing : sources[4].source,
             mesh.vertices, mesh.cells, correlation, priors, inputs_read, labels, nothing)
         replacements[position] = Expr(:(=), target,
@@ -591,10 +620,13 @@ function _rk_plan_cell_gmrf!(kernels, plan, data, taken)
         spec.fit = (;
             vertices=_rk_fit_input!(derived, columns, taken, spec.vertices, [vertices]),
             cells=_rk_fit_input!(derived, columns, taken, spec.cells, [cells]),
-            time=_rk_fit_twin!(derived, columns, taken, data, spec.time),
+            time=spec.time === nothing ? nothing : _rk_fit_twin!(derived, columns, taken, data, spec.time),
             channel=spec.channel === nothing ? nothing :
                 _rk_fit_twin!(derived, columns, taken, data, spec.channel),
             group=_rk_fit_twin!(derived, columns, taken, data, spec.group))
+        # A spatial cell field's training rows all read its one time.
+        spec.time === nothing && (spec.fit = merge(spec.fit, (; time=_rk_fit_input!(derived, columns,
+            taken, Symbol(spec.id, :_time), fill(_BRM_GMRF_SPATIAL_TIME, length(columns[spec.fit.group]))))))
     end
     nothing
 end
@@ -637,7 +669,7 @@ function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken,
         "RK backend: internal: kernel `$kernel` emits a gmrf cell field without the program's definitions")
     lhs, marker = statement.args
     spec = marker.args[2]
-    nrows = spec.channel === nothing ? 3 : 4
+    nrows = 2 + (spec.time === nothing ? 0 : 1) + (spec.channel === nothing ? 0 : 1)
     rows_args = marker.args[3:(2 + nrows)]
     input_values = marker.args[(3 + nrows):end]
     support = Expr(:ref, selected[spec].cells, index)
@@ -665,7 +697,7 @@ function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken,
     end
     accessors = map(f -> _rk_value_callee!(bindings, f, taken), _BRM_GMRF_READ_FIELDS)
     locals = _rk_ast_gmrf_block!(defs, taken, law, block, prior, geometry, reads, L;
-        cell=true, accessors)
+        cell=true, accessors, spatial=spec.time === nothing)
     _rk_coordinate_record!(coordinates, (; kind=:cell_gmrf, declaration=declared,
         name=spec.target, kernel=kernel, id=spec.id, labels=spec.labels, fit=spec.fit,
         cells=selected[spec].cells, correlation=spec.correlation,

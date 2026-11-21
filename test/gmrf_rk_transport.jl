@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include("gmrf_stan.jl")
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, Serialization
 import BridgeStan as BS

@@ -1,4 +1,5 @@
 module SMCSelectiveFixture
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels
 
 hierarchical(data) = @brm data begin

@@ -193,11 +193,16 @@ function _brm_lower_collection!(out, frame, observers, fields, builder, occupied
     end
     groups = Dict{Tuple,Vector{Int}}()
     selected_bodies = Dict{Tuple,Vector{Any}}()
+    has_fragments = any(_brm_has_record_rhs, body)
     for (i, record) in enumerate(records)
         decisions = Bool[]
         inputs[input] = record
         selected = _brm_select_declarations!(Any[], Expr(:block, body...), inputs, decisions)
-        group = Tuple(decisions)
+        fragments = String[]
+        if has_fragments
+            map!(st -> _brm_select_record_rhs(st, input, record, fragments), selected, selected)
+        end
+        group = (Tuple(decisions), Tuple(fragments))
         push!(get!(Vector{Int}, groups, group), i)
         get!(selected_bodies, group, selected)
     end
@@ -216,7 +221,11 @@ function _brm_lower_collection!(out, frame, observers, fields, builder, occupied
     end
     results, order = Any[], Int[]
     for group in sort!(collect(Base.keys(groups)))
-        variant = isempty(group) ? :all : Symbol(join(Int.(group)))
+        decisions, fragments = group
+        variant = isempty(decisions) ? :all : Symbol(join(Int.(decisions)))
+        if !isempty(fragments)
+            variant = Symbol(variant, "_", bytes2hex(sha256(join(fragments, "\0")))[1:16])
+        end
         # Native coordinates follow the stable keys, while the returned vector
         # below follows the supplied records. Reordering a labelled design
         # therefore never exchanges two fitted parameters.

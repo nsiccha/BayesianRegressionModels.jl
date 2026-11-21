@@ -1,6 +1,7 @@
 # Strict unit partitions: structural ownership, including dependencies hidden
 # at the attribution point, and units with an empty observation group.
 # Run: julia --project=test test/nlme_partition.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_panel_fixture.jl"))
 using Random

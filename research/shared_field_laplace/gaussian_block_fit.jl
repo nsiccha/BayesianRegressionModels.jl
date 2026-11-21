@@ -4,6 +4,7 @@
 # Uses the original fit budget/start rule and posterior tolerance, without a
 # warm start from the saved successful conditional reconstruction/reference.
 # julia --project=test research/shared_field_laplace/gaussian_block_fit.jl 'native Gaussian block SVI'
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("gaussian_block_comparison.jl")
 include("whole_window_probe.jl")
 

@@ -10,6 +10,7 @@
 # moments with separate inflation (ReactiveKernels snag learned-smc-refe-cc5677a1).
 # Check the reference repair directly and retain the known population-intercept
 # spread deficit: the repaired reference alone does not establish coverage.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, DifferentiationInterface, LogDensityProblems
 using SequentialMonteCarlo, WarmupHMC, Random, Statistics, Printf, Test

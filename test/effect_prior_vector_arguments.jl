@@ -12,6 +12,7 @@
 # compiled Stan program.
 #
 # Run: julia --startup-file=no --project=test test/effect_prior_vector_arguments.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 const LEVELS = (; y=[0.4, 1.3, -0.2, 2.1, 0.9, 1.7],

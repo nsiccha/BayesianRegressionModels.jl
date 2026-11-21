@@ -437,7 +437,13 @@ random-effect block declared inside a function-style component call
 scope, by that call's own grouping levels and margins: RK `kin.<block>.z`
 with Stan `kin_<block>_z_flat`, its semantic addresses carrying
 `scope = (:kin,)` (a tuple path for nested calls), so repeated calls over equal
-labels stay apart. A provider declaration
+labels stay apart. A member of a component repeated over records
+(`for entry in records; blocks[entry.id] ~ component(entry); end`) pairs its
+population coefficients by the member's key and coefficient label, with
+`scope = (:blocks, key)` in their semantic addresses. An ungrouped HSGP's
+basis weights pair by member and basis position, including when the members
+use different basis counts. A member's own
+random-effect block is not paired yet. A provider declaration
 `<target>.<path>` pairs with the sampled SB output that the same `<target>`
 declaration owns under StanBlocks' submodel name `<target>_<path>` (path
 segments joined by `_`), element by element; a simplex declaration pairs as a
@@ -594,7 +600,8 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
               "\n  Covered: scalar parameters, response cutpoints and " *
               "thresholds, `Ordinal` per-threshold coefficients, authored " *
               "`Dirichlet` simplexes, ordinary-prior " *
-              "population and categorical coefficients, plain non-centered or " *
+              "population and categorical coefficients (a repeated component " *
+              "member's too), plain non-centered or " *
               "centered random-effect " *
               "blocks with sampled scales, stratified `gr(g, by=b)` blocks, " *
               "also declared inside a component call, " *
@@ -1118,12 +1125,18 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     roles = record.type === :bym2 ?
         ((:sd, :sigma, false), (:mixing, :rho, false),
          (:structured, :phi, true), (:unstructured, :theta, true)) :
+        # a scaled ICAR field's `theta` holds its islands' own effects
+        _brm_car_scaled_icar(record) ?
+        ((:sd, :sigma, false), (:structured, :phi, true), (:unstructured, :theta, true)) :
         ((:sd, :sigma, false), (:structured, :phi, true))
     for (parameter, local_name, elementwise) in roles
         # A role held at a known value, or set to a value computed from model
         # values, is no coordinate on either backend.
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
+        # a scaled ICAR field over a graph without islands has no `theta`
+        parameter === :unstructured && _brm_car_scaled_icar(record) &&
+            record.n_island == 0 && continue
         stan_names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
             (; base..., parameter))
@@ -1259,11 +1272,45 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
 end
 
+# A single-path random walk, paired by its time axis and parameter roles: the
+# innovation scale as a scalar, and elementwise in step order the innovations
+# (zero start) or the standardized values (sum to zero), which both backends
+# sample in the same coordinates.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:rw}, record, rk, d, stan, stan_pos)
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === rw &&
+            name(_sb_named_inner(:rw, only(getargs(e.value)))) === record.time,
+        "`rw($(record.time))`")
+    base = (; kind=:rw, predictor=record.predictor, term=entry.term)
+    roles = record.sum_to_zero ? ((:sd, :sigma), (:structured, :phi)) :
+        ((:sd, :sigma), (:innovations, :z))
+    for (parameter, local_name) in roles
+        # A scale held at a known value, or set to a value computed from model
+        # values, is no coordinate on either backend.
+        isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
+            entry.value, parameter)) || continue
+        stan_names = _brm_transport_elements(
+            _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+            (; base..., parameter))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        if parameter === :sd
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=1),
+                declaration, only(stan_names), declaration, (), :identity))
+        else
+            for (j, stan_name) in enumerate(stan_names)
+                push!(pairs, BRMCoordinatePair((; base..., parameter, index=j),
+                    Symbol(declaration, ".", j), stan_name, declaration, (j,), :identity))
+            end
+        end
+    end
+end
+
 # A native field's scalar roles and joint state. State positions are paired
 # by fitted vertex/channel/time identities, never by the observation order.
 function _brm_transport_gmrf_axes(term)
     args = _brm_gmrf_arguments(term)
-    (name.(args.axes)..., name(args.time),
+    (name.(args.axes)..., (args.time === nothing ? () : (name(args.time),))...,
         (args.channel === nothing ? () : (name(args.channel),))...)
 end
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
@@ -1290,6 +1337,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             "brm_coordinate_transport: GMRF $(base) has different fitted state axes")
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
+        # A spatial field's temporal length is a constant of both programs.
+        parameter === :temporal_length && _brm_gmrf_spatial_term(entry.value) && continue
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
@@ -1339,6 +1388,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
+        # A spatial field's temporal length is a constant of both programs.
+        parameter === :temporal_length && _brm_gmrf_spatial_term(entry.value) && continue
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
@@ -1627,6 +1678,20 @@ function _brm_transport_scoped(name::Symbol)
     (Symbol(join(parts[1:(k - 1)], ".")), Tuple(index))
 end
 
+# RK puts the member first. Stan puts it last in a rectangular carrier and
+# packs member vectors end-to-end in a segmented vector.
+function _brm_transport_member_index(output, index)
+    isempty(index) && return index
+    if length(index) == 2 && length(output.size) == 1 && !isnothing(output.segments)
+        member, position = index
+        member in eachindex(output.segments) || return nothing
+        segment = _brm_member_segment(output.segments, member)
+        position in eachindex(segment) || return nothing
+        return (segment[position],)
+    end
+    (Base.tail(index)..., first(index))
+end
+
 # A provider's or missing completion's scoped declarations. RK scopes each
 # under its target (`loc.inner.slope`, `age.y_mis`); StanBlocks inlines the
 # submodel under `_`-joined names owned by that target declaration. Only
@@ -1636,7 +1701,7 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         kind::Symbol, target::Symbol, rk, d, stan, stan_pos;
         only_declaration::Union{Nothing,Symbol}=nothing, relation::Symbol=:identity,
         carrier::Union{Nothing,Symbol}=nothing, physical_value::Union{Nothing,Symbol}=nothing,
-        context::Tuple=(), declaration_scope::Symbol=target)
+        context::Tuple=(), declaration_scope::Symbol=target, member_first::Bool=false)
     owned = Dict{String,BRMOutput}(String(o.name) => o for o in d.outputs
         if !isnothing(o.declaration) && o.declaration.target === target &&
             o.declaration.context == context && o.kind === :parameter)
@@ -1690,8 +1755,11 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
                 "declaration `$declaration` of layout transform `$(only(transforms))`")
             positions = Set(_brm_element_coordinates(output, stan))
             for element in elements
-                stan_name = isempty(element.index) ? carrier :
-                    string(carrier, ".", join(element.index, "."))
+                stan_index = member_first ?
+                    _brm_transport_member_index(output, element.index) : element.index
+                isnothing(stan_index) && continue
+                stan_name = isempty(stan_index) ? carrier :
+                    string(carrier, ".", join(stan_index, "."))
                 get(stan_pos, stan_name, 0) in positions || continue
                 push!(pairs, BRMCoordinatePair((; address..., index=element.index),
                     element.name, stan_name, declaration, element.index, relation))
@@ -1889,11 +1957,75 @@ function _brm_transport_component_records!(pairs, blocks, simplexes, centered, m
     nothing
 end
 
+# A plate cell's component call, such as one member of a component repeated
+# over records. Its declarations pair by their scoped spelling, and a
+# collection member's population coefficients by meaning (below), which
+# supersedes a spelling match of the same coordinates.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:cell_component}, record, rk, d, stan, stan_pos)
+    first_generic = length(pairs) + 1
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :submodel, record.name, rk, d, stan, stan_pos;
-        context=(record.kernel,), declaration_scope=record.declaration)
+        context=(record.kernel,), declaration_scope=record.declaration, member_first=true)
+    members = _brm_transport_member_population(record, d, stan)
+    isempty(members) && return nothing
+    rk_claimed = Set(pair.rk for pair in members)
+    stan_claimed = Set(pair.stan for pair in members)
+    deleteat!(pairs, [i for i in first_generic:length(pairs)
+        if pairs[i].rk in rk_claimed || pairs[i].stan in stan_claimed])
+    append!(pairs, members)
+    nothing
+end
+
+# A collection member's population coefficients. RK declares them in the
+# member's program, as a scalar per coefficient or a `beta_pop` vector, and
+# indexes the cell's copy by member first. StanBlocks stacks each member's
+# coefficient vector in one carrier with the member last. A coefficient pairs
+# by its label, read from that member's own SB fit, never by position.
+function _brm_transport_member_population(record, d, stan)
+    pairs = BRMCoordinatePair[]
+    population = [r for r in get(record, :members, ()) if r.kind === :population]
+    isempty(population) && return pairs
+    path = (record.kernel, record.name)
+    axis = get(_brm_collection_paths(d.plan.parent), path, nothing)
+    axis === nothing && return pairs
+    fits = _brm_member_fits(d, axis)
+    fits === nothing && _brm_transport_error(:unsupported_coverage,
+        "brm_coordinate_transport: collection `$(axis.collection)` declares population " *
+        "coefficients in its members but has no per-member SB fit")
+    caller = "brm_coordinate_transport"
+    for (i, key) in enumerate(axis.keys)
+        scope = (axis.collection, key)
+        call = _brm_submodel_entry(d, scope)
+        blocks = Dict{Symbol,Any}()
+        for r in population
+            block = get!(blocks, r.predictor) do
+                binding = _brm_member_population_block(fits[i], r.predictor, scope, caller)
+                binding.kind === :ordinary || _brm_transport_error(:unsupported_coverage,
+                    "brm_coordinate_transport: member $scope population predictor " *
+                    "`$(r.predictor)` uses a $(binding.kind) prior scheme")
+                output = _brm_member_population_carrier(call, binding, scope, caller)
+                elements = _brm_member_element_coordinates(output, stan)
+                length(elements) == length(binding.labels) || error(
+                    "brm_coordinate_transport: member $scope population carrier " *
+                    "`$(output.name)` has $(length(binding.labels)) labels but " *
+                    "$(length(elements)) Stan coordinates")
+                (; labels=binding.labels, names=stan[elements])
+            end
+            position = findall(==(r.coefficient), block.labels)
+            length(position) == 1 || _brm_transport_error(:unsupported_coverage,
+                "brm_coordinate_transport: member $scope coefficient " *
+                "`$(r.coefficient)` of `$(r.predictor)` occurs $(length(position)) " *
+                "times among the SB labels $(Tuple(block.labels))")
+            declaration = Symbol(record.declaration, ".", r.declaration)
+            index = (i, get(r, :index, ())...)
+            push!(pairs, BRMCoordinatePair((; kind=:population, scope,
+                    predictor=r.predictor, coefficient=r.coefficient),
+                Symbol(declaration, ".", join(index, ".")), block.names[only(position)],
+                declaration, index, :identity))
+        end
+    end
+    pairs
 end
 
 # A stratified `gr(g, by=b)` block: each stratum's scales and correlation
@@ -2842,6 +2974,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
+        # A spatial field's temporal length is a constant of both programs.
+        parameter === :temporal_length && _brm_gmrf_spatial_term(entry.value) && continue
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(

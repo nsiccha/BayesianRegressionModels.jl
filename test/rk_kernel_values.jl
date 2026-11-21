@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 module PublicKernelScope
@@ -60,23 +61,85 @@ end
 end
 
 @stestset "only operator calls with two operands take Stan's scalar-with-array semantics" begin
-    function bind(ex)
+    function bind(ex; defs=nothing)
         bindings = Pair{Symbol,Any}[]
-        BRM._rk_kernel_bind_calls(ex, @__MODULE__, bindings, Set{Symbol}()), last.(bindings)
+        BRM._rk_kernel_bind_calls(ex, @__MODULE__, bindings, Set{Symbol}(); defs),
+            last.(bindings)
     end
-    # Unary `+`/`-` mean the same in Julia and Stan and keep their spelling.
-    for ex in (:(-x), :(+x), :((-).(x)), :(exp.(-x)))
+    # Unary `+`/`-` mean the same in Julia and Stan and keep their spelling,
+    # and so does a broadcast, which already combines a scalar with each entry.
+    for ex in (:(-x), :(+x), :((-).(x)), :(exp.(-x)), :((-).(a, b)), :(a .+ b))
         @test bind(ex) == (ex, [])
+        @test bind(ex; defs=Expr[]) == (ex, [])
     end
-    for (ex, callable) in ((:(a + b), BRM._rk_kernel_stan_add), (:(a - b), BRM._rk_kernel_stan_sub),
-            (:(a - b - c), BRM._rk_kernel_stan_sub), (:(-(xs...)), BRM._rk_kernel_stan_sub),
-            (:((-).(a, b)), BRM._rk_kernel_stan_sub))
-        bound, callables = bind(ex)
+    # Binary calls are the program's documented kernels, folded left over more
+    # operands; nothing is bound.
+    defs = Expr[]
+    @test bind(:(a + b); defs) == (:(stan_add(a, b)), [])
+    @test bind(:(a - b - c); defs) == (:(stan_sub(stan_sub(a, b), c)), [])
+    @test bind(:(a + b + c); defs) == (:(stan_add(stan_add(a, b), c)), [])
+    @test bind(:(x[i - 1] + 1); defs) == (:(stan_add(x[i - 1], 1)), [])
+    @test length(defs) == 2
+    @test all(d -> Meta.isexpr(d, :macrocall) && occursin("Stan's", string(d.args[3])), defs)
+    # A splatted operand list, whose count emitting cannot know, and a call
+    # emitted without the program's definitions bind the helper.
+    for (ex, callable, kw) in ((:(-(xs...)), BRM._rk_kernel_stan_sub, (; defs=Expr[])),
+            (:(a + b), BRM._rk_kernel_stan_add, (;)), (:(a - b), BRM._rk_kernel_stan_sub, (;)))
+        bound, callables = bind(ex; kw...)
         @test callables == [callable]
         @test bound != ex
     end
     @test BRM._rk_kernel_stan_sub(1.0, [2.0, 3.0]) == [-1.0, -2.0]
     @test BRM._rk_kernel_stan_sub([1.0]...) == -1.0
+end
+
+module StanArithmeticScope
+using BayesianRegressionModels, Distributions
+function build(data)
+    @brm data begin
+        a ~ Normal(0, 1)
+        c ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        @plate for i in eachindex(t)
+            m = a + t[i] .* exp(c) + 0.5
+            d = m - a
+            w = d - t[i]
+            loc = w + 0.01 * sum(t[i] * t[i]' * t[i])
+            y[i] ~ normal(loc, sigma)
+        end
+    end
+end
+end
+
+@stestset "a cell's Stan + and - are kernels RK splices: scalar with array, Julia otherwise" begin
+    data = (; t=[[0.5, 1.0, 1.5], [2.0], [0.25, 0.75]],
+        y=[[0.1, -0.2, 0.3], [0.4], [-0.1, 0.2]])
+    brmi = StanArithmeticScope.build(data)
+    program = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    main = sprint(Base.show_unquoted, program.main)
+    # Scalar with array (`a + v + 0.5`, `m - a`, `w + …`) and array with
+    # array (`d - t[i]`) each call the program's kernel; no helper is bound.
+    @test occursin("m = stan_add(stan_add(a, t[i] .* exp(c)), 0.5)", main)
+    @test occursin("w = stan_sub(d, t[i])", main)
+    @test !occursin("_rk_kernel_stan", main)
+    @test count(d -> occursin("@kernel", string(d)), program.defs) >= 2
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    ia, ic, is = (coordinate(names, n) for n in (:a, :c, :sigma))
+    oracle(u) = begin
+        a, c, sigma = u[ia], u[ic], exp(u[is])
+        cells = map(zip(data.t, data.y)) do (t, y)
+            m = a .+ t .* exp(c) .+ 0.5
+            loc = (m .- a .- t) .+ 0.01 * sum(t * t' * t)
+            sum(logpdf.(Normal.(loc, sigma), y))
+        end
+        logpdf(Normal(), a) + logpdf(Normal(), c) + logpdf(Exponential(), sigma) + u[is] +
+            sum(cells)
+    end
+    for u in ([0.0, 0.0, 0.0], [0.3, -0.2, 0.1], [-0.4, 0.25, -0.3])
+        check_consumer_point(problem, u[[findfirst(==(n), (:a, :c, :sigma))
+            for n in names]], oracle)
+    end
 end
 
 module DottedCellScope

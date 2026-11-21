@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, DifferentiationInterface, SequentialMonteCarlo, WarmupHMC
 using Random, Serialization

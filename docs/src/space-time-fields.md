@@ -8,6 +8,7 @@ and the predictions you need.
 | :--- | :--- | :--- |
 | Areas with known neighbors | `car(area; edges=(from,to), type=:bym2)` | Graph field plus independent area effects |
 | Smooth continuous coordinates | `hsgp(east,north; k=(kx,ky))` | Fixed Hilbert basis with `kx*ky` weights |
+| Points without a time axis | `gmrf((east,north); mesh=...)` | Triangular-mesh Matérn field |
 | Points evolving over time | `gmrf((east,north),time; mesh=...)` | Triangular-mesh Matérn field with OU evolution |
 | Sparse irregular position–time reads | `gmrf((east,north),time; neighbors=m)` | Local Gaussian conditionals on the observed states |
 | Irregular reads needing exact OU time covariance | `gmrf((east,north),time; multiresolution=m)` | Sparse spatial basis of shared OU paths |
@@ -113,6 +114,34 @@ All three default to `LogNormal(0,1)`. Finite-mesh marginal variances depend
 on boundary and resolution, so its SD is a continuum parameter, not a
 promise of identical vertex variances. The normalized field density includes
 the hyperparameter-dependent determinants.
+
+## Matérn space without time
+
+Leave out the time column for a purely spatial field, as in an SPDE model
+of a single survey. The field has one state per mesh vertex, an SD and a
+spatial length, and no temporal length, channels or `cor`. A
+`length_scale` address needs no `space` component, since the field has
+only one length.
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:SpatialMeshGuide), raw"""
+model = (@brm begin
+    mu ~ 1 + gmrf((east, north); mesh=(vertices=xy, cells=triangles))
+    y ~ Normal(mu, 0.2)
+
+    sd(mu, gmrf((east, north))) ~ Exponential(0.7)
+    length_scale(mu, gmrf((east, north))) ~ LogNormal(log(0.4), 0.4)
+end)((; east=[0.1, 0.9, 0.7, 0.3, 0.55], north=[0.2, 0.4, 0.8, 0.5, 0.35],
+    y=[0.4, -0.3, 0.2, 0.1, -0.2],
+    xy=[0. 0.; 1. 0.; 1. 1.; 0. 1.; 0.5 0.5],
+    triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5]))
+""", :model; title="A Matérn field on a mesh, without time", require_stan=true)
+```
+
+The law is the space-time field's on a single time, where the OU factor
+plays no part. `neighbors=m` and `multiresolution=m` work without time as
+well, and embedded Laplace integrates the mesh form.
 
 ## Representation and prediction
 

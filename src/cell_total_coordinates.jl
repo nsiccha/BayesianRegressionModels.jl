@@ -43,6 +43,7 @@ _brm_desugar_cell_body(x) = Meta.isexpr(x, :block) ?
     Expr(:block, map(_brm_desugar_cell_statement, x.args)...) : _brm_desugar_cell_statement(x)
 
 function _brm_desugar_cell_statement(x)
+    _brm_is_cell_dirichlet(x) && return _brm_desugar_cell_dirichlet(x)
     Meta.isexpr(x, :call, 3) && x.args[1] === :~ && Meta.isexpr(x.args[2], :(::), 2) ||
         return x
     name, type = x.args[2].args
@@ -62,6 +63,57 @@ function _brm_desugar_cell_statement(x)
     Expr(:call, :~, name, Expr(:call, law.args...,
         Expr(:kw, :_brm_bijection, QuoteNode(bijection)), Expr(:kw, :_brm_total, type.args[2])))
 end
+
+# ---- A simplex per cell: `theta ~ Dirichlet(K, a)` ---------------------------
+#
+# In a `@plate` cell, `theta ~ Dirichlet(K, a)` or `theta ~ Dirichlet(alpha)` on
+# a bare name declares a simplex latent of the cell (snag
+# `mixed-membership-1a1930a6`, design decision `0b9jgl5`): one draw of the
+# Dirichlet per cell, the rows of a per-unit membership matrix. It is sampled
+# in the coordinates and through the map of `shares(total)` above with the
+# total 1, `theta = softmax(sum_to_zero_constrain(y))` with `K - 1` coordinates
+# `y` (the transform Stan's own `simplex[K]` uses), and its density is the
+# Dirichlet's at `theta` plus the map's `sum(log.(theta))`. A bare name in a
+# plate cell is never data (an observation reads `y[i]`), so the statement is
+# rewritten here into the internal law keywords `_brm_bijection = :simplex,
+# _brm_total = 1.0`; the backends, the descriptor, `brm_start` and the
+# coordinate transport then read it as a latent through a bijection, one
+# carrier `theta_coordinates` per cell on SBBRMI and one joint draw per cell on
+# RKBRMI.
+_brm_is_dirichlet_head(h) = h === :Dirichlet || h === Dirichlet ||
+    (Meta.isexpr(h, :., 2) && h.args[2] == QuoteNode(:Dirichlet))
+_brm_is_cell_dirichlet(x) = Meta.isexpr(x, :call, 3) && x.args[1] === :~ &&
+    x.args[2] isa Symbol && Meta.isexpr(x.args[3], :call) &&
+    _brm_is_dirichlet_head(x.args[3].args[1])
+
+function _brm_desugar_cell_dirichlet(x)
+    name, law = x.args[2], x.args[3]
+    arguments = law.args[2:end]
+    any(a -> Meta.isexpr(a, (:parameters, :kw)), arguments) && error(
+        "@brm: cell latent `$name ~ $law`: `Dirichlet` takes positional arguments, " *
+        "`Dirichlet(K, a)` (K entries, concentration a) or `Dirichlet(alpha)`")
+    length(arguments) in (1, 2) || error(
+        "@brm: cell latent `$name ~ $law`: `Dirichlet` takes `(K, a)` or `(alpha)`; " *
+        "got $(length(arguments)) arguments")
+    Expr(:call, :~, name, Expr(:call, law.args...,
+        Expr(:kw, :_brm_bijection, QuoteNode(:simplex)), Expr(:kw, :_brm_total, 1.0)))
+end
+
+# The law a cell latent through `bijection` admits: `shares` a positive
+# univariate family, `simplex` the Dirichlet.
+_brm_check_cell_bijection_family(bijection::Symbol, family, lhs) =
+    _brm_check_cell_bijection_family(Val(bijection), family, lhs)
+_brm_check_cell_bijection_family(::Val{:shares}, family, lhs) =
+    _brm_check_shares_family(family, lhs)
+function _brm_check_cell_bijection_family(::Val{:simplex}, family, lhs)
+    family === Dirichlet || error(
+        "@brm: internal: simplex cell latent `$lhs` has the law `$family`, not `Dirichlet`")
+    nothing
+end
+
+# The authored spelling of a latent through `bijection`, for messages.
+_brm_cell_bijection_shown(lhs, bijection) =
+    bijection === :simplex ? "$lhs ~ Dirichlet(…)" : "$lhs::$bijection(…) ~ …"
 
 # The bijection a law carries, its total and the law without them; `nothing`
 # for a law without one.
@@ -206,6 +258,7 @@ function _sb_cell_total_coordinates(x, scope)
     lhs = x.args[2]
     lhs isa Symbol || error(
         "@brm: internal: a `shares` latent `$lhs` is not a bare cell name")
+    spec.bijection === :simplex && return _sb_cell_simplex_coordinates(lhs, spec, scope)
     bounded = _brm_cell_lower_parts(spec.law, scope)
     bounded === nothing || return _sb_lower_cell_coordinates(lhs, spec, bounded, scope)
     _brm_check_shares_family(_sb_cell_binding(scope, first(spec.law.args)), lhs)
@@ -221,6 +274,36 @@ function _sb_cell_total_coordinates(x, scope)
         Expr(:(=), lhs, Expr(:call, brm_shares_values, coordinates, total))]
 end
 
+# `theta ~ Dirichlet(K, a)` (or `Dirichlet(alpha)`) in a cell becomes
+#
+#     theta_coordinates ~ brm_cell_dirichlet(rep_vector(a, K))
+#     theta = brm_shares_values(theta_coordinates, 1.0)
+function _sb_cell_simplex_coordinates(lhs, spec, scope)
+    _brm_check_cell_bijection_family(:simplex, _sb_cell_binding(scope, first(spec.law.args)), lhs)
+    arguments = Any[_sb_cell_value(a, scope) for a in spec.law.args[2:end]]
+    alpha = length(arguments) == 2 ?
+        Expr(:call, :rep_vector, arguments[2], arguments[1]) : only(arguments)
+    coordinates = _brm_total_coordinates_name(lhs)
+    Any[Expr(:call, :~, coordinates, Expr(:call, brm_cell_dirichlet, alpha)),
+        Expr(:(=), lhs, Expr(:call, brm_shares_values, coordinates, 1.0))]
+end
+
+StanBlocks.@deffun begin
+    # The density of a simplex cell latent's coordinates: the Dirichlet at
+    # `theta = softmax(sum_to_zero_constrain(y))` plus `sum(log(theta))`.
+    @lpxf brm_cell_dirichlet_lpdf(y::vector[m], alpha::vector[n])::real = begin
+        eta = brm_shares_log_values(y, 1.0)
+        dirichlet_lpdf(exp(eta), alpha) + sum(eta)
+    end
+    brm_cell_dirichlet_lpdfs(y::vector[m], alpha::vector[n])::vector[m] =
+        rep_vector(brm_cell_dirichlet_lpdf(y, alpha) / max(m, 1), m)
+    # A draw: the coordinates of a Dirichlet draw.
+    brm_cell_dirichlet_rng(alpha::vector[n])::vector[n - 1] = begin
+        eta = log(dirichlet_rng(alpha))
+        sum_to_zero_unconstrain(eta - mean(eta))
+    end
+end
+
 # The cell latents a kernel body samples through a bijection, name =>
 # bijection. Shared by the backends' checks, the descriptor and `brm_start`.
 function _brm_cell_total_latents(body_stmts, scope; lower_bounded_only=false)
@@ -234,7 +317,8 @@ function _brm_cell_total_latents(body_stmts, scope; lower_bounded_only=false)
         bounded = _brm_cell_lower_parts(spec.law, scope)
         lower_bounded_only && bounded === nothing && continue
         bounded === nothing ?
-            _brm_check_shares_family(_sb_cell_binding(scope, first(spec.law.args)), lhs) :
+            _brm_check_cell_bijection_family(spec.bijection,
+                _sb_cell_binding(scope, first(spec.law.args)), lhs) :
             _brm_lower_floor(_sb_cell_binding(scope, first(bounded.base.args)))
         found[lhs] = spec.bijection
     end
@@ -245,11 +329,14 @@ end
 # cell and no `=` binding of it.
 function _brm_check_cell_total_latents(body_stmts, params, scope; prefix="@brm")
     for (lhs, bijection) in _brm_cell_total_latents(body_stmts, scope)
+        shown = _brm_cell_bijection_shown(lhs, bijection)
         lhs in params && error(
-            "$prefix: `$lhs::$bijection(…) ~ …` observes the cell's input `$lhs`; a " *
-            "typed left-hand side declares a latent of the cell")
+            "$prefix: `$shown` observes the cell's input `$lhs`; " *
+            (bijection === :simplex ? "observe it as `$lhs[i] ~ …`, or name the latent " *
+                "something the cell does not read as an input" :
+                "a typed left-hand side declares a latent of the cell"))
         any(s -> Meta.isexpr(s, :(=)) && first(s.args) === lhs, body_stmts) && error(
-            "$prefix: `$lhs::$bijection(…) ~ …` needs a name no `=` in the cell binds")
+            "$prefix: `$shown` needs a name no `=` in the cell binds")
     end
 end
 
@@ -281,17 +368,21 @@ end
 function _brm_total_start_target(t, bijection, d)
     coordinates = _brm_total_coordinates_name(t.name)
     isempty(brm_outputs(d; logical=coordinates)) && error(
-        "brm_start: cell latent `$(t.name)::$bijection(…)` has no sampled coordinates " *
+        "brm_start: cell latent `$(_brm_cell_bijection_shown(t.name, bijection))` has no sampled coordinates " *
         "`$coordinates` in this model")
     values = _brm_start_flat_values(t.name, brm_output(d, t.name), t.value)
     any(<=(0), values) && error(
-        "brm_start: cell latent `$(t.name)::$bijection(…)` is positive; its start needs positive values")
-    ends = something(brm_output(d, t.name).segments, [length(values)])
+        "brm_start: cell latent `$(_brm_cell_bijection_shown(t.name, bijection))` is positive; its start needs positive values")
+    output = brm_output(d, t.name)
+    # Cells of one length are the columns of a `matrix[K, cells]`.
+    ends = output.segments !== nothing ? output.segments :
+        output.dims isa Tuple && length(output.dims) == 2 ?
+            collect(output.dims[1]:output.dims[1]:prod(output.dims)) : [length(values)]
     starts = [1; ends[1:end-1] .+ 1]
     coords = reduce(vcat, (_brm_shares_coordinates(values[a:b])
         for (a, b) in zip(starts, ends)); init=Float64[])
     all(isfinite, coords) || error(
-        "brm_start: cell latent `$(t.name)::$bijection(…)`'s values have no finite coordinates")
+        "brm_start: cell latent `$(_brm_cell_bijection_shown(t.name, bijection))`'s values have no finite coordinates")
     merge(t, (; name=coordinates, value=coords))
 end
 
@@ -307,6 +398,35 @@ struct _BRMShares{F,A<:Tuple}
 end
 (::Type{_BRMShares{F}})(n::Integer, total::Real, args...) where {F} =
     _BRMShares{F,typeof(args)}(args)
+
+# A simplex per cell, `theta ~ Dirichlet(K, a)` or `Dirichlet(alpha)`: RKBRMI
+# declares `name[i] ~ _BRMCellDirichlet(K, 1.0, args…)`, the joint latent of
+# `shares` with the total 1 (`K` the latent's length, `args` the authored law's
+# arguments); the ReactiveKernels extension gives it the same geometry and the
+# Dirichlet density.
+struct _BRMCellDirichlet{A<:Tuple}
+    args::A
+end
+_BRMCellDirichlet(n::Real, total::Real, args...) = _BRMCellDirichlet{typeof(args)}(args)
+
+# The Dirichlet's log density at the simplex `w`, with the concentration of
+# `Dirichlet(K, a)` (every entry `a`; `K` is the simplex's length) or of
+# `Dirichlet(alpha)`.
+@inline function _brm_cell_dirichlet_logpdf(w, K::Real, a::Real)
+    n = length(w)
+    n == K || _brm_cell_dirichlet_length_error(K, n)
+    SpecialFunctions.loggamma(n * a) - n * SpecialFunctions.loggamma(a) + (a - 1) * sum(log, w)
+end
+@inline function _brm_cell_dirichlet_logpdf(w, alpha::AbstractVector)
+    length(alpha) == length(w) || _brm_cell_dirichlet_length_error(length(alpha), length(w))
+    total = SpecialFunctions.loggamma(sum(alpha))
+    for k in eachindex(w, alpha)
+        total += (alpha[k] - 1) * log(w[k]) - SpecialFunctions.loggamma(alpha[k])
+    end
+    total
+end
+@noinline _brm_cell_dirichlet_length_error(K, n) = throw(DimensionMismatch(
+    "a `Dirichlet` cell latent has $n entries in this cell; its concentration has $K"))
 
 # The law's arguments at entry `k` (a number is every entry's), and the check
 # that its array arguments have the latent's length.

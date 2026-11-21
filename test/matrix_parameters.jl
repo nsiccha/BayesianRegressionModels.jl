@@ -134,6 +134,50 @@ end
     @test ReactiveKernelsPPL.coordinate_names(rk.model.layout) == Symbol.(["p.1", "p.2", "p.3"])
 end
 
+@stestset "Dirichlet(K, a) slices with K and a data fields, or a sampled a" begin
+    # Snag `mixed-membership-1a1930a6`: with both the dimension and the
+    # concentration read from the data, SBBRMI refused the declaration as
+    # "Dirichlet dimension ... must be a positive integer" while RKBRMI took it.
+    data_alpha = @brm begin
+        @plate for s in eachindex(y)
+            y[s] ~ Normal(G[1, 2] + 2 * G[2, 3], 0.5)
+        end
+        eachrow(G[1:m, 1:L]) .~ Dirichlet(L, a)
+    end
+    data = (; DATA..., a=2.0)
+    stan = consumer_stan(data_alpha(data), "matrix_rows_data_alpha")
+    @test BridgeStan.param_unc_num(stan.model) == 2 * 2
+    rk = RKBRMI(data_alpha(data))
+    problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in points(4)
+        G = stan_matrix(stan_values(stan, u), "G", 2, 3)
+        @test BridgeStan.log_density(stan.model, u; propto=false, jacobian=false) ≈
+            sum(logpdf(Dirichlet(3, 2.0), collect(p)) for p in eachrow(G)) +
+            sum(logpdf(Normal(G[1, 2] + 2 * G[2, 3], 0.5), v) for y in DATA.y for v in y) atol=1e-10
+        # RK's simplex coordinates are not Stan's, so compare laws, not points:
+        # RK restores simplex rows and its density is finite there.
+        @test all(p -> sum(p) ≈ 1 && all(>=(0), p), eachrow(rk_matrix(rk, u, :G)))
+        @test isfinite(LogDensityProblems.logdensity(problem, u))
+    end
+    # A concentration the model samples keeps the data dimension.
+    sampled_alpha = @brm begin
+        @plate for s in eachindex(y)
+            y[s] ~ Normal(G[1, 2] + 2 * G[2, 3], 0.5)
+        end
+        c ~ LogNormal(0.0, 1.0)
+        eachrow(G[1:m, 1:L]) .~ Dirichlet(L, c)
+    end
+    stan = consumer_stan(sampled_alpha(DATA), "matrix_rows_sampled_alpha")
+    @test BridgeStan.param_unc_num(stan.model) == 1 + 2 * 2
+    u = collect(range(-0.4, 0.4; length=5))
+    values = stan_values(stan, u)
+    G = stan_matrix(values, "G", 2, 3)
+    @test BridgeStan.log_density(stan.model, u; propto=false, jacobian=false) ≈
+        logpdf(LogNormal(0.0, 1.0), values["c"]) +
+        sum(logpdf(Dirichlet(3, values["c"]), collect(p)) for p in eachrow(G)) +
+        sum(logpdf(Normal(G[1, 2] + 2 * G[2, 3], 0.5), v) for y in DATA.y for v in y) atol=1e-10
+end
+
 @stestset "malformed matrix declarations are refused" begin
     @test_throws "a declared index range must be `1:n`" BRM.brm(:(begin
         @plate for s in eachindex(y)

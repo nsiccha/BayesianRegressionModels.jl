@@ -673,10 +673,11 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering; field_pass=cent
         end
     end
     # Field coordinates without a learned frame. Grouped HSGPs whose levels
-    # coincide with units are handled above.
+    # coincide with units are handled above. An `rw` walk is shared by the units
+    # and its increments' scales are computed inside its kernel.
     globals = Set(t.globals)
     for record in _brm_nlme_records(m.backend.plan)
-        record.kind in (:hsgp, :gmrf_footprint, :car, :cdar) || continue
+        record.kind in (:hsgp, :gmrf_footprint, :car, :cdar, :rw) || continue
         if record.kind === :hsgp
             weights = Symbol(record.declaration, ".",
                 record.grouped ? record.locals.weights : :beta_raw)
@@ -698,6 +699,9 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering; field_pass=cent
         elseif record.kind === :car
             "the structured CAR prior specifies edge differences and component sums, " *
                 "so SVI holds the field in its sampled coordinates"
+        elseif record.kind === :rw
+            "a random walk's increments have scales computed inside its kernel, " *
+                "not read as graph values"
         else
             "the CDAR walk uses its sampled innovation parameterization"
         end

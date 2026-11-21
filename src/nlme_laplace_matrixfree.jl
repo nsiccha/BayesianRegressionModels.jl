@@ -180,26 +180,8 @@ struct _BRMOperatorSolveFailure <: Exception
 end
 Base.showerror(io::IO, e::_BRMOperatorSolveFailure) = print(io, e.message)
 
-function _brm_checked_cg(H, b, options; M=I, rtol=options.solve_tolerance / 10,
-        diagnostics=nothing)
-    iszero(norm(b)) && return zeros(length(b))
-    x, info = Krylov.cg_lanczos(H, collect(b); M,
-        check_curvature=true, rtol,
-        atol=0.0, itmax=options.solve_maxiter)
-    residual = norm(H(x) .- b) / norm(b)
-    if diagnostics !== nothing
-        old = get(diagnostics, :linear_solves, (; attempts=0, max_iterations=0,
-            max_relative_residual=0.0))
-        diagnostics[:linear_solves] = (; attempts=old.attempts + 1,
-            max_iterations=max(old.max_iterations, info.niter),
-            max_relative_residual=max(old.max_relative_residual, residual))
-    end
-    info.solved && info.niter <= options.solve_maxiter &&
-        residual <= options.solve_tolerance ||
-        throw(_BRMOperatorSolveFailure("conditional solve failed within " *
-            "$(options.solve_maxiter) iterations (used $(info.niter), relative residual $residual; $(info.status))"))
-    x
-end
+_brm_checked_cg(H, b, options; M=I, rtol=options.solve_tolerance / 10, diagnostics=nothing) =
+    _brm_krylov_checked_cg(H, b, options; M, rtol, diagnostics)
 function _brm_operator_solve(H::_BRMConditionalOperator, b, options; diagnostics=nothing)
     d = H.diagonal .+ H.shift
     all(>(0), d) || throw(_BRMOperatorSolveFailure("nonpositive conditional curvature diagonal"))
@@ -322,54 +304,20 @@ _brm_log_divided_difference(a, b) = a == b ? 1 / a : log1p((a - b) / b) / (a - b
 # `A x = r` it implies reaches `rtol`, at `maxiter` iterations, or at nonpositive
 # curvature in its directions. That solve's residual is β_k |e_k' T_k⁻¹ e₁|, read
 # from T_k = L D L' as T grows, whose pivots also check the curvature.
-function _brm_lanczos_run(operator, r, rtol, maxiter)
-    iterator = KrylovKit.LanczosIterator(operator, collect(r), KrylovKit.ModifiedGramSchmidt())
-    state = KrylovKit.initialize(iterator; verbosity=0)
-    pivot = first(state.αs)
-    last_entry = 1.0
-    while true
-        k = length(state)
-        pivot > 0 && isfinite(pivot) || return (; state, residual=Inf, curved=false)
-        β = KrylovKit.normres(state)
-        residual = β * abs(last_entry) / pivot
-        (residual <= rtol || k >= maxiter) && return (; state, residual, curved=true)
-        KrylovKit.expand!(iterator, state; verbosity=0)
-        last_entry *= -β / pivot
-        pivot = state.αs[k + 1] - β^2 / pivot
-    end
-end
+_brm_lanczos_run(operator, r, rtol, maxiter) =
+    _brm_krylovkit_lanczos_run(operator, r, rtol, maxiter)
 
-function _brm_lanczos(operator, r, options)
-    (; state, residual, curved) = _brm_lanczos_run(operator, r, options.solve_tolerance / 10,
-        options.solve_maxiter)
-    curved || throw(_BRMOperatorSolveFailure("conditional determinant recurrence found " *
-        "nonpositive curvature at iteration $(length(state))"))
-    residual <= options.solve_tolerance / 10 || throw(_BRMOperatorSolveFailure("conditional " *
-        "determinant recurrence failed within $(options.solve_maxiter) iterations: residual $residual"))
-    state
-end
+_brm_lanczos(operator, r, options) =
+    _brm_krylovkit_lanczos(operator, r, options)
 
 # `r' log(A) r` on r's Krylov space, the residual of the solve that recurrence
 # implies, and the factorization G = P Γ P' (scaled by ‖r‖²) of the sensitivity
 # ‖r‖² V G V', with `V G V'` the sensitivity of `e₁' log(T) e₁` to a change of A
 # (Daleckii–Krein: G = Q [log[θᵢ,θⱼ] cᵢ cⱼ] Q', T = Q Θ Q', c = Q'e₁).
-function _brm_lanczos_log(state, r)
-    T = KrylovKit.rayleighquotient(state)
-    k = length(state)
-    E = eigen(Symmetric(Matrix(T)))
-    θ, Q = E.values, E.vectors
-    all(>(0), θ) || throw(_BRMOperatorSolveFailure(
-        "conditional determinant recurrence found nonpositive curvature: smallest Ritz value $(first(θ))"))
-    c = view(Q, 1, :)
-    scale = dot(r, r)
-    value = scale * sum(i -> c[i]^2 * log(θ[i]), 1:k)
-    G = Q * [_brm_log_divided_difference(θ[i], θ[j]) * c[i] * c[j] for i in 1:k, j in 1:k] * Q'
-    Γ = eigen(Symmetric(G))
-    keep = _brm_lanczos_rank(Γ.values)
-    start = zeros(k); start[1] = sqrt(scale)
-    (; value, ritz=(first(θ), last(θ)), weights=scale .* Γ.values[keep],
-        directions=Γ.vectors[:, keep], solve=T \ start)
-end
+# One probe of `_brm_operator_logdet!`: the recurrence's basis as a vector of
+# vectors, the quantities above (`log_r`) and its iteration count.
+_brm_lanczos_probe(operator, r, options) =
+    _brm_krylovkit_lanczos_probe(operator, r, options)
 
 # Which eigenvalues of G to keep: the largest, down to a tail of a negligible
 # share of the trace. Rounding's tiny negative eigenvalues are never kept.
@@ -474,16 +422,14 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
             _BRMPreconditionedOperator(tracked, operator.reference)
         tracked_iterations = 0
         for (q, r) in enumerate(eachcol(part.probes))
-            state = _brm_lanczos(operator, r, options)
-            V = KrylovKit.basis(state)
-            log_r = _brm_lanczos_log(state, r)
+            (; V, log_r, iterations) = _brm_lanczos_probe(operator, r, options)
             _brm_lanczos_combine!(solve, V, log_r.solve)
             residual = norm(operator(solve) .- r) / norm(r)
             residual <= options.solve_tolerance || throw(_BRMOperatorSolveFailure(
                 "conditional determinant recurrence has solve residual $residual, " *
                 "exceeding $(options.solve_tolerance)"))
             max_residual = max(max_residual, residual)
-            max_iterations = max(max_iterations, length(state))
+            max_iterations = max(max_iterations, iterations)
             max_rank = max(max_rank, length(log_r.weights))
             smallest = min(smallest, first(log_r.ritz)); largest = max(largest, last(log_r.ritz))
             estimates[q] = log_r.value
@@ -497,11 +443,10 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
                 end
             end
             tracked === nothing && continue
-            state_m = _brm_lanczos(tracked_operator, r, options)
-            V_m = KrylovKit.basis(state_m)
-            log_m = _brm_lanczos_log(state_m, r)
+            probe_m = _brm_lanczos_probe(tracked_operator, r, options)
+            V_m, log_m = probe_m.V, probe_m.log_r
             estimates[q] -= log_m.value
-            tracked_iterations = max(tracked_iterations, length(state_m))
+            tracked_iterations = max(tracked_iterations, probe_m.iterations)
             for (k, weight) in enumerate(log_m.weights)
                 _brm_lanczos_combine!(direction, V_m, view(log_m.directions, :, k))
                 _brm_to_physical!(physical, tracked_operator, direction)

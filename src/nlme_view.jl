@@ -19,7 +19,8 @@ include("nlme_selection.jl")
     BRMNLMEViewError <: Exception
 
 A model that has no nonlinear-mixed-effects reading in [`brm_nlme_view`](@ref):
-no subject-level random effects, a grouping named in neither `nested_groups`
+no subject-level random effects and no `subject_group` column to read the units
+from, a grouping named in neither `nested_groups`
 nor `shared_groups`, a unit-owned grouping that couples its levels
 (`gr(...; cor=...)`), an `mm(...)` block, a unit-owned Student-t block that holds
 known values, or a coordinate the semantic inventory does not cover. A stratified
@@ -660,7 +661,12 @@ draws, scales, correlation factor and Student-t mixing weights, for any block
 form) is a `:shared_latent`, and so is a grouped `hsgp(x; by = g)` or a
 `cdar(step; by = g)` walk with `g` in `shared_groups`.
 `nested_groups` may also name the `by` grouping of a `cdar` or grouped `hsgp`
-term that no random effect uses, so that its levels are units. A
+term that no random effect uses, so that its levels are units. A model with
+no random-effect block owned by its units takes them from `subject_group`, a
+grouping column the model reads, such as the `g` of a `@plate for p in
+groups(g)`: each unit then holds the draws of the terms grouped by `g` (a
+grouped `hsgp(x; by = g)`), or none, its cells' latents being shared latents
+that [`brm_svi_fit`](@ref) gives to it. A
 random-effect block declared inside a function-style component call
 (`kin ~ f(subject)`, with `(1 | pk | subject)` in `f`'s body) is read as the
 same block at model scope over the column the call passes for the grouping
@@ -712,7 +718,8 @@ does not expand the coordinate inventory or remove the structural refusals
 below.
 
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
-no random effects over the subjects, a grouping named in neither
+no random effects over the subjects and no `subject_group`, or a
+`subject_group` that is no column the model reads, a grouping named in neither
 `nested_groups` nor `shared_groups` (the message names it), a subject-owned
 grouping that couples its levels, a subject-owned Student-t block that holds
 known values, a `car(...)` field lowered with `car_units`
@@ -886,10 +893,13 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     # others are owned by the subjects.
     ranefs = [r for r in records if r.kind in (:ranef, :stratified_ranef) &&
         r.group ∉ shared_groups]
-    isempty(ranefs) && _brm_nlme_error(
-        "brm_nlme_view: the model has no subject-level random effects; an NLME " *
-        "reading needs at least one `(... | group)` block" *
-        (isempty(shared_groups) ? "" : " over a grouping not in `shared_groups`"))
+    # Without a block owned by the units, `subject_group` names them (below).
+    isempty(ranefs) && subject_group === nothing && _brm_nlme_error(
+        "brm_nlme_view: the model has no subject-level random effects" *
+        (isempty(shared_groups) ? "" : " over a grouping not in `shared_groups`") *
+        ", so nothing names its units. Add a `(... | group)` block, or pass " *
+        "`subject_group = :g`, the grouping column whose levels are the units, " *
+        "such as the `g` of a `@plate for p in groups(g)`")
     # Known values are read by the blocks' families below; only a Student-t
     # block's mixing weights keep it out.
     for r in ranefs
@@ -909,7 +919,25 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             "or fit it with the Stan or RK sampler.")
     end
     groups = unique(r.group for r in ranefs)
-    if length(groups) == 1
+    if isempty(groups)
+        # No random-effect block is the units' own: their levels are those of
+        # `subject_group`, a grouping column of the model, such as the one a
+        # `@plate for p in groups(g)` iterates. A unit then holds the draws of
+        # the terms grouped by it (a grouped `hsgp(x; by = g)`), or none: its
+        # cells' latents are shared latents that SVI gives to it
+        # (`_brm_svi_ownership`), and attribution reads each observation's unit
+        # from its rows (snag brm-svi-fit-refu-d79b878a).
+        subject_group isa Symbol || _brm_nlme_error(
+            "brm_nlme_view: subject_group must be a column name (a Symbol), " *
+            "got $(repr(subject_group))")
+        haskey(backend.plan.columns, subject_group) || _brm_nlme_error(
+            "brm_nlme_view: the model has no subject-level random effects, and " *
+            "subject_group `$subject_group` is not a grouping column of the model " *
+            "to read the units from: the backend keeps only the columns the model " *
+            "reads, such as the `g` of a `@plate for p in groups(g)`")
+        group = subject_group
+        _brm_nlme_check_nested_groups(records, group, groups, nested_groups, shared_groups)
+    elseif length(groups) == 1
         group = only(groups)
         subject_group === nothing || subject_group === group || _brm_nlme_error(
             "brm_nlme_view: subject_group `$subject_group` is not `$group`")
@@ -1348,6 +1376,10 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             # An areal field couples its areas through its edges, so the
             # whole field is shared by the subjects, whatever its area column.
             claim_declaration!(record.declaration, :shared_latent)
+        elseif kind === :rw
+            # A single-path walk couples all its steps, so the whole walk is
+            # shared by the subjects, whatever its time column.
+            claim_declaration!(record.declaration, :shared_latent)
         elseif kind === :car
             # A field lowered by its unit border separator
             # (`RKBRMI(brmi; car_units)`): each unit's interior draws, and each
@@ -1364,7 +1396,8 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                     "grouping `$group`; lower it with the subject labels as `car_units`")
             end
             # Each unit's interior draws `<field>.<z_u>.<j>`, then each area's
-            # BYM2 iid part `<field>.<theta>.<area>`.
+            # BYM2 iid part `<field>.<theta>.<area>`, or a scaled ICAR field's
+            # island effects `<field>.<theta>.<island>`, each its island's unit's.
             draws = [(Symbol(record.declaration, ".", z, ".", j), b.label)
                 for (b, z) in zip(separation.blocks, record.locals.z) if z !== nothing
                 for j in 1:b.ndraws]
@@ -1372,6 +1405,10 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             record.type === :bym2 && push!(parts,
                 ([(Symbol(record.declaration, ".", record.locals.theta, ".", k), label)
                     for (k, label) in enumerate(separation.node_units)], :iid))
+            _brm_car_scaled_icar(record) && push!(parts,
+                ([(Symbol(record.declaration, ".", record.locals.theta, ".", j),
+                   separation.node_units[k])
+                    for (j, k) in enumerate(record.island_areas)], :iid))
             for (coordinates, part) in parts
                 isempty(coordinates) && continue
                 family = length(families) + 1
@@ -1410,7 +1447,7 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         "$(join(string.(unclaimed), ", ")). The view reads population " *
         "coefficients, scalars and vectors, random-effect blocks on a plain " *
         "`(... | group)` or stratified `gr(group, by=stratum)` grouping, HSGP " *
-        "terms, `cdar` walks, `car(...)` fields, missing-value completions, " *
+        "terms, `cdar` and `rw` walks, `car(...)` fields, missing-value completions, " *
         "submodels and `@plate` cell latents; other terms, such as `mm(...)` " *
         "blocks, file no coordinate record.")
     labels = map(_brm_transport_level, backend.plan.columns[group])
@@ -2790,8 +2827,10 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
             gaussian ? _brm_run_phase(phases.observations) do _
                 forward_backend = observation_ad_backend === nothing ?
                     _brm_nlme_forward_backend(ad_backend) : observation_ad_backend
+                # Units with no η (a `subject_group` model without a block) have
+                # no direction to push forward.
                 (_rk_observation_query(backend),
-                 forward_backend === nothing ? nothing :
+                 forward_backend === nothing || all(isempty, view.subject_coordinates) ? nothing :
                     _rk_observation_pushforward(backend, view, unit, forward_backend),
                  _brm_nlme_observed(backend, attribution, length(view.levels))...)
             end : (nothing, nothing, Vector{Vector{Float64}}(), Pair{Symbol,Vector{Int}}[])

@@ -25,6 +25,7 @@
 #
 # Run: julia --project=test test/nlme_car_separator.jl [testset-filter...]
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, LinearAlgebra, Random
 include(joinpath(@__DIR__, "nlme_unit_checks.jl"))
@@ -58,6 +59,13 @@ end
 sep_bym2(data) = @brm data begin
     sigma ~ Exponential(1)
     mu ~ 1 + x + (1 | subject) + car(area; edges=(from, to), type=:bym2)
+    y ~ Normal(mu, sigma)
+end
+# The variance-scaled ICAR field (snag brm-car-icar-has-d25d72ec): the island
+# r21's own `theta` is a unit draw of its subject c.
+sep_icar_scaled(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | subject) + car(area; edges=(from, to), type=:icar, scaled=true)
     y ~ Normal(mu, sigma)
 end
 
@@ -314,7 +322,7 @@ end
 end
 
 @stestset "the separated density is the default one at the same field" begin
-    for build in (sep_icar, sep_bym2)
+    for build in (sep_icar, sep_bym2, sep_icar_scaled)
         default = RKBRMI(build(SEP_DATA))
         rk = RKBRMI(build(SEP_DATA); car_units=:subject)
         names, default_names = coordinate_names(rk), coordinate_names(default)
@@ -339,7 +347,7 @@ end
 end
 
 @stestset "only the separator and the interior means are shared" begin
-    for build in (sep_icar, sep_bym2)
+    for build in (sep_icar, sep_bym2, sep_icar_scaled)
         rk = RKBRMI(build(SEP_DATA); car_units=:subject)
         v = brm_nlme_view(rk)
         @test !any(==(:unclaimed), v.role)
@@ -360,6 +368,12 @@ end
             r22 = findfirst(==("r22"), options.nodes)
             @test s.node_units[r22] === nothing
             @test role(Symbol(options.value, ".theta.", r22)) === :shared_latent
+        end
+        if build === sep_icar_scaled
+            # one island, r21, whose `theta` is its subject c's unit draw
+            @test options.island_areas == [findfirst(==("r21"), options.nodes)]
+            c = findfirst(==(Symbol(options.value, ".theta.1")), v.coordinates)
+            @test v.role[c] === :subject_effect && v.levels[v.subject[c]] == "c"
         end
         @test BRM._brm_nlme_ragged(v)
         m = brm_nlme_model(rk; ad_backend=NLME_AD)
@@ -382,7 +396,7 @@ end
 @stestset "car identity geometry exposes strict cell reads" begin
     # Cell queries verify the geometry independently of heterogeneous planned
     # unit partitions (RK snag d227045c). Full unit acceptance remains below.
-    for build in (sep_icar, sep_bym2)
+    for build in (sep_icar, sep_bym2, sep_icar_scaled)
         rk = RKBRMI(build(SEP_DATA); car_units=:subject)
         view = brm_nlme_view(rk)
         bound = rk_bound_plan(rk)
@@ -401,7 +415,7 @@ end
 end
 
 @stestset "strict car partitions preserve shared and unit gradients" begin
-    for build in (sep_icar, sep_bym2)
+    for build in (sep_icar, sep_bym2, sep_icar_scaled)
         rk = RKBRMI(build(SEP_DATA); car_units=:subject)
         m = brm_nlme_model(rk; ad_backend=NLME_AD)
         θ, σ, H = random_point(m, Xoshiro(20261031))
@@ -528,7 +542,7 @@ end
 end
 
 @stestset "a separated field moves through the coordinate transport to Stan's field" begin
-    for build in (sep_icar, sep_bym2)
+    for build in (sep_icar, sep_bym2, sep_icar_scaled)
         brmi = build(SEP_DATA)
         rk = RKBRMI(brmi; car_units=:subject)
         sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())

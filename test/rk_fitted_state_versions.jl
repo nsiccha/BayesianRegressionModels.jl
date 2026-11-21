@@ -31,6 +31,7 @@
 #
 # Run: julia --startup-file=no --project=test test/rk_fitted_state_versions.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, Statistics
 using ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels

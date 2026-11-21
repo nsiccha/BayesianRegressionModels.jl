@@ -10,6 +10,7 @@
 # with the known parameter sampled under an explicit prior, evaluated at the
 # known value: the two log densities (no Jacobian) must differ by exactly that
 # prior's density of the value, at every point.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, LinearAlgebra
 using Distributions: Exponential, Normal, LogNormal, Beta, Dirac, logpdf, truncated
@@ -455,7 +456,7 @@ end
 
 KNOWN_RUNTIME && @stestset "RKBRMI: the same law as SBBRMI" begin
     for (name, known, _, _) in DENSITY_CASES
-        name in ("field", "both", "aniso", "grouped", "periodic", "cdar") || continue
+        name in ("field", "both", "aniso", "grouped", "periodic", "cdar", "rw") || continue
         brmi = known(DF)
         rk, problem = consumer_problem(brmi)
         sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
@@ -491,9 +492,8 @@ KNOWN_RUNTIME && @stestset "RKBRMI: known equals sampled at the known value" beg
     rng = MersenneTwister(5)
     for (name, known, sampled, laws) in DENSITY_CASES
         # Not on RKBRMI before any known value is read: smoothing-scale priors
-        # (`_rk_gate_spline_term_priors!`) and `rw` terms as a whole
-        # (todo `1hq7nm0`).
-        name in ("smooth", "rw") && continue
+        # (`_rk_gate_spline_term_priors!`).
+        name == "smooth" && continue
         twin_builder = name == "dar" ? dar_rk_sampled : sampled
         known_rk, problem = consumer_problem(known(DF))
         twin_rk, twin = consumer_problem(twin_builder(DF))

@@ -9,6 +9,7 @@
 # replay names, also unseen ones, given the fitted levels it keeps. Snag
 # cdar-replay-new-57df8982.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

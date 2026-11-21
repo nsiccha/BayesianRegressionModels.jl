@@ -39,9 +39,11 @@ function _rk_slap_values_and_tangents end
 # An integrated block: its draws' indices in the integrated vector z (levels ×
 # margins), the `omega` entries (scales, correlations, persistence) that move
 # how its draws enter the rows, and its prior precision: the identity
-# (standardized draws) or, for an areal field's draws (one margin), the graph
-# Laplacian of its `edges` (level pairs) plus λ 11ᵀ over each soft-sum
-# component's levels.
+# (standardized draws) or, for a field's draws (one margin), the weighted graph
+# Laplacian of its `edges` (level pairs, `weights[e]` each) plus λ 11ᵀ over each
+# soft-sum component's levels. An areal field's edges weigh 1; a sum-to-zero
+# walk's are the pairs of its difference precision `DᵀD`, whose rows sum to zero,
+# so `xᵀDᵀDx = Σ_e w_e (x_i - x_j)²` with `w_e = -(DᵀD)_ij` (some negative).
 struct _BRMSlapBlock
     declaration::Symbol
     group::Symbol
@@ -53,9 +55,13 @@ struct _BRMSlapBlock
     λ::Vector{Float64}
     # `:gmrf` for a native field, whose structured prior `p.gmrf` holds
     prior::Symbol
+    weights::Vector{Float64}
 end
 _BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ) =
     _BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ, :standard)
+_BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ, prior) =
+    _BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ, prior,
+        ones(size(edges, 2)))
 _brm_spl_identity(b::_BRMSlapBlock) = b.prior === :standard && isempty(b.sums) &&
     size(b.edges, 2) == 0
 
@@ -124,6 +130,13 @@ mutable struct BRMSparseLaplaceProblem{K}
     rentry::Vector{Int}
     coff::Vector{Int}
     block_reads::Vector{Vector{Int}}
+    # Blocks whose C is the same at every population point (`cfixed`, checked
+    # in `_brm_spl_design!`: no coordinate of their own and none of another's
+    # moves it, as for a formula coefficient's design column), and their C
+    # entries (`C0`, C's layout, zero elsewhere), which `_brm_spl_cmaps` then
+    # copies instead of probing the model once per such block.
+    cfixed::Vector{Bool}
+    C0::Vector{Float64}
     # Each term's effects (`tz[tptr[t]:tptr[t+1]-1]`, ascending), the local
     # position of read r's first effect (`rloc[r]`, its K effects consecutive
     # and in margin order). Pair locations are looked up in the sparse column;
@@ -219,22 +232,77 @@ function _brm_slap_zero_integrated!(u, p::BRMSparseLaplaceProblem)
 end
 
 # The grouping column a latent block is integrated by: a random-effect block's
-# and a `cdar` walk's group, a `car` field's area column.
-_brm_spl_record_group(r) = r.kind === :car ? r.area :
+# and a `cdar` walk's group, a `car` field's area column, an `rw` walk's time
+# column.
+_brm_spl_record_group(r) = r.kind === :car ? r.area : r.kind === :rw ? r.time :
+    r.kind === :population ? :coefficients :
     r.kind in (:vector, :gmrf, :cell_gmrf) ? r.declaration : r.group
 _brm_spl_record_declaration(r) =
-    r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) : r.declaration
-const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector, :gmrf, :cell_gmrf)
+    r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) :
+    r.kind === :population ? _brm_spl_coefficient_name(r) : r.declaration
+const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :rw, :vector, :gmrf,
+    :cell_gmrf)
 
-# The model's latent blocks over the named grouping columns.
+# A formula coefficient's packed coordinate: its declaration, then its index
+# (a scalar coefficient, such as a lone intercept, has no index).
+_brm_spl_coefficient_name(r) =
+    Symbol(join((string(r.declaration), string.(get(r, :index, ()))...), "."))
+
+# A formula coefficient's Normal prior as constant (mean, scale), or `nothing`
+# for any other law or an argument whose value is not a constant number.
+# RKBRMI's coefficient prior arguments are literals, scalar data fields or
+# `name = constant(expr)` values (brm-use priors.md; `v[k]` reaches the record
+# as its literal value), so a name is read once from the backend's bound inputs.
+function _brm_spl_coefficient_prior(backend, r)
+    prior = r.prior
+    (prior isa Expr && prior.head === :call && prior.args[1] === :Normal &&
+        length(prior.args) == 3) || return nothing
+    data = rk_bound_data(backend)
+    value(a) = a isa Symbol ? get(data, a, nothing) : a
+    m, s = value(prior.args[2]), value(prior.args[3])
+    m isa Real && s isa Real || return nothing
+    m, s = Float64(m), Float64(s)
+    isfinite(m) && isfinite(s) && s > 0 ? (m, s) : nothing
+end
+
+# The formula's population coefficients a record holds, one `:population`
+# record each: itself, or each level of a factor block with per-level priors
+# (`effect(lp, g) .~ Normal.(m, s)`, a `:population_block` whose prior
+# arguments hold one value per level or one shared value); none otherwise.
+_brm_spl_coefficient_records(r) = r.kind === :population ? [r] :
+    r.kind === :population_block ? [(; kind=:population, r.declaration, index=(k,),
+        r.predictor, coefficient=label, prior=_brm_spl_level_prior(r.prior, k))
+        for (k, label) in enumerate(r.labels)] : NamedTuple[]
+_brm_spl_coefficient_records(backend::RKBRMI) =
+    [c for r in _rk_coordinate_records(backend) for c in _brm_spl_coefficient_records(r)]
+_brm_spl_level_prior(prior::Expr, k) = Meta.isexpr(prior, :call) ?
+    Expr(:call, prior.args[1], (_brm_spl_level_argument(a, k) for a in prior.args[2:end])...) :
+    prior
+_brm_spl_level_prior(prior, _k) = prior
+_brm_spl_level_argument(a::AbstractVector, k) = a[k]
+_brm_spl_level_argument(a::Expr, k) = Meta.isexpr(a, :vect) ? a.args[k] : a
+_brm_spl_level_argument(a, _k) = a
+
+# The model's latent blocks over the named grouping columns. `:coefficients`
+# names the formula's population coefficients (decision `0r49iwd`): each one
+# with a Normal prior of constant mean and scale is its own integrated block,
+# as INLA keeps fixed effects in the latent Gaussian field.
 function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
-    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT]
+    coefficients = :coefficients in integrate
+    records = [c for r in _rk_coordinate_records(backend) for c in
+        (r.kind in _BRM_SPL_LATENT ? [r] : coefficients ? _brm_spl_coefficient_records(r) : [])]
     available = unique(Symbol[_brm_spl_record_group(r) for r in records])
+    coefficients && any(r -> r.kind !== :population &&
+            _brm_spl_record_group(r) === :coefficients, records) &&
+        _brm_nlme_error("brm_laplace_problem: integrate names `:coefficients`, which " *
+            "here is also a grouping or declaration of the model's latent terms; rename it")
     for g in integrate
         g in available || _brm_nlme_error("brm_laplace_problem: integrate names " *
-            "`$g`, which groups no random-effect block, `cdar` walk or `car` field " *
+            "`$g`, which groups no random-effect block, `cdar` or `rw` walk or `car` field " *
             "and names no declared vector of the model; its groupings and declarations are " *
-            "$(isempty(available) ? "none" : join(repr.(available), ", "))")
+            "$(isempty(available) ? "none" : join(repr.(available), ", "))" *
+            (g === :coefficients ? "; the model has no population coefficient with its " *
+                "own prior to integrate" : ""))
     end
     chosen = [r for r in records if _brm_spl_record_group(r) in integrate &&
         (declarations === nothing || _brm_spl_record_declaration(r) in declarations)]
@@ -253,6 +321,11 @@ function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
             "brm_laplace_problem: the `car($(r.area))` field is lowered with " *
             "`car_units`, whose draws the sparse Laplace does not integrate; build the " *
             "RKBRMI without `car_units` to integrate the field whole")
+        r.kind === :population && _brm_spl_coefficient_prior(backend, r) === nothing &&
+            _brm_nlme_error("brm_laplace_problem: integrate names `:coefficients`, but " *
+                "the coefficient `$(r.coefficient)` of `$(r.predictor)` has the prior " *
+                "`$(r.prior)`; only coefficients with a Normal prior of constant mean and " *
+                "scale are integrated")
     end
     chosen
 end
@@ -270,6 +343,21 @@ function _brm_spl_car_graph(backend::RKBRMI, r)
     edges = permutedims(hcat(Int.(data[options.node1]), Int.(data[options.node2])))
     sums = [collect(start:(start + size - 1)) for (start, size) in options.components]
     (; S=sum(length, sums; init=0), edges, sums, λ=[1 / (0.001 * length(c))^2 for c in sums])
+end
+
+# A sum-to-zero walk's prior over its `n` standardized values: its `order`-th
+# differences `D` are standard normal, so its precision `DᵀD` (rows summing to
+# zero) is the weighted pair form `Σ_e w_e (x_i - x_j)²`, `w_e = -(DᵀD)_ij`:
+# order 1 weighs neighbours 1 (`car`'s path graph); order 2 neighbours by its
+# second-difference stencil and steps two apart by -1.
+function _brm_spl_walk_graph(n::Int, order::Int)
+    D = order == 1 ?
+        spdiagm(n - 1, n, 0 => fill(-1.0, n - 1), 1 => ones(n - 1)) :
+        spdiagm(n - 2, n, 0 => ones(n - 2), 1 => fill(-2.0, n - 2), 2 => ones(n - 2))
+    Q = D' * D
+    pairs = [(i, j) for j in 1:n for i in rowvals(Q)[nzrange(Q, j)] if i < j && Q[i, j] != 0]
+    (; edges=isempty(pairs) ? zeros(Int, 2, 0) : reduce(hcat, collect.(pairs)),
+       weights=[-Q[i, j] for (i, j) in pairs])
 end
 
 # Packed latent layout only; safe before any derivative preparation.
@@ -294,7 +382,7 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         z
     end
     function block!(declaration, group, z, hyper; edges=zeros(Int, 2, 0),
-            sums=Vector{Int}[], λ=Float64[], prior=:standard)
+            sums=Vector{Int}[], λ=Float64[], prior=:standard, weights=ones(size(edges, 2)))
         js = Int[]
         for d in hyper
             # Known scales/correlations have no sampled coordinate declaration.
@@ -306,7 +394,7 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
             end
         end
         push!(blocks, _BRMSlapBlock(declaration, group, size(z, 2), z, unique(js), edges,
-            sums, λ, prior))
+            sums, λ, prior, weights))
     end
     for r in records
         if r.kind === :ranef
@@ -318,6 +406,11 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         elseif r.kind === :vector
             labels = names[owned(r.declaration)]
             block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1)), ())
+        elseif r.kind === :population
+            # One block per coefficient: a likelihood entry reads one level of
+            # a block, and a row reads every coefficient of its predictor.
+            name = _brm_spl_coefficient_name(r)
+            block!(name, :coefficients, draws!(reshape([name], 1, 1)), ())
         elseif r.kind === :gmrf
             # The field's state draws in state order; its SD scales the reads.
             field = Symbol(r.declaration, ".", r.locals.field)
@@ -339,6 +432,26 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
                     draws!(reshape([Symbol(prefix, ".", j) for j in 1:n], :, 1)),
                     (haskey(position, s) ? s : nothing,); prior=:gmrf)
             end
+        elseif r.kind === :rw
+            # A zero-start walk: its standardized innovations, one level of
+            # `n - 1` margins, each row reading the ones up to its step. A
+            # sum-to-zero walk: its standardized values, one per step, under its
+            # difference precision as weighted edges plus `car`'s soft sum.
+            sigma = Symbol(r.declaration, ".", r.locals.sigma)
+            n = length(r.steps)
+            if r.sum_to_zero
+                phi = Symbol(r.declaration, ".", r.locals.phi)
+                walk = _brm_spl_walk_graph(n, r.order)
+                block!(r.declaration, r.time,
+                    draws!(reshape([Symbol(phi, ".", t) for t in 1:n], :, 1)), (sigma,);
+                    walk.edges, walk.weights, sums=[collect(1:n)],
+                    λ=[1 / (0.001 * n)^2])
+            elseif n > 1
+                # (a walk over one step has no innovation to integrate)
+                z = Symbol(r.declaration, ".", r.locals.z)
+                block!(r.declaration, r.time,
+                    draws!(reshape([Symbol(z, ".", k) for k in 1:(n - 1)], 1, :)), (sigma,))
+            end
         elseif r.kind === :cdar
             # standardized innovations, groups × steps; scale and persistence
             eta = Symbol(r.declaration, ".", r.locals.eta)
@@ -355,10 +468,11 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
             phi = Symbol(r.declaration, ".", r.locals.phi)
             block!(r.declaration, r.area, draws!(reshape([Symbol(phi, ".", l)
                 for l in 1:graph.S], :, 1)), hyper; graph.edges, graph.sums, graph.λ)
-            if r.type === :bym2
+            # BYM2's iid part of every area, or a scaled ICAR field's islands
+            if haskey(r.locals, :theta)
                 theta = Symbol(r.declaration, ".", r.locals.theta)
                 ntheta = count(n -> _brm_nlme_owned(n, theta), names)
-                block!(theta, r.area, draws!(reshape([Symbol(theta, ".", l)
+                ntheta > 0 && block!(theta, r.area, draws!(reshape([Symbol(theta, ".", l)
                     for l in 1:ntheta], :, 1)), hyper)
             end
         end
@@ -406,7 +520,8 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     p = BRMSparseLaplaceProblem(backend, population, names[population], integrate,
         integrated, blocks, kernels, nothing, nothing, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
-        Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], (;),
+        Int[], Int[], Int[], Int[], Int[], Vector{Int}[], fill(false, length(blocks)), Float64[],
+        Int[], Int[], Int[], (;),
         spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
@@ -458,11 +573,11 @@ function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA)
     A = p.affine ? _brm_slap_affine_A(p, view(uA, p.population)) :
         _brm_slap_psi!(zeros(nψ), p, values)
     nc = isempty(p.coff) ? 0 : p.coff[end] + p.blocks[p.rblock[end]].K
-    C = zeros(nc)
+    C = length(p.C0) == nc ? copy(p.C0) : zeros(nc)
     dC = [zeros(nc) for _ in p.omega]
     ψ = zeros(nψ)
     for (j, b) in enumerate(p.blocks), k in 1:b.K
-        isempty(p.block_reads[j]) && continue
+        (isempty(p.block_reads[j]) || p.cfixed[j]) && continue
         # A native field's entries read several of its levels: probe them
         # one level color at a time (`_brm_gmrf_level_colors`).
         colors = _brm_spl_gmrf_colors(p, j)
@@ -606,6 +721,34 @@ function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
             "population coordinates other than their own scales and correlations, " *
             "which the sparse Laplace does not differentiate")
     end
+    _brm_spl_fixed_cmaps!(p, uA, C1, rng)
+end
+
+# The blocks whose C no population coordinate moves (`p.cfixed`, `p.C0`): a
+# block with no coordinate of its own (a formula coefficient, a declared
+# vector), whose C stays put, up to the rounding of the probe's difference
+# from A, at two more points where every population coordinate moves. Any
+# other block is probed at every point, as before.
+function _brm_spl_fixed_cmaps!(p::BRMSparseLaplaceProblem, uA, C1, rng)
+    candidates = [isempty(b.omega) && !isempty(p.block_reads[j])
+        for (j, b) in enumerate(p.blocks)]
+    any(candidates) || return p
+    entries(j) = (p.coff[r] + k for r in p.block_reads[j] for k in 1:p.blocks[j].K)
+    fixed = copy(candidates)
+    for _ in 1:2
+        u = copy(uA)
+        u[p.population] .+= 0.3 .* randn(rng, length(p.population))
+        C, _, _, _ = _brm_spl_cmaps(p, u)
+        for j in findall(fixed)
+            fixed[j] = all(i -> isapprox(C[i], C1[i]; rtol=1e-12, atol=1e-12), entries(j))
+        end
+    end
+    C0 = zeros(length(C1))
+    for j in findall(fixed), i in entries(j)
+        C0[i] = C1[i]
+    end
+    p.C0 = C0
+    p.cfixed = fixed
     p
 end
 
@@ -633,7 +776,7 @@ function _brm_spl_prior_quad(p::BRMSparseLaplaceProblem, z)
             continue
         end
         for e in axes(b.edges, 2)
-            q += (z[b.z[b.edges[1, e], 1]] - z[b.z[b.edges[2, e], 1]])^2
+            q += b.weights[e] * (z[b.z[b.edges[1, e], 1]] - z[b.z[b.edges[2, e], 1]])^2
         end
         for (c, levels) in enumerate(b.sums)
             q += b.λ[c] * sum(l -> z[b.z[l, 1]], levels)^2
@@ -882,9 +1025,17 @@ function _brm_spl_pattern(footprints, n, edges)
     (; pattern, stats)
 end
 
+# A column whose rows are one consecutive run is indexed directly: an
+# integrated formula coefficient's column holds every effect its predictor's
+# rows read, and those lookups were most of h's assembly. Others by binary
+# search.
 @inline function _brm_spl_nzindex(pattern, i, j)
     span = nzrange(pattern, j)
-    first(span) - 1 + searchsortedfirst(view(rowvals(pattern), span), i)
+    rows = rowvals(pattern)
+    lo = rows[first(span)]
+    hi = rows[last(span)]
+    hi - lo == length(span) - 1 && lo <= i <= hi && return first(span) + (i - lo)
+    first(span) - 1 + searchsortedfirst(view(rows, span), i)
 end
 
 # h's pattern (the identity and every pair of effects a term reads), each
@@ -923,6 +1074,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
             for c in group.cells for reduction in c.terms for term in reduction)))
     edges = [(b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]) for b in p.blocks
         for e in axes(b.edges, 2)]
+    edge_weights = [b.weights[e] for b in p.blocks for e in axes(b.edges, 2)]
     # A native field's prior couples its draws through Q's pattern.
     couplings = p.gmrf === nothing ? edges : vcat(edges, _brm_gmrf_pattern_pairs(p.gmrf))
     built = _brm_spl_pattern(footprints, n, couplings)
@@ -938,7 +1090,8 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
             prior[index(i, i)] = get(prior, index(i, i), 0.0) + 1.0
         end
     end
-    for (i, j) in edges, (a, c, v) in ((i, i, 1.0), (j, j, 1.0), (i, j, -1.0), (j, i, -1.0))
+    for ((i, j), w) in zip(edges, edge_weights),
+            (a, c, v) in ((i, i, w), (j, j, w), (i, j, -w), (j, i, -w))
         prior[index(a, c)] = get(prior, index(a, c), 0.0) + v
     end
     p.prior_nz = collect(keys(prior))
@@ -1247,15 +1400,17 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
         end
         for e in axes(b.edges, 2)
             i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
+            # the edge's weight (`w` counts the soft sums, for `p.wsblocks`)
+            we = b.weights[e]
             d = z[i] - z[j]
-            _brm_spl_add_value!(fc, correction, p.component[i], -d^2 / 2)
+            _brm_spl_add_value!(fc, correction, p.component[i], -we * d^2 / 2)
             if fb !== nothing
-                fb[p.sblock[i]] -= d^2 / 2
-                p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= d^2 / 2)
+                fb[p.sblock[i]] -= we * d^2 / 2
+                p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= we * d^2 / 2)
             end
             if g !== nothing
-                g[i] -= d
-                g[j] += d
+                g[i] -= we * d
+                g[j] += we * d
             end
         end
         for (c, levels) in enumerate(b.sums)
@@ -1292,23 +1447,52 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
     nothing
 end
 
-# With the factor F of A = h − U Λ Uᵀ (h without the soft sums' rank-one
-# part): X = A⁻¹U and the Cholesky factor of G = Λ⁻¹ + UᵀX, or `nothing` when
-# no block has soft sums. Then h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ and log det h = log det A +
-# log det G + Σ log λ, with k extra solves for k sums.
+# A soft sum's anchor: its first effect, at weight ρ = λ × its size, added to
+# the factored matrix (`_brm_spl_factor!`) and taken out again by
+# `_brm_spl_woodbury`.
+_brm_spl_anchor(p::BRMSparseLaplaceProblem, c) =
+    (first(p.wcols[c]), p.wλ[c] * length(p.wcols[c]))
+
+# The soft sums' rank-one part λ u uᵀ stays out of the sparse factor, which
+# would otherwise fill in a dense block per sum. Without it, h's sparse part
+# can be singular to rounding along a sum's level: the level is then held only
+# by the soft sum when its likelihood curvature vanishes (a field's scale near
+# zero) or an integrated coefficient takes it up (an intercept beside an ICAR
+# field, snag brm-laplace-coef-2aea38ff). So F factors A = h − U Λ Uᵀ, the
+# sparse part plus each sum's anchor ρ e eᵀ, and here U = [u…, e…] with
+# Λ = diag(λ…, −ρ…): X = A⁻¹U and the LU factor of the symmetric indefinite
+# G = Λ⁻¹ + UᵀX, or `nothing` when no block has soft sums. Then
+# h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ and log det h = log det A + log|det G| + Σ log|Λ|,
+# with 2k extra solves for k sums. With A positive definite, h is positive
+# definite exactly when G has k negative eigenvalues, one per anchor
+# (`definite`; the inertia of [A U; Uᵀ −Λ⁻¹] two ways).
 function _brm_spl_woodbury(p::BRMSparseLaplaceProblem, F)
     isempty(p.wcols) && return nothing
-    U = zeros(length(p.integrated), length(p.wcols))
+    k = length(p.wcols)
+    U = zeros(length(p.integrated), 2k)
+    λ = zeros(2k)
     for (c, cols) in enumerate(p.wcols)
+        i, ρ = _brm_spl_anchor(p, c)
         U[cols, c] .= 1.0
+        U[i, k + c] = 1.0
+        λ[c] = p.wλ[c]
+        λ[k + c] = -ρ
     end
     X = F \ U
-    (; U, X, G=cholesky(Symmetric(Diagonal(1 ./ p.wλ) + U' * X)))
+    G = Diagonal(1 ./ λ) + U' * X
+    G = (G + G') / 2
+    all(isfinite, G) || return (; U, X, λ, G=nothing, definite=false)
+    values = eigvals(Symmetric(G))
+    definite = count(<(0), values) == k && !any(iszero, values)
+    (; U, X, λ, G=lu(G; check=false), definite)
 end
+
+# Whether h is positive definite, from F and the soft sums' correction W.
+_brm_spl_definite(F, W) = issuccess(F) && (W === nothing || W.definite)
 
 _brm_spl_solve(F, W, b) = (x = F \ b; W === nothing ? x : x .- W.X * (W.G \ (W.U' * x)))
 _brm_spl_logdet(p::BRMSparseLaplaceProblem, F, W) =
-    logdet(F) + (W === nothing ? 0.0 : logdet(W.G) + sum(log, p.wλ))
+    logdet(F) + (W === nothing ? 0.0 : first(logabsdet(W.G)) + sum(x -> log(abs(x)), W.λ))
 
 # Each component's share of log det h, from the factor's diagonal in its
 # permuted order (h is block diagonal over the components). CHOLMOD's
@@ -1334,7 +1518,7 @@ function _brm_spl_inverse_blocks(p::BRMSparseLaplaceProblem, state, sets)
     on_pattern(i, j) = any(k -> rowvals(p.pattern)[k] == i, nzrange(p.pattern, j))
     selected = [all(on_pattern(i, j) for i in set, j in set) for set in sets]
     pairs = [(i, j) for (set, ok) in zip(sets, selected) if ok for i in set for j in set]
-    Zs = isempty(pairs) ? nothing : selinv_extract(selinv(state.F; depermute=true).Z,
+    Zs = isempty(pairs) ? nothing : _brm_selinv_on_pattern(state.F,
         sparse(first.(pairs), last.(pairs), 1.0, length(p.integrated),
             length(p.integrated)))
     map(zip(sets, selected)) do (set, ok)
@@ -1390,7 +1574,7 @@ function _brm_spl_unit_values(p::BRMSparseLaplaceProblem, state, owners, nunits)
 end
 
 # A draw from N(0, h⁻¹): x ~ N(0, A⁻¹) through A's factor, then for the soft
-# sums x − X G⁻¹ (Uᵀx + η), η ~ N(0, Λ⁻¹), whose covariance is
+# sums x − X K Uᵀx (`_brm_spl_draw_map`), whose covariance is
 # A⁻¹ − X G⁻¹ Xᵀ = h⁻¹.
 function _brm_spl_draw(p::BRMSparseLaplaceProblem, state, rng)
     state.F isa _BRMOperatorFactor && return _brm_operator_draw(state.F, rng)
@@ -1399,7 +1583,21 @@ function _brm_spl_draw(p::BRMSparseLaplaceProblem, state, rng)
     x = state.F.UP \ randn(rng, length(p.integrated))
     W = state.W
     W === nothing && return x
-    x .- W.X * (W.G \ (W.U' * x .+ randn(rng, length(p.wλ)) ./ sqrt.(p.wλ)))
+    x .- W.X * (_brm_spl_draw_map(W) * (W.U' * x))
+end
+
+# K such that (I − X K Uᵀ) A⁻¹ (I − X K Uᵀ)ᵀ = A⁻¹ − X G⁻¹ Xᵀ, which holds
+# for symmetric K with 2K − K S K = G⁻¹, S = UᵀX = R Rᵀ: K = R⁻ᵀ M R⁻¹ with
+# M = I − (I − Rᵀ G⁻¹ R)^½. Λ may be indefinite (the anchors), so no draw
+# η ~ N(0, Λ⁻¹) enters. I − Rᵀ G⁻¹ R = Rᵀ (S⁻¹ − G⁻¹) R and
+# S − S G⁻¹ S = Uᵀ h⁻¹ U is positive semidefinite, so the root is real; its
+# eigenvalues are clamped at zero against rounding.
+function _brm_spl_draw_map(W)
+    R = cholesky(Symmetric((W.U' * W.X + W.X' * W.U) / 2)).L
+    T = R' * (W.G \ Matrix(R))
+    E = eigen(Symmetric(I - (T + T') / 2))
+    M = I - E.vectors * Diagonal(sqrt.(max.(E.values, 0.0))) * E.vectors'
+    R' \ (M / R)
 end
 
 # A shift for every effect: one number for all, or one per component.
@@ -1407,14 +1605,23 @@ _brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::Real) = shift
 _brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::AbstractVector) =
     shift[p.component]
 
-# The factor of h + shift I, reusing the symbolic analysis. `shift` is one
-# number, or one per component (`p.components`; h is block diagonal over them).
+# The factor of h + shift I, plus each soft sum's anchor (`_brm_spl_anchor`,
+# which `_brm_spl_woodbury` takes out again), reusing the symbolic analysis.
+# `shift` is one number, or one per component (`p.components`; h is block
+# diagonal over them).
 function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h; shift=0.0)
     p.algebra === nothing || return _brm_operator_factor(p, h; shift)
-    if shift isa AbstractVector
+    if shift isa AbstractVector || !isempty(p.wcols)
         hs = copy(h)
-        nonzeros(hs)[p.diagonal] .+= _brm_spl_effect_shift(p, shift)
-        H = Hermitian(hs, :L); shift = 0.0
+        if shift isa AbstractVector
+            nonzeros(hs)[p.diagonal] .+= _brm_spl_effect_shift(p, shift)
+            shift = 0.0
+        end
+        for c in eachindex(p.wcols)
+            i, ρ = _brm_spl_anchor(p, c)
+            nonzeros(hs)[p.diagonal[i]] += ρ
+        end
+        H = Hermitian(hs, :L)
     else
         H = Hermitian(h, :L)
     end
@@ -1432,7 +1639,10 @@ const _BRM_SPL_SHIFTS = ntuple(k -> 10.0^(k - 5), 12)
 
 # Whether component `members`' block of h + μ I is positive definite (its
 # soft sums' rank-one part, which `_brm_spl_woodbury` keeps out of the
-# factor, only adds a positive semidefinite term).
+# factor, only adds a positive semidefinite term). A sufficient test: a block
+# whose sparse part is singular only along a sum's level reads as indefinite
+# here and takes a shift, though h itself is definite there; the whole-h test
+# in `_brm_spl_shifted_direction` comes first and is exact.
 _brm_spl_block_definite(p::BRMSparseLaplaceProblem, h::SparseMatrixCSC, members, μ) =
     issuccess(cholesky(Hermitian(h[members, members], :L); shift=μ, check=false))
 
@@ -1445,7 +1655,8 @@ function _brm_spl_shifted_direction(p::BRMSparseLaplaceProblem, h, g)
     p.algebra === nothing || return _brm_operator_direction(p, h, g)
     nc = length(p.components)
     F = _brm_spl_factor!(p, h)
-    issuccess(F) && return (_brm_spl_solve(F, _brm_spl_woodbury(p, F), g), zeros(nc))
+    W = issuccess(F) ? _brm_spl_woodbury(p, F) : nothing
+    _brm_spl_definite(F, W) && return (_brm_spl_solve(F, W, g), zeros(nc))
     shift = zeros(nc)
     for (c, members) in enumerate(p.components)
         _brm_spl_block_definite(p, h, members, 0.0) && continue
@@ -1455,7 +1666,9 @@ function _brm_spl_shifted_direction(p::BRMSparseLaplaceProblem, h, g)
     end
     F = _brm_spl_factor!(p, h; shift)
     issuccess(F) || return nothing
-    (_brm_spl_solve(F, _brm_spl_woodbury(p, F), g), shift)
+    W = _brm_spl_woodbury(p, F)
+    _brm_spl_definite(F, W) || return nothing
+    (_brm_spl_solve(F, W, g), shift)
 end
 
 # The direction alone (`_brm_spl_shifted_direction`).
@@ -1560,10 +1773,7 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
         r === nothing && return (; status=:nonfinite, iterations, h)
         δ, shift = r
         all(isfinite, δ) || return (; status=:nonfinite, iterations, h)
-        fill!(λ, 0.0)
-        for i in 1:n
-            λ[p.component[i]] += g[i] * δ[i]
-        end
+        _brm_spl_decrements!(λ, p.component, g, δ)
         candidate = [!converged[c] && shift[c] == 0 &&
             _brm_lap_floor_candidate(λ[c], previous[c], tol) for c in 1:nc]
         floor = any(candidate) ? _brm_spl_at_floor(p, pop, z, δ, g, h, λ; weight=s) : candidate
@@ -1591,6 +1801,17 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
     end
 end
 
+# Each component's Newton decrement gᵀδ over its effects. A function of its
+# own: the direction's type is known only at run time (exact or operator
+# algebra), and this loop runs once per effect and Newton step.
+function _brm_spl_decrements!(λ, component, g, δ)
+    fill!(λ, 0.0)
+    for i in eachindex(g)
+        λ[component[i]] += g[i] * δ[i]
+    end
+    λ
+end
+
 # One evaluation's mode-search record, per component: Newton steps, shifted
 # steps per stage, the largest shift, steps whose full Newton step was refused,
 # and the last stage's final decrement and stop (`:tol`, or `:floor` for the
@@ -1609,10 +1830,14 @@ _brm_spl_search(nc, stages) = (; stages=collect(stages), steps=zeros(Int, nc),
 # evaluation's steps per component; `p.folds` counts evaluations in which a
 # component's followed mode needed a shifted step after the first stage.
 # At the last search's point, that search's state (`_brm_laplace_last!`).
-_brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector) =
-    _brm_laplace_last!(_brm_spl_search!, p, φ)
+#
+# `start` (`brm_laplace_integration`'s design, from its centre's modes) starts
+# Newton there instead, where the density is log-concave (one stage): its mode
+# is then unique, so only the number of steps changes.
+_brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing) =
+    _brm_laplace_last!((p, φ) -> _brm_spl_search!(p, φ; start), p, φ)
 
-function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
+function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing)
     p.algebra === nothing || empty!(p.algebra.diagnostics)
     pop = _brm_spl_population(p, φ)
     if !(all(isfinite, pop.A) && all(isfinite, pop.C))
@@ -1623,7 +1848,8 @@ function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     stages = _brm_lap_stages(_brm_spl_concave(p))
     search = _brm_spl_search(nc, stages)
     p.search = search
-    z = _brm_spl_prior_mode(p, pop)
+    z = start === nothing || length(stages) > 1 ? _brm_spl_prior_mode(p, pop) :
+        collect(Float64, start)
     iterations = 0
     h = nothing
     for (k, s) in enumerate(stages)
@@ -1646,12 +1872,14 @@ function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     end
     any(>(0), view(search.stage_shifts, :, 2:length(stages))) && (p.folds += 1)
     F = _brm_spl_factor!(p, h)
-    issuccess(F) || _brm_nlme_error("brm_laplace_problem: the integrated effects' " *
-        "density has a stationary point that is not a maximum at this population point")
+    W = issuccess(F) ? _brm_spl_woodbury(p, F) : nothing
+    _brm_spl_definite(F, W) || _brm_nlme_error("brm_laplace_problem: the integrated " *
+        "effects' density has a stationary point that is not a maximum at population " *
+        "point $(repr(collect(φ)))")
     p.u[p.integrated] .= z
     u = copy(pop.uA)
     u[p.integrated] .= z
-    (; finite=true, pop..., z, u, h, F, W=_brm_spl_woodbury(p, F), iterations)
+    (; finite=true, pop..., z, u, h, F, W, iterations)
 end
 
 # One step along the Newton direction δ for the moving components, in place
@@ -2058,16 +2286,25 @@ function brm_laplace_draws(p::BRMSparseLaplaceProblem, P::AbstractMatrix;
     size(P, 1) == length(p.population) || throw(DimensionMismatch(
         "population draws have $(size(P, 1)) rows, the problem has " *
         "$(length(p.population)) population coordinates"))
+    _brm_spl_draws(p, size(P, 2), k -> _brm_spl_mode!(p, view(P, :, k)); rng, conditional)
+end
+
+# The draws at `m` population points, `state(k)` the mode search's state at
+# the k-th: `brm_laplace_draws`, or `brm_laplace_integration`'s draws at its
+# design points from the searches the design already ran
+# (`_brm_spl_draw_state`).
+function _brm_spl_draws(p::BRMSparseLaplaceProblem, m::Integer, state_at;
+        rng=Random.default_rng(), conditional::Integer=0)
     conditional >= 0 || throw(ArgumentError(
         "brm_laplace_draws: conditional = $conditional proposals; pass 0 for " *
         "Laplace draws or a positive count for importance resampling"))
     n = length(p.integrated)
     nc = length(p.components)
-    draws = Matrix{Float64}(undef, length(p.u), size(P, 2))
-    newton_steps = Vector{Int}(undef, size(P, 2))
-    importance_ess = Matrix{Float64}(undef, conditional > 0 ? nc : 0, size(P, 2))
-    for k in axes(P, 2)
-        state = _brm_spl_mode!(p, view(P, :, k))
+    draws = Matrix{Float64}(undef, length(p.u), m)
+    newton_steps = Vector{Int}(undef, m)
+    importance_ess = Matrix{Float64}(undef, conditional > 0 ? nc : 0, m)
+    for k in 1:m
+        state = state_at(k)
         state.finite || _brm_nlme_error(
             "brm_laplace_draws: population draw $k has a nonfinite density")
         newton_steps[k] = state.iterations
@@ -2108,4 +2345,14 @@ function brm_laplace_draws(p::BRMSparseLaplaceProblem, P::AbstractMatrix;
     end
     diagnostics = conditional > 0 ? (; newton_steps, importance_ess) : (; newton_steps)
     (; draws, diagnostics)
+end
+
+# A mode search's state that outlives the next search, for drawing at its
+# point later: the problem refactors h in place (`_brm_spl_factor!`), so the
+# factor is copied; every other field is the search's own. Only an exact
+# CHOLMOD factor is kept (`nothing` otherwise: search again at the point).
+function _brm_spl_draw_state(p::BRMSparseLaplaceProblem, state)
+    (state.finite && state.F isa SparseArrays.CHOLMOD.Factor) || return nothing
+    (; state.finite, state.z, state.u, state.uA, state.A, state.C, state.h,
+        F=copy(state.F), state.W, state.iterations)
 end

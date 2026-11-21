@@ -1,4 +1,5 @@
 # Synthetic consumer integration: no Stan compilation or application data.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, DifferentiationInterface, SequentialMonteCarlo, WarmupHMC
 using Random, Statistics, Serialization, LogDensityProblems, Treebars

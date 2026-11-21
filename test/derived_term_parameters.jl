@@ -18,6 +18,7 @@
 #   the derived value. With the Jacobian, the twin's log density minus the
 #   derived model's is the prior's log density at the value plus the log
 #   Jacobian of the parameter's transform there, at every point.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, LinearAlgebra
 using Distributions: Exponential, Normal, LogNormal, Beta, logpdf
@@ -197,7 +198,6 @@ car_twin = @brm begin
     mixing(:, car(g)) ~ Beta(2.0, 2.0)
     y ~ Normal(mu, sigma)
 end
-# RKBRMI has no `rw` lowering (todo `1hq7nm0`): SBBRMI only.
 rw_derived = @brm begin
     a ~ Normal(-1.0, 0.5)
     sigma ~ Exponential(1.0)
@@ -405,7 +405,6 @@ end
 DERIVED_RUNTIME && @stestset "RKBRMI: derived equals the twin at the derived value" begin
     rng = MersenneTwister(5)
     for (name, derived, twin, roles) in DERIVED_CASES
-        name == "rw" && continue
         rk, problem = consumer_problem(derived(DF))
         twin_rk, twin_problem = consumer_problem(twin(DF))
         check_twin(u -> LogDensityProblems.logdensity(problem, u),

@@ -57,7 +57,7 @@ end
 function _brm_collect_data_lengths!(acc, x)
     columns = Tuple{Symbol,Any}[]
     _brm_collect_data_columns!(columns, x)
-    append!(acc, ((column, length(values)) for (column, values) in columns))
+    append!(acc, ((column, _brm_data_rows(values)) for (column, values) in columns))
     nothing
 end
 
@@ -72,7 +72,7 @@ end
 function _brm_kernel_lp_data_lengths(lp_col)
     n = _brm_parameter_length(lp_col)
     isnothing(n) || return Tuple{Symbol,Int}[(name(lp_col), n)]
-    Tuple{Symbol,Int}[(column, length(values)) for (column, values) in _brm_kernel_lp_data_columns(lp_col)]
+    Tuple{Symbol,Int}[(column, _brm_data_rows(values)) for (column, values) in _brm_kernel_lp_data_columns(lp_col)]
 end
 
 # A per-subject linear predictor without a random effect, or whose random
@@ -284,7 +284,7 @@ end
 
 # A raw column's rows, checked against its ragged group column. An absent
 # replay response (`_BRMAbsentResponse`) lies on the group column's rows.
-_brm_ragged_column_length!(lens, name, values) = push!(lens, (name, length(values)))
+_brm_ragged_column_length!(lens, name, values) = push!(lens, (name, _brm_data_rows(values)))
 _brm_ragged_column_length!(lens, name, ::_BRMAbsentResponse) = lens
 
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
@@ -385,11 +385,13 @@ end
 # each `nothing` when absent.
 function _brm_kernel_ragged_options(c; prefix="BRM kernel preparation")
     kwargs = getkwargs(c)
-    unknown = [k for k in keys(kwargs) if !(k in (:into, :order))]
+    unknown = [k for k in keys(kwargs) if !(k in (:into, :order, :matrix_rows))]
     isempty(unknown) || error(
-        "$prefix: kernel(...) `ragged(...)` accepts only the `into=` and `order=` ",
-        "keywords; got ", join(("`$k`" for k in unknown), ", "), ".")
-    (; into=get(kwargs, :into, nothing), order=get(kwargs, :order, nothing))
+        "$prefix: kernel(...) `ragged(...)` accepts only the `into=`, `order=` and ",
+        "`matrix_rows=` keywords; got ", join(("`$k`" for k in unknown), ", "), ".")
+    # `matrix_rows = true`: the cell reads whole rows of a matrix (`G[p, :]`).
+    matrix_rows = _brm_data_value(get(kwargs, :matrix_rows, false)) === true
+    (; into=get(kwargs, :into, nothing), order=get(kwargs, :order, nothing), matrix_rows)
 end
 
 # `ragged(idx, group; into=target)`: `idx` holds 1-based row numbers on the flat

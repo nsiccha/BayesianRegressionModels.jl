@@ -3,6 +3,7 @@
 # integrated target equals the dense marginal y ~ N(0, σ² A Σ Aᵀ + s² I) with
 # Σ the field's FEM Matérn × OU × channel covariance, plus the population
 # priors, in value and native gradient.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include("gmrf_laplace_oracles.jl")
 using Random
 

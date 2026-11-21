@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra, Serialization
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using DifferentiationInterface

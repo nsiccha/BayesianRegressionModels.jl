@@ -11,12 +11,15 @@
 # ==============================================================================
 
 """
-    brm_transform_constants(x) -> Tuple
-    brm_transform_constants(x, name::Symbol) -> NamedTuple
+    brm_transform_constants(x; submodel=nothing) -> Tuple
+    brm_transform_constants(x, name::Symbol; submodel=nothing) -> NamedTuple
 
 The fitted constants of every `center`, `zscale` and `standardize` term of a
 fitted model, or of the one named `name`. `x` is an `SBBRMI`, its
 `GenerativePlan`, a `BRMDescriptor` of either, or an `RKBRMI`.
+
+Pass `submodel=(collection, key)` for the transforms of one repeated member.
+An intercept-only member has an empty tuple.
 
 Each record is
 
@@ -55,16 +58,34 @@ interaction operand is staged under an internal name and is not listed.
 """
 function brm_transform_constants end
 
-brm_transform_constants(sb::SBBRMI) = _brm_transform_constants(sb.preproc)
-brm_transform_constants(plan::GenerativePlan) = _brm_transform_constants(plan.preproc)
-brm_transform_constants(d::BRMDescriptor) = brm_transform_constants(d.plan)
+function _brm_transform_member(model, submodel)
+    if submodel isa Tuple{Symbol,Union{Int,Symbol}}
+        collection, key = submodel
+        for axis in _brm_collection_axes(model)
+            axis.collection === collection || continue
+            index = findfirst(isequal(key), axis.keys)
+            isnothing(index) || return axis, index
+        end
+    end
+    throw(ArgumentError("brm_transform_constants: unknown record member `$submodel`; use (collection, key)"))
+end
 
-function brm_transform_constants(x, name::Symbol)
-    records = brm_transform_constants(x)
+function brm_transform_constants(x::Union{SBBRMI,GenerativePlan}; submodel=nothing)
+    isnothing(submodel) && return _brm_transform_constants(x.preproc)
+    axis, i = _brm_transform_member(x.parent, submodel)
+    fits = _brm_member_fits(x.preproc, axis)
+    isnothing(fits) ? () : brm_transform_constants(fits[i])
+end
+brm_transform_constants(d::BRMDescriptor; submodel=nothing) =
+    brm_transform_constants(d.plan; submodel)
+
+function brm_transform_constants(x, name::Symbol; submodel=nothing)
+    records = brm_transform_constants(x; submodel)
     index = findfirst(record -> record.name === name, records)
     isnothing(index) || return records[index]
+    scope = isnothing(submodel) ? "this model$(_brm_transform_missing_reason(x, name))" : "member `$submodel`"
     error("brm_transform_constants: `$name` is not a fitted center/zscale/" *
-          "standardize term of this model$(_brm_transform_missing_reason(x, name)). " *
+          "standardize term of $scope. " *
           "Fitted transforms: $(Tuple(record.name for record in records)).")
 end
 
@@ -215,20 +236,42 @@ function _rk_indexed_definition(derived, expression)
     isnothing(index) ? expression : derived[index].expression
 end
 
-function _rk_transform_anchor(rk, anchor, derived, memo)
-    evaluate() = _rk_eval_dotted(anchor, Dict{Symbol,Any}(), derived, memo)
-    rk.fitted === nothing && return evaluate()
-    # A data-free replay's plan holds the new rows. Read the recorded fits,
-    # just as replay planning does, instead of fitting those rows again.
-    state = rk.fitted.state
-    frozen = _BRMFrozenReplay(state.scalars, Set{Symbol}(rk.fitted.resample),
-        state.fits, nothing)
-    _brm_with_frozen_replay(evaluate, frozen)
+# Retain the member's fit-role definitions only when it has a transform to
+# inspect. In a data-free replay its exported fits have already been scoped
+# to this member by _brm_component_replay_scope.
+function _rk_member_transform_plan(plan, instance)
+    sites = _brm_transform_sites(instance)
+    isempty(sites) && return nothing
+    frozen = _brm_frozen_replay()
+    saved = isnothing(frozen) || isnothing(frozen.fits) ? nothing :
+        _BRMFrozenReplay(Dict{Symbol,Any}(), frozen.resample, frozen.fits, nothing)
+    (; sites, derived=_rk_plan_derived(plan), frozen=saved)
 end
 
-function brm_transform_constants(rk::RKBRMI)
-    derived = _rk_plan_derived(rk.plan)
-    sites = _brm_transform_sites(parent(rk))
+function brm_transform_constants(rk::RKBRMI; submodel=nothing)
+    if !isnothing(submodel)
+        axis, i = _brm_transform_member(brm_source(rk), submodel)
+        for kernel in _rk_plan_kernels(rk.plan), statement in kernel.body
+            _rk_is_cell_component(statement) && first(statement.args) === last(axis.path) || continue
+            members = statement.args[2].args[3].transforms
+            isempty(members) && return ()
+            member = members[i]
+            return isnothing(member) ? () : _rk_transform_records(member.sites, member.derived, member.frozen)
+        end
+        return ()
+    end
+    frozen = if !isnothing(rk.fitted)
+        state = rk.fitted.state
+        _BRMFrozenReplay(state.scalars, Set{Symbol}(rk.fitted.resample), state.fits, nothing)
+    end
+    _rk_transform_records(_brm_transform_sites(parent(rk)), _rk_plan_derived(rk.plan), frozen)
+end
+
+_rk_transform_records(sites, derived, ::Nothing) = _rk_transform_records(sites, derived)
+_rk_transform_records(sites, derived, frozen::_BRMFrozenReplay) =
+    _brm_with_frozen_replay(() -> _rk_transform_records(sites, derived), frozen)
+
+function _rk_transform_records(sites, derived)
     records = NamedTuple[]
     for name in sort!(collect(keys(sites)); by=string)
         index = findfirst(spec -> spec.name === name, derived)
@@ -242,7 +285,7 @@ function brm_transform_constants(rk::RKBRMI)
         # Ordinary backends hold fit-role inputs; data-free backends instead
         # hold recorded fits from the training values.
         memo = Dict{Symbol,Any}()
-        evaluate(anchor) = _rk_transform_anchor(rk, anchor, derived, memo)
+        evaluate(anchor) = _rk_eval_dotted(anchor, Dict{Symbol,Any}(), derived, memo)
         center = evaluate(anchors.mean)
         scale = isnothing(anchors.sd) ? 1.0 : evaluate(anchors.sd)
         site = sites[name]

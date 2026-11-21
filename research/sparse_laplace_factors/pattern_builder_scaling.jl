@@ -1,6 +1,7 @@
 # Execute the complete production pattern method with a minimal input container,
 # isolating all its retained index metadata from model lowering and AD setup.
 # Each invocation measures one point; use /usr/bin/time -v for independent RSS.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, SparseArrays, SHA
 module PatternProbe
 using BayesianRegressionModels, SparseArrays

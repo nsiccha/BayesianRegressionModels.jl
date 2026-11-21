@@ -82,8 +82,71 @@ _rk_ast_population_family(prior) = prior !== nothing &&
 
 # One argument shared by every coefficient stays scalar; otherwise each
 # column states its own value.
-function _rk_ast_population_argument(values)
+function _rk_ast_population_argument(values, data=nothing)
+    if data !== nothing
+        source = _brm_prior_vector_argument(values, data)
+        source !== nothing && return source
+    end
     all(isequal(first(values)), values) ? first(values) : Expr(:vect, values...)
+end
+
+function _rk_design_matrix_expr(columns)
+    operands = _brm_design_operands(columns)
+    length(operands) == 1 && first(columns) isa _BRMMatrixColumn &&
+        only(operands) isa Symbol && return only(operands)
+    Expr(:call, :hcat, operands...)
+end
+
+# When a matrix's slopes and the intercept have different laws, draw each
+# consecutive family as one scalar or vector, then multiply the combined
+# coefficients by the design. Prior parameters travel as component inputs.
+function _rk_matrix_mixed_population!(definitions, taken, name, design, columns, priors, data)
+    body = Expr(:block)
+    parameters, actuals = Symbol[:X], Any[design]
+    declarations, coordinates = Symbol[], NamedTuple[]
+    start = 1
+    while start <= length(priors)
+        family = first(priors[start])
+        stop = start
+        while stop < length(priors) && first(priors[stop + 1]) === family
+            stop += 1
+        end
+        run = start:stop
+        block = length(declarations) + 1
+        beta = Symbol(:beta_pop_, block)
+        push!(declarations, beta)
+        roles = getproperty(_RK_POPULATION_FAMILIES, family)
+        args = Symbol[]
+        for (j, role) in enumerate(roles)
+            arg = Symbol(role, :_, block)
+            push!(args, arg)
+            push!(parameters, arg)
+            argument = length(run) == 1 ? priors[start][2][j] :
+                _rk_ast_population_argument([priors[i][2][j] for i in run], data)
+            push!(actuals, argument)
+        end
+        if length(run) == 1
+            push!(body.args, Expr(:call, :~, beta, Expr(:call, family, args...)))
+            push!(coordinates, (; beta, index=()))
+        else
+            n = Symbol(:ncoef_, block)
+            push!(parameters, n)
+            operands = _brm_design_operands(view(columns, run))
+            whole = columns[start] isa _BRMMatrixColumn && length(operands) == 1 &&
+                only(operands) isa Symbol
+            push!(actuals, whole ? Expr(:call, :size, only(operands), 2) : length(run))
+            push!(body.args, Expr(:call, :.~, Expr(:ref, beta, Expr(:call, :(:), 1, n)),
+                _rk_ast_dotted(family, args...)))
+            append!(coordinates, [(; beta, index=(j,)) for j in 1:length(run)])
+        end
+        start = stop + 1
+    end
+    push!(body.args, Expr(:(=), :beta_pop, Expr(:call, :vcat, declarations...)))
+    push!(body.args, :(return X * beta_pop))
+    doc = @_rk_definition_doc "Draw each group of coefficients from its prior and return `X * beta_pop`."
+    callee = _rk_ast_shared_definition!(definitions, taken, "brm_matrix_population_effects",
+        Tuple(parameters), body; doc)
+    _rk_ast_component_call(name, callee, actuals...), coordinates
 end
 
 """Population effects over design columns: coefficients allocated inside, `X * beta_pop` returned.
@@ -94,8 +157,8 @@ calls that read it, their priors and their coefficients' coordinate records
 (`coefficients`, one `(; predictor, coefficient, paired)` per column), for
 `_rk_ast_join_shared_designs!`."""
 function _rk_ast_population_component!(definitions, statements, taken, name, design,
-        columns, priors, designs, coefficients)
-    matrix = Expr(:call, :hcat, columns...)
+        columns, priors, designs, coefficients; prior_data=nothing)
+    matrix = _rk_design_matrix_expr(columns)
     shared = findfirst(record -> isequal(last(record.assignment.args), matrix), designs)
     if shared === nothing
         design = _rk_ast_fresh_name(design, taken)
@@ -105,11 +168,16 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
     else
         design = shared
     end
-    entry(call, mixed) = push!(designs[design].entries,
-        (; name, call, priors, coefficients, mixed))
+    entry(call, mixed, slots=nothing) = push!(designs[design].entries,
+        (; name, call, priors, coefficients, mixed, slots))
     product = Expr(:call, :*, :X, :beta_pop)
     families = unique(first.(priors))
-    if length(families) > 1
+    if length(families) > 1 && any(c -> c isa _BRMMatrixColumn, columns)
+        call, slots = _rk_matrix_mixed_population!(definitions, taken, name, design, columns, priors, prior_data)
+        entry(call, true, slots)
+        push!(statements, call)
+        return name
+    elseif length(families) > 1
         # Coefficients with different prior families keep one statement each,
         # as SBBRMI's configured generic population block does.
         declarations = [Symbol(:beta_pop_, j) for j in eachindex(priors)]
@@ -151,9 +219,10 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
         `X * beta_pop`. `ncoef` is the number of columns of `X`.$per_coefficient"""
     callee = _rk_ast_shared_definition!(definitions, taken, base, (:X, :ncoef, roles...), body;
         doc)
-    arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors])
+    arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors], prior_data)
         for j in eachindex(roles)]
-    call = _rk_ast_component_call(name, callee, design, length(columns), arguments...)
+    ncoef = any(c -> c isa _BRMMatrixColumn, columns) ? :(size($design, 2)) : length(columns)
+    call = _rk_ast_component_call(name, callee, design, ncoef, arguments...)
     entry(call, false)
     push!(statements, call)
     name
@@ -173,7 +242,7 @@ whose laws have different families are one row declaration each,
 function _rk_ast_class_population_component!(definitions, statements, taken, coordinates,
         name, design, columns, priors, coefficients, nclass)
     design = _rk_ast_fresh_name(design, taken)
-    push!(statements, Expr(:(=), design, Expr(:call, :hcat, columns...)))
+    push!(statements, Expr(:(=), design, _rk_design_matrix_expr(columns)))
     product = Expr(:call, :*, :X, :beta_pop)
     families = unique(first.(priors))
     if length(families) > 1
@@ -258,9 +327,11 @@ _rk_ast_population_prior(entry, j) =
 function _rk_ast_population_records!(coordinates, entry)
     for (j, c) in enumerate(entry.coefficients)
         c.paired || continue
+        slot = entry.slots !== nothing ? entry.slots[j] :
+            entry.mixed ? (; beta=Symbol(:beta_pop_, j), index=()) : (; beta=:beta_pop, index=(j,))
         _rk_coordinate_record!(coordinates, (; kind=:population,
-            declaration=Symbol(entry.name, entry.mixed ? ".beta_pop_$j" : ".beta_pop"),
-            index=entry.mixed ? () : (j,), predictor=c.predictor, coefficient=c.coefficient,
+            declaration=Symbol(entry.name, ".", slot.beta), index=slot.index,
+            predictor=c.predictor, coefficient=c.coefficient,
             prior=_rk_ast_population_prior(entry, j)))
     end
 end
@@ -277,6 +348,7 @@ end
 # A design column's part of a shared matrix name: the intercept's column of
 # ones is `Intercept`, as its coefficient is.
 _rk_ast_design_label(column::Symbol) = string(column)
+_rk_ast_design_label(column::_BRMMatrixColumn) = string(_brm_matrix_label(column))
 function _rk_ast_design_label(column::Expr)
     Meta.isexpr(column, :call) && first(column.args) === :ones && return "Intercept"
     error("RK backend: internal: design column `$column` has no name")
@@ -301,7 +373,10 @@ function _rk_ast_join_shared_designs!(definitions, statements, designs, taken, c
         labels = map(_rk_ast_design_label, record.columns)
         shared = _rk_ast_fresh_name(join(("X", labels...), "_"), taken)
         record.assignment.args[1] = shared
-        foreach(entry -> entry.call.args[3].args[2] = shared, entries)
+        renames = Dict(design => shared)
+        for entry in entries
+            entry.call.args[3] = _rk_rename_symbols(entry.call.args[3], renames)
+        end
         if !_rk_ast_joint_population!(definitions, statements, taken, coordinates,
                 shared, labels, entries)
             foreach(entry -> _rk_ast_population_records!(coordinates, entry), entries)

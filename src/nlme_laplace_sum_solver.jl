@@ -3,7 +3,7 @@
 function _brm_spl_precision(p::BRMSparseLaplaceProblem)
     D = copy(p.pattern)
     any(g -> g isa _BRMSumCellGroup, p.cells) || return D
-    isdefined(SelectedInversion, :LUSelInvWorkspace) || _brm_nlme_error(
+    _brm_lu_selinv_available() || _brm_nlme_error(
         "sum-cell Laplace needs SelectedInversion's pivoted KLU API; " *
         "pin fleet revision 8b1ee1077cea94c1aff746e182681ae39ce91526 or a later release carrying it")
     _BRMSumPrecision(D, spzeros(0, size(D, 1)), spzeros(0, 0), Any[])
@@ -102,6 +102,7 @@ function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
     n = length(p.integrated)
     identity = falses(n)
     edges = Tuple{Int,Int}[]
+    edge_weights = Float64[]
     edges_by_effect = [Int[] for _ in 1:n]
     for b in p.blocks
         if _brm_spl_identity(b)
@@ -110,6 +111,7 @@ function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
             for e in axes(b.edges, 2)
                 i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
                 push!(edges, (i,j))
+                push!(edge_weights, b.weights[e])
                 push!(edges_by_effect[i], length(edges))
                 push!(edges_by_effect[j], length(edges))
             end
@@ -119,7 +121,7 @@ function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
     for (c, cols) in enumerate(p.wcols), i in cols
         push!(soft_by_effect[i], c)
     end
-    (; cells, sums, contexts, identity, edges, edges_by_effect, soft_by_effect,
+    (; cells, sums, contexts, identity, edges, edge_weights, edges_by_effect, soft_by_effect,
         gmrf=_brm_spl_gmrf_sparse(p, n),
         soft_members=Set.(p.wcols), soft_values=[sum(state.z[cols]) for cols in p.wcols],
         mmax=maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0))
@@ -225,7 +227,7 @@ function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h::_BRMSumPrecision; shift
 end
 
 function _brm_spl_selected_precision(p::BRMSparseLaplaceProblem, F)
-    nonzeros(selinv_extract(selinv(F; depermute=true).Z, p.pattern))
+    nonzeros(_brm_selinv_on_pattern(F, p.pattern))
 end
 function _brm_spl_selected_precision(p::BRMSparseLaplaceProblem, F::_BRMAugmentedFactor)
     selected = _brm_spl_selected(F)
@@ -305,7 +307,7 @@ function _brm_spl_sum_inverse_blocks(F::_BRMAugmentedFactor, sets)
     ii = [i for set in sets for j in set for i in set]
     jj = [j for set in sets for j in set for i in set]
     request = sparse(ii, jj, ones(length(ii)), size(F.K)...)
-    selected = selinv(F.F, request)
+    selected = _brm_lu_selinv(F.F, request)
     [Matrix(Symmetric(_brm_spl_entries(selected, set, set))) for set in sets]
 end
 
@@ -320,10 +322,11 @@ function _brm_spl_component_logdets(p::BRMSparseLaplaceProblem, F::_BRMAugmented
     # KLU's scaled identity is L*U+F = Diagonal(1 ./ Rs)*K[p,q].
     # Absolute determinants ignore permutation parity. Pivots remain within
     # a connected component; BTF off-diagonal blocks do not affect det(U).
-    d = diag(F.F.U)
-    for (k, i) in enumerate(F.F.p)
+    pivots = _brm_klu_scaled_pivots(F.F)
+    d, Rs = pivots.d, pivots.Rs
+    for (k, i) in enumerate(pivots.p)
         c = labels[i]
-        c == 0 || (out[c] += log(abs(d[k])) + log(F.F.Rs[k]))
+        c == 0 || (out[c] += log(abs(d[k])) + log(Rs[k]))
     end
     out
 end

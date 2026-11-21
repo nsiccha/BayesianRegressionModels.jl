@@ -8,6 +8,7 @@
 # windows (or for `settle_windows` windows), and polishing continues from there.
 #
 # RUN: julia --project=test test/nlme_svi_settling.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 using LinearAlgebra, Random, Statistics

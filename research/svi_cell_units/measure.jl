@@ -8,6 +8,7 @@
 #
 # RUN: julia --project=test research/svi_cell_units/measure.jl \
 #          <nsite> <nsensor> <batch> <updates> <long updates> <window> <first seed> <last seed>
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LinearAlgebra, LogDensityProblems, Printf, Random, Statistics

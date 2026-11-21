@@ -1,4 +1,5 @@
-using BayesianRegressionModels, AlgebraOfVega, CairoMakie, CSV, Tables, JSON, Statistics
+using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, Statistics
+using CairoMakie: Figure, Label, save
 import AlgebraOfGraphics
 include("../adaptive_centering/plots/scatter_display.jl")
 const CASE, INPUT, OUTPUT = ARGS

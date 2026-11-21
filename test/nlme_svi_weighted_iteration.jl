@@ -2,6 +2,7 @@
 # empty model types stand in only for unrelated public-method signatures, so
 # this arithmetic test needs no model lowering or external dependency setup.
 module SVIArithmetic
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Random, LinearAlgebra, Statistics
 include(joinpath(@__DIR__, "svi_arithmetic_imports.jl"))
 struct BRMI end

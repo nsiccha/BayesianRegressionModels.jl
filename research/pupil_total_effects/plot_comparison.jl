@@ -1,5 +1,6 @@
 # Uses research/adaptive_centering/plots; inputs are saved-fit summaries only.
-using AlgebraOfVega, CairoMakie, CSV, JSON
+using AlgebraOfVega, CSV, JSON
+using CairoMakie: Figure, save
 import AlgebraOfGraphics
 
 function save_plot(spec,output,name)

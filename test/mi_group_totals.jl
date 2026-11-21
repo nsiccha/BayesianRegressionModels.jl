@@ -13,6 +13,7 @@
 #
 # Run: julia --startup-file=no --project=test test/mi_group_totals.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random
 

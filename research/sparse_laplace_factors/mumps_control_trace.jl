@@ -1,6 +1,7 @@
 # Diagnostic only: instruments BRM's own inertia wrapper in this process.
 # Run with julia --project=test under one compute token. This checks the
 # control state around MUMPS calls; logging changes invalidate timing claims.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, Logging
 const BRM_TRACE = BayesianRegressionModels
 const MUMPS_TRACE_PHASE = Ref(:none)

@@ -15,6 +15,7 @@
 #
 # Run: julia --startup-file=no --project=test test/rk_fitted_state.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, Serialization, Statistics
 

@@ -1,5 +1,6 @@
 # End-to-end default stopping and exact continuation with bounded iterate history.
 # RUN: julia --project=test test/nlme_svi_stationarity_fit.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 using Serialization, Statistics

@@ -19,6 +19,7 @@ const CASES = split(ARGS[2], ",")
 # test/testset_filter.jl reads ARGS as testset filters.
 empty!(ARGS)
 const ROOT = get(ENV, "BRM_ROOT", pwd())
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include(joinpath(ROOT, "test", "nlme_fixtures.jl"))
 using Random, Statistics, Serialization, WarmupHMC, MCMCDiagnosticTools, Printf
 

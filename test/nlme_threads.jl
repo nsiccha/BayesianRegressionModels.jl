@@ -22,6 +22,7 @@
 #
 #     julia --project=<scratch-env> --threads=4 test/nlme_threads.jl [testset-filter...]
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using NLMEEstimation, LinearAlgebra, Random, Statistics
 const NE = NLMEEstimation

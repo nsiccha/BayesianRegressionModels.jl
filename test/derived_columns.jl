@@ -9,6 +9,7 @@
 # keeps its fitted value on a replay.
 #
 # Run: julia --project=test test/derived_columns.jl [testset substrings...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, Statistics, Logging
 using LogExpFunctions: logistic

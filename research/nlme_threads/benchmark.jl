@@ -21,6 +21,7 @@
 #
 # RUN: julia --project=<NLMEEstimation scratch env> --threads=<T> \
 #          research/nlme_threads/benchmark.jl <units> <rows> <repeats> <iterations> [<pairs>]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using NLMEEstimation, LinearAlgebra, Printf, Random, Statistics

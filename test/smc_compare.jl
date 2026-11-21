@@ -1,4 +1,5 @@
 # brm_smc_runs / brm_smc_compare: agreement between independent completed bridges.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, DifferentiationInterface, LogDensityProblems
 using SequentialMonteCarlo, WarmupHMC, Random, Statistics

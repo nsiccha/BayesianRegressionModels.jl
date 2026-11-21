@@ -15,6 +15,7 @@ Base.find_package("NLMEEstimation") === nothing && error(
     "test/nlme_integrated.jl needs NLMEEstimation.jl in the active environment; " *
     "see the header of this file")
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using NLMEEstimation
 import NLMEEstimation as NE
 using LinearAlgebra

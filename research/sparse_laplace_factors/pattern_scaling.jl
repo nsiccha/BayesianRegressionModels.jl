@@ -1,6 +1,7 @@
 # Run each point in a separate process under /usr/bin/time -v for peak RSS:
 # julia --project=test research/sparse_laplace_factors/pattern_scaling.jl 128 400 repeated
 # Input incidence, pair visits, retained storage, and allocation are separate.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, SparseArrays
 const BRM = BayesianRegressionModels
 width, cells = parse.(Int, ARGS[1:2])

@@ -6,6 +6,7 @@
 # crawl can fail because the crawl is gone.
 #
 #     julia --project=test research/svi_reoptimize/kmode_test.jl K test/<file>.jl [filter...]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels
 const K = parse(Int, popfirst!(ARGS))
 path = abspath(popfirst!(ARGS))

@@ -1,6 +1,7 @@
 # A read-pair field's states in units' own factors (`field_states=:units`): the pieces add
 # up to the whole model, in value and gradient, and the public fit runs, resumes and stays
 # the same at any number of tasks. A new observation window reuses the fitted support.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, LinearAlgebra, Random, Statistics
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, DifferentiationInterface
 const BRM = BayesianRegressionModels

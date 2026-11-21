@@ -1,4 +1,7 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
+# The terms reference builds `car` models, whose preparation needs BRM's
+# SelectedInversion extension (a weak dependency).
+import SelectedInversion
 
 include("backend_comparisons.jl")
 include("backend_exports.jl")

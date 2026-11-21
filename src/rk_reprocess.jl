@@ -50,11 +50,12 @@ through [`rk_bound_plan`](@ref).
 - `resample_groups=[:g]`: group `g` takes its levels from `new_data` (new
   subjects); everything else stays frozen. The replay is a model of its own
   rows: its coordinates hold the new levels' standardized draws in place of the
-  fit's, so a draw of the fit does not apply to its density or queries. To
-  evaluate a draw of the fit with the new levels' effects in `have`
-  (`have=(:unconstrained, :b_p_g, ports...)`), bind the design with
-  [`rk_design_binder`](@ref)`(rk; resample_groups)`, whose inputs keep the
-  fit's level set.
+  fit's (a `(… | g)` block's, and a grouped `hsgp(x; by = g)` term's basis
+  weights and per-level hyper effects), so a draw of the fit does not apply to
+  its density or queries. To evaluate a draw of the fit with the new levels'
+  values in `have` (`have=(:unconstrained, :b_p_g, ports...)`), bind the design
+  with [`rk_design_binder`](@ref)`(rk; resample_groups)`, whose inputs keep the
+  fit's level set; `binder.level_inputs` names those values.
 - `held_out`: the response hold-outs of the replay, as in `RKBRMI`.
 - `resample_covariates=[:x], keep_observed=true`: forecast new rows of a fit
   with an `mi(x)` covariate. The design's observed `x` values are used as
@@ -309,8 +310,9 @@ _rk_replay_responses(_plan) = ()
 # values at its locations, an AR/DAR path over its time steps, measurement-
 # error latents, structured group fields) have no meaning at other rows, and
 # a replay with the same number of rows would silently reinterpret them.
-const _RK_ROW_LATENT_TERMS = (gp="an exact `gp(...)`", ar="an `ar(...)`/`rw(...)` path",
-    dar="a `dar(...)` path", cdar="a `cdar(...)` walk", me="a measurement-error `me(...)`",
+const _RK_ROW_LATENT_TERMS = (gp="an exact `gp(...)`", ar="an `ar(...)` path",
+    dar="a `dar(...)` path", cdar="a `cdar(...)` walk", rw="an `rw(...)` walk",
+    me="a measurement-error `me(...)`",
     structured="a structured group field")
 function _rk_check_replay_terms(plan; prefix)
     for predictor in _rk_replay_predictors(plan), term in predictor.terms
@@ -355,35 +357,35 @@ function _rk_refuse_level_correlated_resample(brmi, groups::Set{Symbol}; prefix)
     nothing
 end
 
-# An independent grouped HSGP (`hsgp(...; by=g)`) draws its basis weights, and
-# the level effects of a `log(sd(hsgp(...))) ~ 1 + (1 | g)` hyper-predictor,
-# inside its own block, one row per level: unlike a `(… | g)` block's effects,
-# a replay has no input through which a caller supplies new levels' values.
-# A design that reuses the fitted labels keeps the fit's program and would read
-# the fitted levels' weights as the new levels' (measured: equal values); any
-# other design changes the program. Refuse both by name. SBBRMI draws new
-# levels in generated quantities (`_sb_emit_group_blocks!`).
+# A grouped HSGP (`hsgp(...; by=g)`) sizes its per-level rows (the
+# standardized basis weights `<term>.z`, and the level effects of a
+# `log(sd(hsgp(...))) ~ 1 + (1 | g)` hyper-predictor) by its in-graph level
+# set, so a resampled replay keeps the fit's program and draws new levels as
+# its own coordinates, and a design binder takes them in HAVE. An
+# `orthogonal_to=` projection is fitted on each level's training rows, which a
+# new level does not have, so resampling its grouping is refused, as on SBBRMI.
 function _rk_refuse_grouped_hsgp_resample(brmi, groups::Set{Symbol}; prefix)
     isempty(groups) && return nothing
-    grouped = Symbol[]
+    projected = Symbol[]
     for predictor in linear_predictors(brmi)
         operation = linear_predictor_op(brmi, predictor.name)
         isnothing(operation) && continue
         for term in _brm_additive_terms(last(getargs(operation, 2)))
             term isa ExprColumn && getf(term) === hsgp || continue
             kw = getkwargs(term)
-            haskey(kw, :by) || continue
+            haskey(kw, :by) && haskey(kw, :orthogonal_to) || continue
+            # A coordinate multigroup field refuses it while planning, naming
+            # its per-level projection fits (`_rk_plan_level_coordinates!`).
             haskey(kw, :cor) && _brm_multigroup_coordinates_form(kw.cor) && continue
-            push!(grouped, name(kw.by))
+            push!(projected, name(kw.by))
         end
     end
-    hit = sort!(collect(intersect(groups, grouped)))
+    hit = sort!(collect(intersect(groups, projected)))
     isempty(hit) || error(
         "$prefix: `resample_groups` names $(hit), the grouping of a grouped " *
-        "`hsgp(...; by=...)`: its new levels' basis weights have no input on " *
-        "RKBRMI (a design reusing the fitted labels would read the fitted " *
-        "levels' weights). SBBRMI draws new levels of a grouped HSGP: " *
-        "`reprocess(sb, rows; resample_groups=...)`")
+        "`hsgp(...; by=..., orthogonal_to=...)`: each level's projection is " *
+        "fitted on that level's training rows, which a new level does not have, " *
+        "so its projection is undefined")
     nothing
 end
 

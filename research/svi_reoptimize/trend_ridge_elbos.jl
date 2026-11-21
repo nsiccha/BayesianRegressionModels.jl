@@ -9,6 +9,7 @@
 const KS = isempty(ARGS) ? [0, 1] : parse.(Int, ARGS)
 empty!(ARGS)
 const ROOT = get(ENV, "BRM_ROOT", pwd())
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include(joinpath(ROOT, "test", "nlme_fixtures.jl"))
 using LinearAlgebra, Random, Statistics, Printf
 import LogDensityProblems

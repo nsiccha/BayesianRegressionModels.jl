@@ -1,4 +1,5 @@
 # Public synthetic acceptance for statistical implementations adopted by BRM.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using Distributions, LinearAlgebra, Statistics, Enzyme, LogDensityProblems
 using DifferentiationInterface: AutoEnzyme
@@ -188,7 +189,7 @@ end
 # `Normal(0, 0.001 n_c)` per hand-listed component, the BYM2 scaling factor from
 # the dense pseudo-inverse of each component's Laplacian, and each row's effect
 # by its label. Only the label -> coordinate map is read from `car_graph`.
-@stestset "rkppl_model car_icar and car_bym2 bodies" begin
+@stestset "rkppl_model car_icar, car_icar_scaled and car_bym2 bodies" begin
     area = ["a", "b", "c", "d", "e", "f", "g", "a", "e"]
     from, to = ["a", "b", "c", "a", "d", "e"], ["b", "c", "d", "c", "h", "f"]
     y = collect(range(-0.3, 0.4; length=length(area)))
@@ -211,7 +212,9 @@ end
     graph_data = (; y, area_pos=graph.area, node1=graph.node1, node2=graph.node2,
         n_nodes=graph.n_nodes, n_struct=graph.n_struct, comp_start=graph.comp_start,
         comp_size=graph.comp_size, struct_pos=graph.struct_pos, is_struct=graph.is_struct,
-        inv_scale=graph.inv_scale)
+        inv_scale=graph.inv_scale, n_island=graph.n_island, island_pos=graph.island_pos)
+    @test graph.n_island == 1
+    @test graph.island_pos == [2, 2, 2, 2, 2, 2, 1, 2]
     recipes = Dict(
         :car_icar => :(begin
             sigma ~ HalfNormal(1)
@@ -220,6 +223,18 @@ end
             phi_sums = cs[comp_start .+ comp_size] .- cs[comp_start]
             phi_sums .~ Normal.(0, 0.001 .* comp_size)
             effects = sigma .* vcat(phi, 0.0)[struct_pos]
+            y .~ Normal.(effects[area_pos], 1)
+        end),
+        :car_icar_scaled => :(begin
+            sigma ~ HalfNormal(1)
+            theta[1:n_island] .~ Normal.(0, 1)
+            phi[1:n_struct] ~ ICAR(node1, node2)
+            cs = cumsum(vcat(0.0, phi))
+            phi_sums = cs[comp_start .+ comp_size] .- cs[comp_start]
+            phi_sums .~ Normal.(0, 0.001 .* comp_size)
+            field = vcat(phi, 0.0)[struct_pos]
+            islands = vcat(theta, 0.0)[island_pos]
+            effects = sigma .* (sqrt.(inv_scale) .* field .+ islands)
             y .~ Normal.(effects[area_pos], 1)
         end),
         :car_bym2 => :(begin
@@ -235,7 +250,7 @@ end
                 sqrt.(1 .- rho .* is_struct) .* theta)
             y .~ Normal.(effects[area_pos], 1)
         end))
-    for name in (:car_icar, :car_bym2)
+    for name in (:car_icar, :car_icar_scaled, :car_bym2)
         @testset "$name" begin
             body = :(begin r ~ owned(area, from, to); y .~ Normal.(r, 1) end)
             bound, built, u = library_check(name, body, columns)
@@ -248,6 +263,13 @@ end
                     for c in components)
             effect = if name === :car_icar
                 label -> haskey(scales, label) ? nt.sigma * phi[field(label)] : 0.0
+            elseif name === :car_icar_scaled
+                # the island "g" reads its own `theta`
+                @test length(nt.theta) == 1
+                prior += sum(logpdf.(Normal(), nt.theta))
+                label -> haskey(scales, label) ?
+                    nt.sigma * phi[field(label)] / sqrt(scales[label]) :
+                    label == "g" ? nt.sigma * only(nt.theta) : 0.0
             else
                 @test length(nt.theta) == length(nodes)
                 prior += logpdf(Beta(0.5, 0.5), nt.rho) + sum(logpdf.(Normal(), nt.theta))

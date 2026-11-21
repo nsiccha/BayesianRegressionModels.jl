@@ -12,6 +12,7 @@
 #
 #     [ITERATIONS=3000] julia --project=test research/svi_reoptimize/trend_ridge_copies.jl
 const ROOT = get(ENV, "BRM_ROOT", pwd())
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include(joinpath(ROOT, "test", "nlme_fixtures.jl"))
 using LinearAlgebra, Random, Statistics, Printf
 const BRM = BayesianRegressionModels

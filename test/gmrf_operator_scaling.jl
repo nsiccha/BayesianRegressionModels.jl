@@ -1,5 +1,6 @@
 # This measures the native prior operator, not a Laplace fit or a log-determinant
 # approximation. Dense correctness oracles stay in the small precision fixture.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include("gmrf_precision.jl")
 
 function gmrf_operator_mesh(side)

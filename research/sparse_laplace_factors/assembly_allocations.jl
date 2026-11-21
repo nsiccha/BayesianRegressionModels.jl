@@ -1,5 +1,6 @@
 # Attribute the allocation constant, independently of the scaling check.
 empty!(ARGS); push!(ARGS, "selections stay compact")
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include(joinpath(@__DIR__, "../../test/laplace_factors.jl"))
 
 function profile_assembly(n)

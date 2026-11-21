@@ -1,6 +1,7 @@
 # Integration of weighted batches and structured local factors with canonical
 # task parallelism and same-target checkpoints, including lazy polishing state.
 # RUN: julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 using Serialization

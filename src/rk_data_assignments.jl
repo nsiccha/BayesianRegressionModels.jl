@@ -148,10 +148,15 @@ _rk_design_reads(prepared) = union!(
 # Defines what the priors as authored read from data arrays in `derived`, whose
 # data assignments the emitter writes first, and returns the generated inputs, each
 # with the data array it copies.
-function _rk_prior_read_values!(derived, columns, taken, prepared, data::AbstractDict)
+function _rk_prior_read_values!(derived, columns, taken, prepared, data::AbstractDict, population_priors)
     arrays, summaries = Set{Symbol}(), Dict{Symbol,Tuple{Any,Symbol}}()
     foreach(parameter -> _rk_collect_prior_reads!(arrays, summaries, parameter.prior, data),
         prepared.parameters)
+    refs = Set(arg.args[1] for prior in population_priors for arg in prior.args
+        if Meta.isexpr(arg, :ref, 2))
+    for source in keys(data)
+        _rk_prior_array_name(source) in refs && push!(arrays, source)
+    end
     design = _rk_design_reads(prepared)
     # A reduction of an array only priors read sums the array's definition.
     for (_reduction, source) in Base.values(summaries)

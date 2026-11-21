@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels
 const _brm_svi_coordinate_owners = BayesianRegressionModels._brm_svi_coordinate_owners
 

@@ -1,6 +1,7 @@
 # Synthetic separable GMRF proxy: no consumer data or model is imported.
 # RUN: julia --project=test research/matrixfree_conditional/scaling.jl NX NY HOURS [det]
 # `det` also measures the fixed-probe determinant and its selected derivative.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, LinearAlgebra, SparseArrays, Random, Printf
 const BRM = BayesianRegressionModels
 BLAS.set_num_threads(1)

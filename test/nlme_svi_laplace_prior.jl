@@ -1,5 +1,6 @@
 # Small independent quadratic controls for the carried-prior hooks. No native
 # AD/model preparation: derivative dispatch uses a known Gaussian likelihood.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, LinearAlgebra, Random
 const BRM = BayesianRegressionModels
 isdefined(BRM,:_BRMSVILaplaceTarget) ||

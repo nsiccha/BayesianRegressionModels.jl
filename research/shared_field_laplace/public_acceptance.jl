@@ -3,6 +3,7 @@
 # processes, first `fit`, then `reproduce`; artifacts are never overwritten.
 # `integrated` compares a later integrated candidate with the retained fit,
 # allowing the source identity to change while keeping all numerical checks.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL,
     Enzyme, DifferentiationInterface, Random, LinearAlgebra, Statistics,
     Serialization, SHA, Test, Treebars, Distributions

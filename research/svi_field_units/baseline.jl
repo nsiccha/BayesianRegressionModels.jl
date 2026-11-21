@@ -13,6 +13,7 @@
 # Runs on the tree of the commit that added this file: the next commit removes the
 # unit structures it times. Several sizes in one process separate first-use
 # compilation from what repeats.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, Random, Statistics, Printf, LinearAlgebra
 const BRM = BayesianRegressionModels

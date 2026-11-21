@@ -12,6 +12,7 @@
 # (`test/jax_python.jl`); without it those checks are skipped.
 #
 # Run: RK_JAX_PYTHON=<python with jax> julia --project=test test/rk_jax.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL
@@ -163,6 +164,19 @@ function check_module(rk; anchors)
         @test_skip "RK_JAX_PYTHON names no Python with jax"
     end
     src
+end
+
+@testset "explicit cell vector width in JAX" begin
+    data = (; y=[0.3, -0.2], K=3, mu=[[0.4], [-0.7]])
+    model = @brm data begin
+        @plate for i in eachindex(y)
+            z[1:K] .~ Normal.(mu[i], 1)
+            y[i] ~ Normal(sum(z), 1)
+        end
+    end
+    rk = RKBRMI(model)
+    @test rk.model.layout.total == 6
+    check_module(rk; anchors=false)
 end
 
 @testset "bound anchors and level codes: the fit and a replay" begin

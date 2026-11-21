@@ -291,7 +291,7 @@ _RKLikelihoodSpec(fields::Vararg{Any,27}) = _RKLikelihoodSpec(fields..., false)
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
                 # :ranef_gather | :spline | :gp | :hsgp | :ar |
-                # :monotonic | :monotonic_summand | :dar | :me | :car | :cdar
+                # :monotonic | :monotonic_summand | :dar | :me | :car | :cdar | :rw
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -498,9 +498,8 @@ struct _RKStructuralPlan
     vector_parameters::Vector{_RKVectorParameter}
     r2d2_priors::Vector{_RKR2D2Prior}
     horseshoe_priors::Vector{_RKHorseshoePrior}
-    # The data's numeric scalars. A statement reads one by name, and
-    # `_rk_source_data_columns` binds those read: a number is a runtime input of
-    # the program, not a literal of it (user principle `0ikeidi`).
+    # Numeric scalars and whole predictor matrices that statements read by
+    # name. The binding supplies their current values at runtime.
     inputs::Dict{Symbol,Any}
     # What priors read from the data's arrays (`_rk_prior_read_values!`).
     prior_reads::Dict{Symbol,Any}
@@ -3314,6 +3313,9 @@ function _rk_model_offset_expr(node, target::Symbol, data::AbstractDict,
         "`$(repr(node))` is not elementwise arithmetic over data and model values")
     f = getf(node)
     args = map(arg -> _rk_model_offset_expr(arg, target, data, columns), getargs(node))
+    # A gather `x[rows]` has one value per row of its index
+    # (`_rk_model_value_axis`).
+    f === getindex && length(args) == 2 && return Expr(:ref, args...)
     haskey(_RK_DERIVED_BINOPS, f) && return Expr(:call, _RK_DERIVED_BINOPS[f], args...)
     haskey(_RK_DERIVED_CMP, f) && return Expr(:call, _RK_DERIVED_CMP[f], args...)
     haskey(_RK_DERIVED_MATH, f) &&
@@ -3489,6 +3491,14 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
             "data column; slice 1 admits raw data columns only")
         source = name(term)
         raw = get(data, source, nothing)
+        if _brm_numeric_matrix_term(term)
+            return map(_brm_design_columns(term)) do c
+                key = _rk_mint_generated!(taken, columns, string(c.label))
+                columns[key] = c.values
+                _RKTermSpec(:continuous, [key], (; matrix_column=c.preprocess.const_),
+                    c.label, c.label)
+            end
+        end
         raw isa AbstractVector || error(
             "$prefix: predictor `$target` column `$source` is not a vector")
         if _brm_is_categorical_data(raw)
@@ -3592,7 +3602,7 @@ function _rk_design_addressee_groups(design, target::Symbol;
         kind = isnothing(column.preprocess) ? nothing :
             column.preprocess.kind
         addressee = if kind in (:interaction, :zscale, :standardize,
-                :center, :protect, :model_value)
+                :center, :protect, :model_value, :matrix_column)
             column.label
         elseif kind === :population_factor_dummy || isnothing(kind)
             isnothing(column.source) ? column.label : column.source
@@ -3619,7 +3629,7 @@ end
 # defaults there either). Design cells and the mo/ar/me latent cells share
 # this one rewrite; anything else fails closed naming the admitted set.
 function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
-        prefix="RK backend")
+        prefix="RK backend", spell=_rk_effect_spelling)
     expression isa ExprColumn || error(
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` must be a callable prior expression")
@@ -3627,7 +3637,7 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
     head === Flat && return _rk_effect_flat_args(
         expression, target, label; prefix)
     head === LocationScale && return _rk_effect_studentt_args(
-        expression, target, label; prefix)
+        expression, target, label; prefix, spell)
     head in (Normal, Cauchy, Laplace, Logistic) || error(
         "$prefix: predictor `$target` population-effect priors must be " *
         "`Normal`/`Cauchy`/`Laplace`/`Logistic(location, scale)`, " *
@@ -3669,11 +3679,11 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
     isfinite(scale) && scale > 0 || error(
         "$prefix: predictor `$target` population-effect `$head` scale " *
         "for `$label` must be finite and positive")
-    (nameof(head), (_rk_effect_spelling(raw[1], location), _rk_effect_spelling(raw[2], scale)))
+    (nameof(head), (spell(raw[1], location), spell(raw[2], scale)))
 end
 
 function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
-        label::Symbol; prefix="RK backend")
+        label::Symbol; prefix="RK backend", spell=_rk_effect_spelling)
     isempty(getkwargs(expression)) || error(
         "$prefix: predictor `$target` population-effect `LocationScale` " *
         "prior cannot have keywords in slice 1")
@@ -3708,8 +3718,7 @@ function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
     isfinite(s) && s > 0 || error(
         "$prefix: predictor `$target` population-effect StudentT " *
         "scale for `$label` must be finite and positive")
-    (:StudentT, (_rk_effect_spelling(only(bargs), nu), _rk_effect_spelling(mu_raw, mu),
-        _rk_effect_spelling(s_raw, s)))
+    (:StudentT, (spell(only(bargs), nu), spell(mu_raw, mu), spell(s_raw, s)))
 end
 
 function _rk_effect_flat_args(expression::ExprColumn, target::Symbol,
@@ -3720,10 +3729,21 @@ function _rk_effect_flat_args(expression::ExprColumn, target::Symbol,
     (:Flat, ())
 end
 
+function _rk_matrix_prior_arg(arg, value)
+    if arg isa ExprColumn{typeof(getindex)}
+        args = getargs(arg)
+        if length(args) == 2 && first(args) isa NamedColumn && last(args) isa Int &&
+                _brm_data_value(first(args)) isa AbstractVector
+            return Expr(:ref, _rk_prior_array_name(name(first(args))), last(args))
+        end
+    end
+    _rk_effect_spelling(arg, value)
+end
+
 # One rewrite for a whole design column vector: stated cells materialize
 # to `(family, args)`, unstated cells take the Normal(0, 1) default.
 function _rk_materialize_effect_prior_cells(overrides, n::Integer,
-        target::Symbol, labels::Vector{Symbol}; prefix="RK backend")
+        target::Symbol, labels::Vector{Symbol}, columns; prefix="RK backend")
     cells = Tuple{Symbol,Tuple}[(:Normal, (0.0, 1.0)) for _ in 1:n]
     isnothing(overrides) && return cells
     length(overrides) == n || error(
@@ -3731,8 +3751,9 @@ function _rk_materialize_effect_prior_cells(overrides, n::Integer,
         "$(length(overrides)) priors for $n population columns")
     for i in eachindex(overrides)
         isnothing(overrides[i]) && continue
-        cells[i] = _rk_materialize_effect_prior(
-            overrides[i], target, labels[i]; prefix)
+        p = columns[i].preprocess
+        spell = p !== nothing && p.kind === :matrix_column ? _rk_matrix_prior_arg : _rk_effect_spelling
+        cells[i] = _rk_materialize_effect_prior(overrides[i], target, labels[i]; prefix, spell)
     end
     cells
 end
@@ -3794,7 +3815,7 @@ Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI)
             cell for cell in overrides]
     labels = Symbol[c.label for c in design.columns]
     cells = _rk_materialize_effect_prior_cells(
-        mat_overrides, n, target, labels; prefix)
+        mat_overrides, n, target, labels, design.columns; prefix)
     groups, order = _rk_design_addressee_groups(design, target; prefix)
     priors = _RKPopulationPrior[]
     for addressee in order
@@ -4130,6 +4151,9 @@ function _rk_gate_cross_identified!(terms::Vector{_RKTermSpec},
         spec.kind === :continuous || continue
         dname = only(spec.columns)
         haskey(spines, dname) && continue
+        # A matrix column reads a slice of its named input. The raw matrix
+        # cannot be a categorical interaction operand.
+        haskey(spec.options, :matrix_column) && continue
         identity = haskey(data, dname) ? dname :
             _rk_gate_derived_expr(dname, derived, target)
         push!(mains, (spec.addressee, identity))
@@ -5247,6 +5271,12 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
         comp_size=column(:comp_size, collect(Int, state.comp_size)),
         inv_scale=column(:inv_scale, state.inv_scale),
         is_struct=column(:is_struct, Float64.(state.struct_idx .> 0)))
+    # A scaled ICAR field gives each island its own `theta`: an area reads its
+    # island's slot, any other area the zero padding slot `n_island + 1`, and
+    # `theta`'s length is the length of a data vector, the islands' positions.
+    islands = _brm_car_scaled_icar(state) ? (; island_pos=column(:island_pos,
+            [k == 0 ? state.n_island + 1 : k for k in state.island_idx]),
+        island_nodes=column(:island_nodes, findall(iszero, state.struct_idx))) : (;)
     value = _rk_mint_generated!(taken, columns, stem)
     sigma_param = _rk_term_parameter(state.sd_prior) do prior
         sigma_family, sigma_args, sigma_support = _rk_gp_hyper_prior(
@@ -5261,11 +5291,13 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
             _rk_car_mixing_prior(prior, target, source)..., :rho), state.mixing_prior) :
         nothing
     _RKTermSpec(:car, Symbol[],
-        (; value, area, source, type=state.type, n_struct=state.n_struct, nodes=state.nodes,
+        (; value, area, source, type=state.type, state.scaled, n_struct=state.n_struct,
+         n_island=state.n_island, island_areas=findall(iszero, state.struct_idx),
+         nodes=state.nodes,
          components=Tuple(zip(state.comp_start, state.comp_size)),
-         graph..., inputs=(graph.node_labels, graph.node1, graph.node2, graph.struct_pos,
-                           graph.comp_start, graph.comp_size, graph.inv_scale,
-                           graph.is_struct),
+         graph..., islands..., inputs=(graph.node_labels, graph.node1, graph.node2,
+                           graph.struct_pos, graph.comp_start, graph.comp_size,
+                           graph.inv_scale, graph.is_struct, values(islands)...),
          sigma_param, rho_param),
         value, value)
 end
@@ -5340,6 +5372,34 @@ function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
          step_fit=_rk_fit_twin!(derived, columns, taken, data, source),
          factor, L=state.L, inputs=Tuple(n for n in (factor,) if n !== nothing),
          sigma_param, rho_param),
+        value, value)
+end
+
+# ---- single-path random walks (rw; mirrors `_sb_rw1`, `_sb_rw2`, `_sb_rw_sum`) ----
+#
+# An `:rw` term carries the fit-role input of its time column, whose sorted
+# levels the program computes (`brm_fit_levels`) and looks each row's step up in,
+# so the number of steps is an input (user principle `0ikeidi`). `order` and
+# `sum_to_zero` select the law, as on SB; the scale keeps SB's `lower=0` kernel
+# (`restricted(Normal(0, s), 0, Inf)`). A replay is refused (`_rk_check_replay_terms`).
+function _rk_plan_rw_term!(prepared::_BRMPreparedTerm{typeof(rw)},
+        target::Symbol, data::AbstractDict, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}; derived::Vector{_RKDerivedSpec})
+    state = prepared.state
+    source = prepared.source
+    columns[source] = get(columns, source, data[source])
+    value = _rk_mint_generated!(taken, columns, "rw_$(target)_$(source)")
+    sigma_param = _rk_term_parameter(state.sd_prior) do prior
+        family, args, support = _rk_gp_hyper_prior(prior, "innovation scale", target,
+            source; term="rw")
+        support === :positive && (support = (:restricted, 0.0, Inf))
+        _RKSampledParameter(:sigma, family, args, support, :sigma)
+    end
+    _RKTermSpec(:rw, Symbol[],
+        (; value, source, steps=state.steps, n_steps=state.n_steps, order=state.order,
+         sum_to_zero=state.sum_to_zero,
+         step_fit=_rk_fit_twin!(derived, columns, taken, data, source),
+         inputs=(), sigma_param),
         value, value)
 end
 
@@ -5537,11 +5597,19 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         level_cor = get(state.by, :level_cor, nothing)
         _brm_check_hyper_level_correlation(level_cor, hyper_plans;
             what="hsgp(...; by=..., cor=...)", prefix="$prefix: predictor `$target`")
+        # The term's levels are a fitted value of the grouping's fit-role
+        # input (`g_fit_levels = brm_fit_levels(g_fit)`), as a `(… | g)`
+        # block's are: the training levels on a frozen replay, the design's
+        # when `g` is resampled, so one program serves every design and its
+        # weights have one row per level of that set. A coordinate field
+        # twins its grouping itself (`_rk_plan_level_coordinates!`).
+        level_fit = level_cor isa _BRMMultigroupCoordinates ? (;) :
+            (; group_fit_source=_rk_fit_twin!(derived, columns, taken, data, state.by.source))
         # `group_column` is the authored `by` column, which `group_source`
         # renames when that name is taken.
         (; group_index=idx, group_source=source, group_column=state.by.source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
-            level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
+            level_cor, level_fit..., _rk_plan_level_coordinates!(level_cor, data, columns, taken,
                 derived; id, source=state.by.source, levels=state.by.levels,
                 hyper_plans, orthogonal)...,
             _rk_plan_projection_levels!(orthogonal, state, idx, data, columns, taken,
@@ -6560,6 +6628,9 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         elseif prepared.callable === cdar
             push!(terms, _rk_plan_cdar_term!(prepared, target, context.data, columns, taken;
                 derived))
+        elseif prepared.callable === rw
+            push!(terms, _rk_plan_rw_term!(prepared, target, context.data, columns, taken;
+                derived))
         elseif prepared.callable === gmrf
             push!(terms, _rk_plan_gmrf_term!(prepared, target, context.data, columns, taken; derived))
         else
@@ -7470,6 +7541,17 @@ _rk_data_scalar(name::Symbol, data::AbstractDict) = _rk_scalar_value(get(data, n
 # What `_RKStructuralPlan.inputs` holds.
 _rk_scalar_inputs(data::AbstractDict) = Dict{Symbol,Any}(key => value
     for (key, value) in data if _rk_scalar_value(value))
+
+# Whole matrices read by population components travel with the other named inputs.
+function _rk_predictor_inputs(data, predictors)
+    inputs = _rk_scalar_inputs(data)
+    for predictor in predictors, term in predictor.terms
+        haskey(term.options, :matrix_column) || continue
+        source = term.options.matrix_column.source
+        inputs[source] = data[source]
+    end
+    inputs
+end
 
 function _rk_fold_assignment_consts!(kept, data::AbstractDict,
         parameters::Set{Symbol})
@@ -9759,6 +9841,6 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
         [vector_specs; implicit_vectors; components.vectors],
-        r2d2_specs, hs_specs, _rk_scalar_inputs(context.data),
-        _rk_prior_read_values!(derived, columns, taken, prepared, context.data))
+        r2d2_specs, hs_specs, _rk_predictor_inputs(context.data, predictor_specs),
+        _rk_prior_read_values!(derived, columns, taken, prepared, context.data, prior_specs))
 end

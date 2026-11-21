@@ -497,6 +497,9 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :cdar
             # Each row's walk deviation, returned by the term's walk block.
             push!(summands, refref[index])
+        elseif term.kind === :rw
+            # Each row's walk value, returned by the term's walk block.
+            push!(summands, refref[index])
         elseif term.kind === :offset
             push!(summands, colref[index])
         elseif term.kind === :structured
@@ -771,12 +774,18 @@ end
 # recurse, so the lowered plan is identical by construction. Default
 # on at the Digest-2 pin; `false` remains the decomposed-twin pin.
 #
+
+# A name not in `taken`, recorded there. The first collision appends `_`, later
+# ones number the name (`x_2`, `x_3`, ...), as does every collision of a name
+# that already ends in `_` (`y_1`): SBBRMI emits these names as Stan
+# identifiers, and Stan reserves every identifier that ends in `__`.
 function _rk_ast_fresh_name(base::String, taken::Set{Symbol})
     name = Symbol(base)
-    tail = ""
+    stem = endswith(base, "_") ? base : string(base, "_")
+    n = 0
     while name in taken
-        tail *= "_"
-        name = Symbol(base, tail)
+        n += 1
+        name = n == 1 && stem != base ? Symbol(stem) : Symbol(stem, n)
     end
     push!(taken, name)
     name
@@ -1649,11 +1658,16 @@ end
 # of one declaration is one program (principle `0ikeidi`): `phi` has
 # `sum(comp_size)` entries and the components' sums are one vector factor
 # `Normal.(0, 0.001 .* comp_size)` (RKPPL 0.1.145), as `rkppl_model(:car_bym2)`
-# spells it. Islands read the zero padding slot of `phi`.
+# spells it. Islands read the zero padding slot of `phi`. A scaled ICAR field
+# (`scaled=true`) is the BYM2 field with its mixing share held at 1:
+# `sigma .* (sqrt.(inv_scale) .* phi_full .+ vcat(theta, 0.0)[island_pos])`, one
+# standard-normal `theta` per island, whose number is the length of the data
+# vector `island_nodes`, so a graph without islands is the same program.
 function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing,
         bindings=Pair{Symbol,Any}[])
     options = term.options
     bym2 = options.type === :bym2
+    scaled = _brm_car_scaled_icar(options)
     separation = get(options, :separation, nothing)
     sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
     rho_prior = bym2 ? _rk_ast_param_law(options.rho_param, bindings, taken) : nothing
@@ -1672,6 +1686,10 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     if bym2
         inv_scale = _rk_block_argument!(block, :inv_scale, options.inv_scale)
         is_struct = _rk_block_argument!(block, :is_struct, options.is_struct)
+    elseif scaled
+        inv_scale = _rk_block_argument!(block, :inv_scale, options.inv_scale)
+        island_pos = _rk_block_argument!(block, :island_pos, options.island_pos)
+        island_nodes = _rk_block_argument!(block, :island_nodes, options.island_nodes)
     end
     arguments = separation === nothing ? nothing :
         _rk_ast_car_separation_arguments!(block, separation, indices)
@@ -1683,6 +1701,11 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
         rho, theta = _rk_block_local!(block, :rho), _rk_block_local!(block, :theta)
         push!(block.statements, _rk_ast_hyper_statement(rho, rho_prior),
             Expr(:call, :.~, Expr(:ref, theta, Expr(:call, :axes, inv_scale, 1)),
+                _rk_ast_dotted(:Normal, 0, 1)))
+    elseif scaled
+        theta = _rk_block_local!(block, :theta)
+        push!(block.statements,
+            Expr(:call, :.~, Expr(:ref, theta, Expr(:call, :axes, island_nodes, 1)),
                 _rk_ast_dotted(:Normal, 0, 1)))
     end
     if separation === nothing
@@ -1705,7 +1728,16 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     end
     push!(block.statements,
         Expr(:(=), field, Expr(:ref, Expr(:call, :vcat, phi, 0.0), struct_pos)))
-    value = bym2 ?
+    if scaled
+        # Every `vcat` operand is a local of its own (see `_rk_ast_car_separated!`).
+        island_effects = _rk_block_local!(block, :theta_full)
+        push!(block.statements, Expr(:(=), island_effects,
+            Expr(:ref, Expr(:call, :vcat, theta, 0.0), island_pos)))
+    end
+    value = scaled ?
+        Expr(:call, :.*, sigma, Expr(:call, :.+,
+            Expr(:call, :.*, _rk_ast_dotted(:sqrt, inv_scale), field), island_effects)) :
+        bym2 ?
         Expr(:call, :.*, sigma, Expr(:call, :.+,
             Expr(:call, :.*, _rk_ast_dotted(:sqrt, Expr(:call, :.*, rho, inv_scale)), field),
             Expr(:call, :.*, _rk_ast_dotted(:sqrt, Expr(:call, :.-, 1.0,
@@ -1715,16 +1747,25 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     structured = separation === nothing ?
         "the ICAR field `$phi ~ ICAR(node1, node2)` over the areas' adjacency, with a soft sum-to-zero per connected component" :
         "the ICAR field `$phi`, separated into independent parts"
-    doc = @_rk_definition_doc """
+    doc = scaled ? @_rk_definition_doc("""
+        An areal (`car`) effect, the variance-scaled intrinsic CAR (ICAR) field.
+
+        Draws the marginal SD `$sigma`, one standard-normal island effect `$theta`
+        per island and $structured. Returns each row's area effect,
+        `$sigma .* (sqrt.(inv_scale) .* $field .+ $island_effects)` at the row's area
+        `$rows`, where `inv_scale` is `1 / s_c` of the area's connected component.""") :
+        @_rk_definition_doc """
         An areal (`car`) effect$(bym2 ? " in the BYM2 convolution" : ", intrinsic CAR (ICAR)").
 
         Draws the scale `$sigma`$(bym2 ? ", the mixing weight `$rho`, unstructured effects `$theta ~ Normal(0, 1)`" : "")
         and $structured. Islands read 0. Returns each row's area effect,
         $(bym2 ? "`$sigma .* (sqrt.($rho .* inv_scale) .* $field .+ sqrt.(1 .- $rho .* is_struct) .* $theta)`" :
             "`$sigma .* $field`") at the row's area `$rows`."""
-    call = _rk_ast_block_call!(definitions, taken, bym2 ? "brm_car_bym2" : "brm_car_icar",
+    call = _rk_ast_block_call!(definitions, taken,
+        bym2 ? "brm_car_bym2" : scaled ? "brm_car_icar_scaled" : "brm_car_icar",
         block, Expr(:ref, effects, rows); doc)
-    locals = bym2 ? (; sigma, rho, phi, theta, separated...) : (; sigma, phi, separated...)
+    locals = bym2 ? (; sigma, rho, phi, theta, separated...) :
+        scaled ? (; sigma, phi, theta, separated...) : (; sigma, phi, separated...)
     call, locals
 end
 
@@ -1975,9 +2016,127 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows,
     call, (; sigma, rho, eta)
 end
 
+# A single-path random walk, as StanBlocks' `_sb_rw1` / `_sb_rw2` / `_sb_rw_sum`.
+# Its `n` steps are the fitted levels of the time column, an input, so every
+# grid of one declaration is one program (user principle `0ikeidi`); each row
+# reads the walk at its step (`step_rows`, positions in the fitted levels).
+# A zero-start walk draws its `n - 1` standardized innovations `z` and integrates
+# them once (order 1) or twice (order 2) from 0. A sum-to-zero walk draws its
+# standardized values `phi` flat and states their law as factors: the
+# `order`-th differences standard normal, `car`'s soft sum-to-zero on their sum,
+# and for order 2 the flat linear trend's Jacobian `log(sigma)`, so that the trend
+# is flat in the walk's own units (R-INLA's `rw2`); `Exponential(1 / sigma)` has
+# exactly that log density at 0.
+function _rk_ast_rw_block!(definitions, taken, term, step_rows, step_levels;
+        bindings=Pair{Symbol,Any}[])
+    options = term.options
+    order, sum_to_zero = options.order, options.sum_to_zero
+    sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
+    block = _rk_block_body(sigma_prior)
+    sigma_prior, = _rk_block_derived_inputs!(block, sigma_prior)
+    step_position = _rk_block_argument!(block, :step, step_rows)
+    steps = _rk_block_argument!(block, :steps, step_levels)
+    n, sigma = _rk_block_local!(block, :n), _rk_block_local!(block, :sigma)
+    path, value = _rk_block_local!(block, :path), _rk_block_local!(block, :value)
+    push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior),
+        Expr(:(=), n, Expr(:call, :length, steps)))
+    if sum_to_zero
+        phi, d = _rk_block_local!(block, :phi), _rk_block_local!(block, :d)
+        total = _rk_block_local!(block, :total)
+        slice(lo, hi) = Expr(:ref, phi, Expr(:call, :(:), lo,
+            hi == 0 ? n : Expr(:call, :-, n, hi)))
+        differences = order == 1 ? Expr(:call, :.-, slice(2, 0), slice(1, 1)) :
+            Expr(:call, :.+, Expr(:call, :.-, slice(3, 0),
+                Expr(:call, :.*, 2.0, slice(2, 1))), slice(1, 2))
+        push!(block.statements,
+            Expr(:call, :.~, Expr(:ref, phi, Expr(:call, :(:), 1, n)), _rk_ast_dotted(:Flat)),
+            Expr(:(=), d, differences),
+            Expr(:call, :.~, d, _rk_ast_dotted(:Normal, 0, 1)),
+            Expr(:(=), total, Expr(:call, :sum, phi)),
+            Expr(:call, :~, total, Expr(:call, :Normal, 0.0, Expr(:call, :*, 0.001, n))))
+        if order == 2
+            trend = _rk_block_local!(block, :trend)
+            push!(block.statements,
+                Expr(:(=), trend, Expr(:call, :*, 0.0, sigma)),
+                Expr(:call, :~, trend, Expr(:call, :Exponential, Expr(:call, :/, 1.0, sigma))))
+        end
+        push!(block.statements, Expr(:(=), path, Expr(:call, :.*, sigma, phi)),
+            Expr(:(=), value, Expr(:ref, path, step_position)))
+        locals = (; sigma, phi)
+        law = order == 1 ? "first differences" :
+            "second differences `$phi[t+1] - 2$phi[t] + $phi[t-1]`"
+        doc = @_rk_definition_doc """
+            An intrinsic random walk of order $order with a soft sum-to-zero (`rw(...; order = $order, sum_to_zero = true)`).
+
+            Draws the innovation scale `$sigma` and the standardized values `$phi`, one per
+            fitted step `$steps`, flat; their $law are `Normal(0, 1)` and their sum is
+            `Normal(0, 0.001 n)`$(order == 2 ? ", and `$trend ~ Exponential(1 / $sigma)` at 0 adds the flat linear trend's Jacobian `log($sigma)`" : "").
+            Returns each row's value `$sigma * $phi` at its step `$step_position`."""
+    else
+        # The path is a recurrence: a shared RK kernel runs it as `cdar`'s walk
+        # does, one group here, `brm_walk_rows(1, n - 1)`, so a cell (a row the
+        # sparse Laplace evaluates) computes it inside an authored plate, which
+        # has a row form; `cumsum` has none. RKPPL refuses a `scan` `do` block
+        # in a submodel body. The scan includes its zero start.
+        z, rows = _rk_block_local!(block, :z), _rk_block_local!(block, :rows)
+        scans = order == 1 ? Base.remove_linenums!(quote
+            path = ReactiveKernels.scan(e; init = 0.0, include_init = true) do level, x
+                next = level + sigma * x
+                return (next, next)
+            end
+        end) : Base.remove_linenums!(quote
+            increments = ReactiveKernels.scan(e; init = 0.0) do d, x
+                next = d + sigma * x
+                return (next, next)
+            end
+            path = ReactiveKernels.scan(increments; init = 0.0, include_init = true) do level, d
+                next = level + d
+                return (next, next)
+            end
+        end)
+        walk_body = Base.remove_linenums!(quote
+            flat = vec(innovations)
+            walk = $(_rk_ast_graph_plate([:rows], [:r], Expr(:block,
+                :(e = flat[r]), scans.args..., :path)))
+            values = $(_rk_ast_graph_plate([:step], [:s], :(walk[1][s])))
+            return values
+        end)
+        walk_doc = @_rk_definition_doc """
+            A zero-start random walk of order $order (`rw`), as one group of a walk.
+
+            `innovations` holds the walk's standardized innovations, `rows[1]` their
+            positions. The walk is 0 at the first step, then $(order == 1 ?
+                "adds `sigma * innovations[t]` per step" :
+                "its increments, `sigma * innovations[1]` first, each add `sigma * innovations[t]`"),
+            in O(steps). Returns each row's value at its step position `step`."""
+        walker = _rk_ast_shared_definition!(definitions, taken,
+            order == 1 ? :brm_rw_walk : :brm_rw2_walk,
+            [:innovations, :sigma, :rows, :step], walk_body; kernel=true, doc=walk_doc)
+        W = Expr(:call, :-, n, 1)
+        push!(block.statements,
+            Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, W)),
+                _rk_ast_dotted(:Normal, 0, 1)),
+            Expr(:(=), rows, Expr(:call, :brm_walk_rows, 1, W)),
+            Expr(:(=), value, Expr(:call, walker, z, sigma, rows, step_position)))
+        locals = (; sigma, z)
+        doc = @_rk_definition_doc """
+            A zero-start random walk of order $order (`rw(...$(order == 2 ? "; order = 2" : ""))`).
+
+            Draws the innovation scale `$sigma` and standardized innovations
+            `$z[1:n-1] ~ Normal(0, 1)` over the fitted steps `$steps`. The walk is 0 at the
+            first step and $(order == 1 ? "adds `$sigma * $z[t]` per step" :
+                "its increments, starting with `$sigma * $z[1]`, add `$sigma * $z[t]` per step").
+            Returns each row's value at its step `$step_position`."""
+    end
+    call = _rk_ast_block_call!(definitions, taken, sum_to_zero ? "brm_rw_sum" : "brm_rw",
+        block, value; doc)
+    call, locals
+end
+
+# The values of the walk terms (`cdar`, `rw`), reserved program names.
 function _rk_ast_cdar_names(plan::_RKStructuralPlan)
     Set{Symbol}(term.options.value for predictor in plan.predictors
-        for term in predictor.terms if term.kind === :cdar)
+        for term in predictor.terms if term.kind === :cdar || term.kind === :rw)
 end
 
 function _rk_ast_dar_names(plan::_RKStructuralPlan)
@@ -2045,7 +2204,7 @@ function _rk_ast_class_block_predictor!(defs, stmts, taken, coordinates, predict
             "`CategoricalLogit(@brm(...))` takes " *
             "$(join(keys(_RK_POPULATION_FAMILIES), ", ")) coefficient laws")
         push!(columns, term.kind === :intercept ?
-            Expr(:call, :ones, Expr(:call, :length, key)) : only(term.columns))
+            Expr(:call, :ones, Expr(:call, :length, key)) : get(term.options, :matrix_column, only(term.columns)))
         push!(laws, prior)
         push!(coefficients, (; predictor=predictor.name, coefficient=term.addressee,
             response=key, nclass=response.n_levels - 1))
@@ -2162,11 +2321,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     for predictor in plan.predictors, term in predictor.terms
         term.kind === :hsgp && _rk_ast_multigroup_fit!(defs, stmts, taken, term)
     end
+    # The level set each index reads, by index: a grouped HSGP sizes its
+    # per-level weights by it (`_rk_ast_hsgp_grouped`).
+    level_sets = Dict{Symbol,Any}()
     for name in sort!(collect(keys(index_sources)); by=string)
         source, levels = index_sources[name]
         level_value = levels isa _RKLevelInput ? levels.name : levels isa Symbol ?
             _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
                 Expr(:call, :brm_fit_levels, levels)) : _rk_ast_level_values(levels)
+        level_sets[name] = level_value
         call = _rk_ast_statistical_call!(defs, taken, :brm_prepared_indices,
             source, level_value; kernel=true)
         push!(stmts, Expr(:(=), name, call))
@@ -2251,6 +2414,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         refactual = Dict{Int,Any}()
         replacements = Dict{Int,Any}()
         population = Tuple{Int,Any,Tuple{Symbol,Tuple}}[]
+        matrix_axis = findfirst(t -> haskey(t.options, :matrix_column), predictor.terms)
+        nrows = matrix_axis === nothing ? Expr(:call, :length, predictor.row_source) :
+            Expr(:call, :size, predictor.terms[matrix_axis].options.matrix_column.source, 1)
         scalar_stmts = Expr[]
         monotonic_alpha(term) = only(vector_priors[term.options.increments].args)
         # A monotonic term's value: its column of a joint block, or its own
@@ -2332,7 +2498,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 push!(stmts, Expr(:call, :~, term.options.value, call))
                 _rk_coordinate_record!(coordinates, (; kind=:car,
                     declaration=term.options.value, predictor=predictor.name,
-                    area=term.options.source, type=term.options.type, locals,
+                    area=term.options.source, type=term.options.type,
+                    scaled=get(term.options, :scaled, term.options.type === :bym2),
+                    n_island=get(term.options, :n_island, 0),
+                    island_areas=get(term.options, :island_areas, Int[]), locals,
                     separation=get(term.options, :separation, nothing)))
                 _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
                     term.options.type === :bym2 ?
@@ -2362,6 +2531,23 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     cor_factor=term.options.L, locals))
                 _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
                     (; sigma=locals.sigma, ar=locals.rho))
+            elseif kind === :rw
+                # The walk's steps are the fitted values of a fit-role input;
+                # rows find their positions in them by binary search.
+                steps = _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
+                    Expr(:call, :brm_fit_levels, term.options.step_fit))
+                rows = _rk_ast_fresh_name(string(term.label, "_", term.options.source), taken)
+                push!(stmts, Expr(:(=), rows, _rk_ast_statistical_call!(defs, taken,
+                    :brm_walk_positions, term.options.source, steps; kernel=true)))
+                call, locals = _rk_ast_rw_block!(defs, taken, term, rows, steps; bindings)
+                refactual[index] = term.options.value
+                push!(stmts, Expr(:call, :~, term.options.value, call))
+                _rk_coordinate_record!(coordinates, (; kind=:rw,
+                    declaration=term.options.value, predictor=predictor.name,
+                    time=term.options.source, steps=term.options.steps,
+                    order=term.options.order, sum_to_zero=term.options.sum_to_zero, locals))
+                _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
+                    (; sigma=locals.sigma))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]
@@ -2370,6 +2556,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 kind === :spline || kind === :hsgp ||
                 kind === :structured || kind === :gmrf ||
                 kind === :gp || kind === :dar || kind === :car || kind === :cdar ||
+                kind === :rw ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
                 nothing)
@@ -2435,9 +2622,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     (kind === :intercept ? predictor.row_source !== nothing :
                         kind === :continuous)
                 column = kind === :intercept ?
-                    Expr(:call, :ones, Expr(:call, :length, predictor.row_source)) :
-                    colactual[index]
-                push!(population, (index, column, override))
+                    Expr(:call, :ones, nrows) : colactual[index]
+                push!(population, (index, get(term.options, :matrix_column, column), override))
             else
                 if kind === :monotonic
                     # A horseshoe coefficient scales the owned contrast.
@@ -2472,6 +2658,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
+            term = _rk_hsgp_with_level_set(term, level_sets)
             hsgp_stmts, locals, fit = _rk_ast_value_hsgp(defs, term, taken, bindings; collection_cell)
             append!(stmts, hsgp_stmts)
             # An HSGP component owns its hyperparameters and basis weights
@@ -2569,7 +2756,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _rk_ast_fresh_name(string("pop_", target), taken),
                 string("X_", target),
                 [entry[2] for entry in population], [entry[3] for entry in population],
-                designs, coefficients)
+                designs, coefficients; prior_data=Dict(_rk_prior_array_name(v.source) => v.value
+                    for v in Base.values(plan.prior_reads)))
             replacements[first(first(population))] = name
             foreach(entry -> replacements[first(entry)] = nothing, population[2:end])
         end

@@ -13,6 +13,7 @@
 # distinct; a constant draw hides the shift). Public synthetic data only.
 #
 # Run: julia --project=test test/rk_resample_binder.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 include(joinpath(@__DIR__, "testset_filter.jl"))
 using BayesianRegressionModels, Distributions, Random, Statistics

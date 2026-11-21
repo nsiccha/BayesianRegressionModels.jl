@@ -18,6 +18,7 @@
 #
 # Run: julia --project=test test/rk_cdar.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, LinearAlgebra, Random, StanBlocks
 include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))

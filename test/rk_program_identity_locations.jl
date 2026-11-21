@@ -14,6 +14,7 @@
 #
 # Run: julia --startup-file=no --project=test test/rk_program_identity_locations.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 include(joinpath(@__DIR__, "testset_filter.jl"))

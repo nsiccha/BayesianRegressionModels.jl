@@ -88,6 +88,25 @@ end
     total
 end
 
+# A simplex per cell, `theta ~ Dirichlet(K, a)` (src/cell_total_coordinates.jl):
+# `theta[i] ~ _BRMCellDirichlet(K, 1.0, args…)` has the geometry of `shares`
+# with the total 1 (log-Jacobian `sum(log.(theta))`) and the Dirichlet's density.
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMCellDirichlet}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry((args[1],), :($(args[1]) - 1); support=:positive,
+        constrain=(u, shape, n, total, rest...) -> BRM._brm_shares_values(u, total),
+        unconstrain=(w, shape, n, total, rest...) -> _brm_simplex_unconstrain(w),
+        logjac=(u, shape, n, total, rest...) -> sum(BRM._brm_shares_log_values(u, total)))
+
+function _brm_simplex_unconstrain(w)
+    isapprox(sum(w), 1; rtol=1e-8) && all(>(0), w) || throw(ArgumentError(
+        "a `Dirichlet` cell latent's values must be positive and sum to 1: they sum " *
+        "to $(sum(w))"))
+    BRM._brm_shares_coordinates(w)
+end
+
+@inline ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCellDirichlet, w) =
+    BRM._brm_cell_dirichlet_logpdf(w, d.args...)
+
 # The grouped entries of `mi(x)::shares(total, rows)`
 # (src/cell_total_coordinates.jl) are one joint latent of the completion,
 # `y_shares[axes(rows, 1)] ~ _BRMGroupedShares{Law}(ends, residuals, args…)`:
@@ -785,7 +804,13 @@ function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, owner::Vector{Int})
             for owner in axis_owners]
         push!(declarations, entry.name => labels)
     end
-    declarations
+    # Units that own no coordinate (a model whose `subject_group` names units
+    # with no draws of their own) are RKPPL's `partitioned = :none`: every
+    # coordinate is shared, and shared values with no row form, such as a
+    # multigroup HSGP's weights, are computed once for all cells. An empty
+    # declaration leaves them undeclared, and the strict locality check then
+    # refuses them (snag brm-svi-fit-refu-d79b878a).
+    isempty(declarations) ? :none : declarations
 end
 
 BRM._rk_nlme_partition_query(context, unit) =

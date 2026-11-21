@@ -15,6 +15,7 @@
 # through WarmupHMC's quorum sampler (`min_completed = 3`), 400 draws, for each
 # seed, plain and wrapped, and prints max R-hat, min bulk ESS over every
 # coordinate (RK layout frame), divergences and wall time.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, Random, Statistics, LinearAlgebra
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, LogDensityProblems, WarmupHMC
 using DifferentiationInterface: AutoEnzyme

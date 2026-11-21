@@ -1,4 +1,5 @@
 # Run in the pinned NLMEEstimation environment described in test/README.md.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_connected_fixture.jl"))
 using NLMEEstimation, LinearAlgebra, Random

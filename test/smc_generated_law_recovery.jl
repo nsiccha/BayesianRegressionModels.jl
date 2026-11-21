@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 
 # An adaptive pilot of an RKBRMI model whose law is bound in the RK program's

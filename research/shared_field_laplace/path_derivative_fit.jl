@@ -2,6 +2,7 @@
 # Eq8/Alg2) and sampled log p-log q objective. No importance weighting, new
 # family, larger iteration budget, or reference-informed initialization.
 # julia --project=test research/shared_field_laplace/path_derivative_fit.jl 'native path derivative SVI'
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("gaussian_block_fit.jl")
 
 function path_derivative_terms(q,score,epsilon,eta)

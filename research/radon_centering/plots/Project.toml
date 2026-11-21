@@ -11,7 +11,7 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [compat]
 AlgebraOfGraphics = "0.13"
-AlgebraOfVega = "0.2"
+AlgebraOfVega = "0.2.76"
 CairoMakie = "0.15"
 CSV = "0.10"
 julia = "1.10"

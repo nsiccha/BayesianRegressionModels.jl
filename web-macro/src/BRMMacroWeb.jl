@@ -22,10 +22,11 @@ using Distributions
 using OrderedCollections: OrderedDict
 using WarmupHMC: initialize_mcmc, adaptive_warmup_mcmc
 using JSON
+# `vdata` is AoV's alias of `data`: the pipeline struct has a `data` property.
 using AlgebraOfVega: vega_head, vega_runtime, auto_remap_node, with_plot_caption,
     config, pointinterval, lineribbon, to_node, ppc_overlay,
+    vdata, mapping, visual, histogram,
     ECDFPlot, VLines, nonnumeric, Scatter
-import AlgebraOfGraphics as AoG
 
 # The @brm macro and backend implementations live in the main
 # `BayesianRegressionModels` package (moved out of web-macro in `ns/devibe`

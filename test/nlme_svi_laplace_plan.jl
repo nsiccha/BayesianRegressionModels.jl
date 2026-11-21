@@ -1,5 +1,6 @@
 # Eligibility only: no AD preparation, optimization, or posterior sampling.
 # Run independently with --project=test.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 isdefined(BRM, :_brm_svi_gaussian_certificate) ||

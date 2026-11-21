@@ -262,14 +262,8 @@ function _brm_gmrf_tracked_exact!(M::_BRMGMRFTracked)
     plan = nothing
     for t in 1:nt, j in 1:nc
         t == 1 && j == 1 || cholesky!(F, Symmetric(M.chains[j, t]))
-        selected = SelectedInversion.selinv(F; depermute=true).Z
-        if selected isa SelectedInversion.SupernodalMatrix
-            plan === nothing && (plan = SelectedInversion.selinv_extract_setup(selected, M.spatial))
-            SelectedInversion.selinv_extract!(destination, selected, plan)
-            copyto!(z, nonzeros(destination))
-        else
-            copyto!(z, nonzeros(SelectedInversion.selinv_extract(selected, M.spatial)))
-        end
+        plan = _brm_selinv_pattern!(z, F, M.spatial,
+            destination, plan)
         λ = M.scale[j]
         with_q = dot(z, nonzeros(M.spatial))
         with_dq = dot(z, nonzeros(M.derivative))

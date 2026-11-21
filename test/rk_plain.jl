@@ -1,5 +1,6 @@
 # BRM statistical bodies expressed as ordinary RKPPL declarations.
 # Run: julia --project=test test/rk_plain.jl [testset substring ...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, LogDensityProblems, LinearAlgebra

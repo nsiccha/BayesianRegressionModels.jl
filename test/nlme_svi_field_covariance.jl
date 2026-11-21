@@ -1,5 +1,6 @@
 # Compare physical changes within a station to the full posterior. Variation in
 # the differences depends on both the variances and the covariances of states.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using DifferentiationInterface, Enzyme, WarmupHMC, LinearAlgebra, Random, Statistics
 import MCMCDiagnosticTools

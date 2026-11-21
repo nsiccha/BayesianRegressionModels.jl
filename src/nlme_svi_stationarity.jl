@@ -138,7 +138,7 @@ function _brm_svi_iterate_diagnostics(values)
         isempty(active) && continue
         x = permutedims(values[active, :])
         all(isfinite, x) || return (; rhat=Inf, ess=0.0)
-        stats = MCMCDiagnosticTools.ess_rhat(reshape(x, n, 1, length(active)); kind=:rank)
+        stats = _brm_rank_ess_rhat(reshape(x, n, 1, length(active)))
         all(isfinite, stats.rhat) && all(isfinite, stats.ess) || return (; rhat=Inf, ess=0.0)
         rhat = max(rhat, maximum(stats.rhat))
         ess = min(ess, minimum(stats.ess))
@@ -252,7 +252,7 @@ function _brm_svi_iterate_rhats(values)
         active = filter(j -> !(j in bad) && !allequal(view(values, j, :)), rows)
         isempty(active) && continue
         x = permutedims(values[active, :])
-        stats = MCMCDiagnosticTools.ess_rhat(reshape(x, n, 1, length(active)); kind=:rank)
+        stats = _brm_rank_ess_rhat(reshape(x, n, 1, length(active)))
         rhat[active] .= ifelse.(isfinite.(stats.rhat), stats.rhat, Inf)
     end
     rhat

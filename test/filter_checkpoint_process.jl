@@ -1,4 +1,5 @@
 # Rebuild the model and frozen summaries independently; never serialize its code.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using SequentialMonteCarlo, Random, Serialization
 include("filter_models.jl")

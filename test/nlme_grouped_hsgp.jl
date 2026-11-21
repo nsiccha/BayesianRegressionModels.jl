@@ -15,6 +15,7 @@
 #
 # Run: julia --project=test test/nlme_grouped_hsgp.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, LinearAlgebra, Random
 
@@ -183,4 +184,36 @@ end
     # (an accidental label collision reads exactly like this).
     @test_throws "levels that are subjects of `subject` and levels that are not" brm_nlme_view(
         RKBRMI(mixed(merge(GH_FLAT, (; label)))))
+end
+
+# The grouped term is the units' only draws: no `(... | subject)` block names the
+# units, so `subject_group` does (snag brm-svi-fit-refu-d79b878a; before, the view
+# refused the model: "the model has no subject-level random effects").
+@stestset "with no random-effect block, subject_group names the term's units" begin
+    no_block(data) = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + hsgp(t; by=subject, k=3, domain=(-1.0, 1.0))
+        y ~ Normal(mu, sigma)
+    end
+    rk = RKBRMI(no_block(GH_FLAT))
+    @test_throws "no subject-level random effects" brm_nlme_view(rk)
+    v = brm_nlme_view(rk; subject_group=:subject)
+    @test !any(==(:unclaimed), v.role)
+    @test v.levels == sort(unique(GH_FLAT.subject))
+    k = weight_family(v)
+    @test k == 1 && v.family_sizes == [3]
+    @test all(==([1]), v.subject_families)
+    for (i, level) in enumerate(v.levels)
+        @test v.subject_coordinates[i] ==
+            findall(n -> occursin(Regex("\\.z\\.$i\\.\\d+\$"), String(n)), v.coordinates)
+        @test all(b -> b.level == level, v.subject_margins[i])
+    end
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:subject)
+    @test m.eta_blocks == [3]
+    check_unit_problems(m, Xoshiro(5))
+    check_lockstep(m, Xoshiro(6))
+    t = BRM._brm_svi_target(m)
+    @test sort.(t.units) == sort.(v.subject_coordinates)
+    fit = brm_svi_fit(m; rng=Xoshiro(7), batch_size=2, max_iterations=6, ndraws=4, threads=1)
+    @test all(isfinite, fit.draws)
 end

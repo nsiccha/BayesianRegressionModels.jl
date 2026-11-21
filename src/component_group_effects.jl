@@ -45,13 +45,11 @@ function _brm_parent_margins!(out, columns, occupied, loop, records, positions, 
         end
         fresh(stem) = _rk_ast_fresh_name(string(loop.target, "_", variant, "_", target, "_", stem), occupied)
         local_terms = terms[isnothing.(shared)]
-        summands = Symbol[]
-        if !isempty(local_terms) && local_terms != [0]
-            local_target = fresh(:local)
-            local_formula = length(local_terms) == 1 ? only(local_terms) : Expr(:call, :+, local_terms...)
-            push!(declarations, Expr(:call, :~, local_target, local_formula))
-            push!(summands, local_target)
-        end
+        # A member with terms of its own keeps its authored predictor. Each
+        # margin then enters as a fixed summand gathered at the member's own
+        # rows, which also give the predictor its row axis.
+        own = !isempty(local_terms) && local_terms != [0]
+        summands = Any[]
         for spec in filter(!isnothing, shared)
             field = _brm_observer_field(spec.group, record)
             slices = if !isnothing(field)
@@ -71,12 +69,23 @@ function _brm_parent_margins!(out, columns, occupied, loop, records, positions, 
             ends = cumsum(length.(slices))
             columns[rows] = [collect(stop-length(x)+1:stop) for (stop,x) in zip(ends,slices)]
             push!(out, :($effect ~ 0 + (0 + $margin | $(spec.id) | $group)))
-            push!(ports, port)
-            push!(arguments, :($effect[$rows[$index]]))
-            push!(summands, port)
+            if own
+                member_rows = fresh(:input_rows)
+                append!(ports, (port, member_rows))
+                append!(arguments, (effect, :($rows[$index])))
+                push!(summands, :(offset($port[$member_rows])))
+            else
+                push!(ports, port)
+                push!(arguments, :($effect[$rows[$index]]))
+                push!(summands, port)
+            end
         end
-        value = length(summands) == 1 ? only(summands) : Expr(:call, :+, summands...)
-        push!(declarations, Expr(:(=), target, value))
+        if own
+            push!(declarations, Expr(:call, :~, target, Expr(:call, :+, local_terms..., summands...)))
+        else
+            value = length(summands) == 1 ? only(summands) : Expr(:call, :+, summands...)
+            push!(declarations, Expr(:(=), target, value))
+        end
     end
     declarations, ports, arguments
 end

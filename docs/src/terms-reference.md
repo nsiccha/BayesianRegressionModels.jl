@@ -140,7 +140,8 @@ Main.BRMTermsReference.table(:latent)
 | `rw(t)` | `dar` with persistence fixed to zero | One shared state per distinct sorted time; append times for forecasts |
 | `cdar(t; by=g, cor=C)` | Stationary AR(1) deviations per group, with optional known cross-group correlation | First SD is `sigma`; transition innovation SD is `sigma*sqrt(1-rho^2)` |
 | `car(area; edges=(from,to), type=:icar)` | Intrinsic CAR on the undirected graph | Sum-to-zero constraint per connected component; isolated nodes have zero spatial effect |
-| `car(area; edges=(from,to), type=:bym2)` | Scaled CAR plus independent area effects | `sd` is overall scale; `mixing` allocates structured variance; islands have independent effects |
+| `car(area; edges=(from,to), type=:icar, scaled=true)` | Intrinsic CAR with each area's value divided by `sqrt(s_c)`, the scaling factor of its connected component (R-INLA's `besag` with `scale.model = TRUE`) | `sd` is the marginal SD; islands have independent `Normal(0, sd)` effects; equals BYM2 with `mixing = 1` |
+| `car(area; edges=(from,to), type=:bym2)` | Scaled CAR plus independent area effects | `sd` is overall scale; `mixing` allocates structured variance; islands have independent effects; `scaled=false` is refused |
 
 `dar` defaults to a bounded `Normal(0.5,0.2)` persistence and
 half-`Normal(0,0.2)` innovation SD. Its persistence address accepts Normal,

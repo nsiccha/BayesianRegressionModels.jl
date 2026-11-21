@@ -415,9 +415,10 @@ Base.@nospecializeinfer function _brm_prepare_predictor_geometry(
         @nospecialize(brmi::BRMI), context::_BRMBackendContext, predictor::Symbol;
         available_predictors=(predictor,), training=nothing,
         tolerant_default::Bool=false, matched_defaults=nothing,
-        population_columns=_brm_population_columns,
+        population_columns=_brm_design_columns,
         random_effect_columns=_brm_random_effect_columns,
-        prepare_term=_brm_prepare_term)
+        prepare_term=_brm_prepare_term,
+        fallback_row_source=nothing)
     random_effects = _brm_simple_random_effect_plans(
         brmi, predictor, context; required=true, random_effect_columns)
     op = linear_predictor_op(brmi, predictor)
@@ -461,7 +462,7 @@ Base.@nospecializeinfer function _brm_prepare_predictor_geometry(
     end
     design = _brm_population_design(
         name, ordinary_terms, context.data, get(context.target_obs, name, nothing);
-        required=true, row_source, population_columns,
+        required=true, row_source, fallback_row_source, population_columns,
         implicit_intercept=name in _brm_threshold_located_predictors(brmi))
     predictor_plan = _BRMPopulationPredictor(
         name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
@@ -474,5 +475,6 @@ Base.@nospecializeinfer function _brm_prepare_predictor_geometry(
         predictor_plan, design, defaults..., random_effects)
     r2plan = _brm_whole_predictor_r2d2(
         brmi, design, priors; prefix="BRM preparation", available_predictors)
-    _BRMPreparedPredictorGeometry(component, Tuple(priors), prepared_terms, r2plan)
+    stored_priors = design.columns isa Tuple ? Tuple(priors) : priors
+    _BRMPreparedPredictorGeometry(component, stored_priors, prepared_terms, r2plan)
 end

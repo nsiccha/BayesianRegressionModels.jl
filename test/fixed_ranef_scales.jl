@@ -12,6 +12,7 @@
 # density of those values, at every point. That pins "known = conditioned at
 # the value" against the established sampled emission rather than against a
 # hand-written Stan program.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Random, LinearAlgebra, Statistics
 using Distributions: Exponential, Normal, LKJCholesky, TDist, Dirac, logpdf

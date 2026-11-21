@@ -1,5 +1,6 @@
 # Dense marginal oracles for the GMRF Laplace tests: with Normal observations
 # the embedded Laplace is exact, y ~ N(0, σ² A Σ Aᵀ + s² I).
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include("gmrf_rk_cell_models.jl")
 import LogDensityProblems as LDP
 

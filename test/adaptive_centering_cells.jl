@@ -29,6 +29,7 @@
 # least-squares-located exact totals and S2Z contrasts or group coordinates.
 #
 #     julia --project=test test/adaptive_centering_cells.jl [testset filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Distributions, Random, LinearAlgebra
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, LogDensityProblems, WarmupHMC
 using DifferentiationInterface: AutoEnzyme

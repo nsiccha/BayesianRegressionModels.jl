@@ -130,15 +130,8 @@ function _brm_svi_laplace_third(t,u,v)
     _rk_svi_laplace_third(t.ad,u,direction)
 end
 
-function _brm_svi_laplace_solve(t,H,b,operation,krylovdim;rtol,atol)
-    x,info=KrylovKit.linsolve(H,b;issymmetric=true,isposdef=true,
-        rtol,atol,krylovdim,maxiter=1)
-    info.converged==1 || error("GaussianBlockLaplace: $operation exhausted its Krylov budget " *
-        "($krylovdim directions; residual $(info.normres))")
-    _brm_svi_laplace_record!(t,Symbol(operation,:_residual),info.normres)
-    _brm_svi_laplace_record!(t,Symbol(operation,:_operations),info.numops)
-    x
-end
+_brm_svi_laplace_solve(t,H,b,operation,krylovdim;rtol,atol)=
+    _brm_krylovkit_svi_laplace_solve(t,H,b,operation,krylovdim;rtol,atol)
 
 # Deterministic starts and a fixed iteration/backtracking cap; no warm history
 # enters the target. A certified Gaussian block normally takes one Newton step.

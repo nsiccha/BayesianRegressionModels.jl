@@ -217,12 +217,30 @@ function _rk_model_population_columns(term; cellmeans=false, context=nothing)
     term isa ExprColumn && getf(term) === offset && length(getargs(term)) == 1 &&
         _rk_offset_is_summand(only(getargs(term))) && return ()
     column = _rk_model_population_column(term, context)
-    column === nothing ? _brm_population_columns(term; cellmeans) : (column,)
+    column === nothing ? _brm_design_columns(term; cellmeans) : (column,)
 end
 
 function _rk_model_random_effect_columns(term; cellmeans=false, context)
     column = _rk_model_population_column(term, context)
     column === nothing ? _brm_random_effect_columns(term; cellmeans) : (column,)
+end
+
+# The rows of a predictor's first `offset(...)` of a row-aligned model value.
+# Such an offset adds no design column, yet it states the predictor's rows:
+# the offset-only planner reads them (`_rk_plan_offset_only_predictor`), and a
+# predictor with coefficients falls back to them when it has no data column,
+# group or observed response of its own.
+Base.@nospecializeinfer function _rk_model_offset_row_axis(@nospecialize(brmi::BRMI), context, target)
+    op = linear_predictor_op(brmi, target)
+    isnothing(op) && return nothing
+    for term in _brm_additive_terms(last(getargs(op, 2)))
+        term isa ExprColumn && getf(term) === offset && length(getargs(term)) == 1 || continue
+        inner = only(getargs(term))
+        _rk_offset_is_summand(inner) || continue
+        axis = _rk_model_value_axis(inner, context)
+        axis === nothing || isempty(axis) || return axis
+    end
+    nothing
 end
 
 Base.@nospecializeinfer function _rk_model_predictor_geometry(@nospecialize(brmi::BRMI), context, target; kwargs...)
@@ -250,8 +268,15 @@ Base.@nospecializeinfer function _rk_model_predictor_geometry(@nospecialize(brmi
         end
         columns
     end
+    function fallback_row_source()
+        axis = _rk_model_offset_row_axis(brmi, geometry_context, target)
+        isnothing(axis) && return nothing
+        # As for a modeled covariate above, the rows are metadata.
+        haskey(data, axis.source) || (data[axis.source] = Base.OneTo(axis.nrows))
+        axis.source
+    end
     _brm_prepare_predictor_geometry(brmi, geometry_context, target; kwargs...,
-        population_columns,
+        fallback_row_source, population_columns,
         random_effect_columns=(term; cellmeans=false) ->
             _rk_model_random_effect_columns(term; cellmeans, context=geometry_context),
         prepare_term=_rk_prepare_term)

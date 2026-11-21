@@ -78,6 +78,24 @@ function _check_term_kwargs(::typeof(hsgp), kw)
     nothing
 end
 
+# `rw(time; order, sum_to_zero)`: the order of the differences that are
+# innovations (1 or 2) and how the level is pinned (zero start, or the
+# intrinsic walk with a soft sum-to-zero). One reader for every backend.
+function _brm_rw_options(kw)
+    unknown = filter(k -> k ∉ (:order, :sum_to_zero), keys(kw))
+    isempty(unknown) || error(
+        "rw: unsupported keyword(s): $(join(unknown, ", ")); supported keywords " *
+        "are `order` (1 or 2) and `sum_to_zero` (Bool)")
+    order = get(kw, :order, 1)
+    order isa Integer && !(order isa Bool) && order in (1, 2) || error(
+        "rw: `order` must be the literal 1 or 2, got $(repr(order))")
+    sum_to_zero = get(kw, :sum_to_zero, false)
+    sum_to_zero isa Bool || error(
+        "rw: `sum_to_zero` must be the literal `true` or `false`, got $(repr(sum_to_zero))")
+    (; order=Int(order), sum_to_zero)
+end
+_check_term_kwargs(::typeof(rw), kw) = (_brm_rw_options(kw); nothing)
+
 function _check_term_kwargs(::typeof(t2), kw)
     allowed = (:k, :basis, :full)
     unknown = filter(k -> k ∉ allowed, keys(kw))

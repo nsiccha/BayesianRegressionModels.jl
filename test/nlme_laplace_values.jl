@@ -1,6 +1,7 @@
 # Model-scope observation factors keep every authored likelihood, including
 # gathered nonlinear predictors and observations on different row axes.
 # RUN: julia --project=test test/nlme_laplace_values.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random
 

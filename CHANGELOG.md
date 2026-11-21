@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.345
+## 0.2.370
 
 - Model-scope `gmrf(...; neighbors=m)` terms on RKBRMI expose
   `<id>.conditional_mean` and `<id>.conditional_scale` in packed field order.
@@ -32,11 +32,12 @@ instead of failing at run time.
   the covariance error of within-station changes against NUTS; one iteration
   at batch 8 took 0.22 s against 0.02 s packed on 256 states and 3.4 s against
   0.025 s on 4,096. The fit reads each coefficient row through
-  ReactiveKernelsPPL's `indexed_value` query, which raises the floors to
-  ReactiveKernelsPPL 0.1.244 and ReactiveKernels 0.1.347. A row's derivative
-  costs memory in proportion to the field's size until ReactiveKernels stops
-  copying fixed inputs of a derivative rule on each reverse call (its snag
-  `native-reverse-r-b8de62b9`).
+  ReactiveKernelsPPL's `indexed_value` query (ReactiveKernelsPPL 0.1.244),
+  which raises the ReactiveKernels floor to 0.1.347. A row's derivative
+  costs memory in proportion to the field's size: inside a prepared query,
+  ReactiveKernels still copies the fixed inputs of a derivative rule on each
+  reverse call (its snag `native-reverse-r-b8de62b9`, open on the Enzyme
+  side).
 - `brm_svi_fit(checkpoint, model)` accepts disjoint observation windows for
   `field_states=:units` on the same fitted read-pair GMRF support with the
   same coordinate ownership, with packed or learned field coordinates. The
@@ -45,6 +46,431 @@ instead of failing at run time.
 - For subject-partitioned fits, `brm_svi_combine(...; field_states=:units)`
   assembles the GMRF states in their owners' factors. The start uses each
   owner's packed field mean and covariance at the checkpoint's global mean.
+
+## 0.2.369
+
+- A numeric matrix in `eta ~ 1 + offset(log_area) + X` contributes one slope
+  per column. Set a prior across the block with `effect(eta, X)`, or address
+  slope `j` by its label, such as `X_col_2`. New rows use the fitted width
+  and column order on both backends.
+
+## 0.2.368
+
+- On RKBRMI, `theta ~ Dirichlet(alpha)` in an `@plate` cell accepts a shared
+  data vector. Each cell uses the whole vector, including when the number of
+  cells equals the number of concentrations.
+- In `brm_svi_fit`, each unit's variational factor holds its own Dirichlet
+  simplex coordinates when only that unit reads them. These changes require
+  ReactiveKernelsPPL 0.1.249 or later.
+
+## 0.2.367
+
+- An `@plate` cell can declare independent draws as `z[1:K] .~ Normal.(0, 1)`
+  or take its width from a cell input with `z .~ Normal.(mu[i], s)`. Observe a
+  response slice with the same broadcast syntax. Both backends preserve the
+  existing parameter names, order and density.
+
+## 0.2.366
+
+- RKBRMI resamples the grouping of a grouped `hsgp(x...; by = g)`, with or
+  without a per-level hyper-predictor (`log(sd(hsgp(x))) ~ 1 + (1 | g)`, or the
+  length-scale form), as SBBRMI does since 0.2.12. The term's per-level rows
+  (its standardized basis weights and the hyper-predictor's per-level effects)
+  are sized by the in-graph level set `g_fit_levels = brm_fit_levels(g_fit)`,
+  as a `(… | g)` block's are, so `reprocess(rk, design; resample_groups = [:g])`
+  and `RKBRMI(builder(design), state; resample_groups = [:g])` keep the fit's
+  program for any design (new labels, any level count): the replay's
+  coordinates hold the new levels' standardized draws, whose law is the fitted
+  levels'. Before, these were refused (BRM 0.2.13), and a design reusing the
+  fitted labels had read the fitted levels' weights (todo `10h1myt`; snag
+  `rk-design-binder-45d0b445`).
+- `rk_design_binder(rk; resample_groups = [:g])` keeps the fit's level set of a
+  grouped HSGP's grouping, so `u` stays a draw of the fit, and takes the new
+  levels' standardized weights (`<term>.z`, levels × basis functions) and
+  per-level hyper effects (`<term>.sigma_z`, `<term>.rho_z`) in HAVE, beside a
+  `(… | g)` block's effects (`b_g`). The graph scales them at the draw's fitted
+  length scale and amplitude: zeros give the typical level, standard normal
+  draws a new level of the fitted population, and the fitted levels' rows of
+  `constrain(layout, u)` those levels. `binder.level_inputs` names every value
+  the new levels take, as `(; columns, kind)` by name.
+- Resampling the grouping of a grouped `hsgp(...; by = g, orthogonal_to = ...)`
+  stays refused on RKBRMI, now with SBBRMI's reason: each level's projection is
+  fitted on that level's training rows, which a new level does not have.
+
+## 0.2.365
+
+- A repeated component can use `rhs(entry.formula)` to select fixed effects
+  separately for each member and predictor. Only selected columns are read.
+- `brm_transform_constants(fit; submodel=(collection, key))` returns that
+  member's fitted transforms on Stan and ReactiveKernels, including on replay.
+
+## 0.2.364
+
+- `brm_coordinate_transport` pairs the basis weights of ungrouped
+  `hsgp` curves in a repeated component, including curves with different
+  basis counts. Each weight maps to its position within its own member's
+  segment of the fitted Stan vector.
+
+## 0.2.363
+
+- SBBRMI accepts `logexpm1(x)` in likelihoods and `logexpm1.(xs)` in
+  plate cells. It emits Stan's `log_diff_exp(x, 0.0)`, which stays finite
+  for large positive inputs. At model scope, `logexpm1(exp(eta))` applies
+  the transform per row.
+
+## 0.2.362
+
+- SBBRMI lowers a record component whose member returns its record's own data
+  as a vector, such as a disabled member's `curve = entry.no_curve` beside an
+  enabled member's fitted curve, as RKBRMI did. `stan_code` stopped with
+  `Could not find component_result_curve in model`: the vector is data of each
+  member, and since only the member's `return` read it, it was not passed to
+  the plate's shared submodel (snag `component-data-o-a8b79baf`).
+- Stan compiles a record component whose members are split across two or more
+  plates by their guards and return a vector, such as a `parentblock` margin.
+  `stanc` refused the program with "Non-data variables are not allowed in top
+  level size declarations": joining the plates' vectors took the first plate's
+  length from its fitted values instead of its data ends.
+- A generated name never ends in `__`: a second collision is numbered (`x`,
+  `x_`, then `x_2`, `x_3`), and so is a first collision of a name that already
+  ends in `_` (`y_1`). `stanc` refuses an identifier that ends in `__`, which a
+  member's `@observe` clause produced when it indexed two returned vectors and
+  its record had a field named `subject_rows`, or indexed three. RK programs
+  with such a name use the numbered one.
+
+## 0.2.361
+
+- `brm_nlme_view`, `brm_nlme_model` and `brm_svi_fit` read a model with no
+  random-effect block over its units: `subject_group` names them, a grouping
+  column the model reads, such as the `g` of a `@plate for p in groups(g)`.
+  Each unit holds the draws of the terms grouped by `g` (a grouped
+  `hsgp(x; by = g)`), or none, and `brm_svi_fit` gives it the latents its cells
+  declare (`m ~ Normal(0, 1)` in the cell), as it does with a block. Before,
+  every such model was refused: "the model has no subject-level random effects;
+  an NLME reading needs at least one `(... | group)` block" (snag
+  `brm-svi-fit-refu-d79b878a`). Without `subject_group` the refusal now says how
+  to name the units, and a `subject_group` the model does not read is refused by
+  name. NLMEEstimation's estimators (`brm_nlme_fit`'s FOCE(I), SAEM and
+  empirical Bayes) need at least one random effect and refuse units with none
+  ("NLMELayout: eta_blocks is empty").
+- Units that own no coordinate are declared to ReactiveKernelsPPL as
+  `partitioned = :none`, so a shared value with no row form that every cell
+  reads, such as the weights of a `cor = multigroup(Omega, tau)` HSGP, is
+  computed once. Before, the empty declaration left it undeclared and the
+  cells' strict queries refused it (`PartitionLocalityError`). With
+  NLMEEstimation loaded, `brm_nlme_model` leaves out the Gaussian observations'
+  η pushforward for such units, which have no direction to push.
+
+## 0.2.360
+
+- A record component's own HSGP prior can name its validity floor:
+  `length_scale(trend, hsgp(entry.time)) ~ Uniform(length_scale_floor, entry.span)`
+  inside `@brm function comp(entry)`, bound as
+  `for entry in records; blocks[entry.id] ~ comp(entry); end`, builds on
+  SBBRMI and RKBRMI. Before, both refused it with ``component `comp` reads
+  undeclared input `length_scale_floor` `` (snag `component-length-32f07da1`).
+  Each member's prior reads that member's own floor, as the model-scope
+  prior does. The name stays refused anywhere else in a component.
+- A component's prior address can spell its term with a record field,
+  `sd(trend, hsgp(entry.time))`, outside a declaration guard too. Before,
+  the `@brm function` definition failed with ``hsgp(...) in a prior address
+  takes plain column names``, while the same address inside
+  `if entry.flag ... end` was accepted.
+- `brm_length_scale_floor(d, logical; term, submodel=(collection, key))` reads
+  one member's floor, e.g.
+  `brm_length_scale_floor(d, :trend; term=:hsgp_entry_time, submodel=(:blocks, :left))`.
+  It works for a member whose formula reads a margin of the parent's block
+  (`parentblock`), which `brm_term_coordinates(...; submodel)` cannot trace
+  yet.
+
+## 0.2.359
+
+- On RKBRMI, a kernel cell's undotted Stan-spelled `x + y` / `x - y` with two
+  or more operands calls the program's `stan_add` / `stan_sub` definition,
+  one documented `ReactiveKernels.@kernel` each, which RKPPL splices into the
+  cell. Previously it called an opaque bound helper. The meaning is unchanged:
+  a scalar and an array combine entrywise, any other operands as Julia's
+  operator, and `a + b + c` is `stan_add(stan_add(a, b), c)`. A broadcast
+  `(+).(x, y)` / `(-).(x, y)` now keeps its authored spelling instead of
+  calling the helper on every entry. A splatted operand list still calls the
+  helper. Printed RK programs show the new definitions. Native Enzyme Reverse
+  gradient allocations of a toy cell, per gradient, the same at 100 and 400
+  cells (gordito, one CPU):
+  - `b + v`, 560 B before, 544 B now;
+  - `b + v + 0.5`, 960 B before, 752 B now;
+  - `(+).(b, v)`, 320 B before, 112 B now, the same as a cell without the sum.
+
+  `b + v` costs no more than `b .+ v` (112 B) once ReactiveKernels gives a
+  branch that concrete types decide its selected arm's lowering (snag
+  `type-decided-bra-2686ef6f`). Until then, `b .+ v` is the non-allocating
+  spelling (snag `rk-kernel-stan-a-cf3a16d7`).
+
+## 0.2.358
+
+- `brm_laplace_integration` is about six times faster on a sparse Laplace
+  target with the formula's coefficients integrated (the Latte-home-turf epil
+  model, 301 integrated effects and 236 Poisson rows: 490 ms before, 71–76 ms
+  now, one CPU on gordito; Crowder seeds 5.5–6.3 ms before, 4.0–4.7 ms now;
+  snag `brm-laplace-inte-e0991a0f`). Its results are unchanged up to rounding
+  (draws within 1e-11):
+  - the design's mode searches start from the centre's modes where the
+    conditional density is log-concave, which halves their Newton steps;
+  - its draws reuse the design's mode searches instead of searching each
+    drawn point again.
+- `brm_laplace_mode`'s first L-BFGS trial step is at most of unit length. A
+  first step as long as the gradient (65 on epil's log scales) went where the
+  conditional curvature is lost to rounding and a mode search ran to its
+  iteration limit, which took most of the mode's 250 ms. The mode found is
+  the same (to 2e-8 there), in 7 iterations instead of 12 and 11 ms.
+- Every sparse Laplace evaluation with `integrate = (..., :coefficients)` is
+  cheaper, with values and gradients unchanged to the bit: a coefficient's
+  map to the rows is read once instead of probed through the model at every
+  population point, and h's assembly indexes a coefficient's dense column
+  directly.
+
+## 0.2.357
+
+- SBBRMI takes `Dirichlet(K, a)` with both `K` and `a` read from data fields,
+  as RKBRMI already did, also as slices (`eachrow(theta[1:S, 1:n]) .~
+  Dirichlet(n, alpha)`). It refused that as "Dirichlet dimension ... must be a
+  positive integer". A data-field concentration is now a constant read when
+  the model is built, like a literal one; a concentration the model samples
+  keeps a data-field dimension too (snag `mixed-membership-1a1930a6`).
+- `brm_hyperparameters(rk)`, `brm_fixed_hyper_problem(rk, start; ad_backend,
+  fixed)`, `brm_fixed_hyper_point` and `brm_fixed_hyper_fit(sampler, rk, start;
+  ad_backend, fixed)`: MCMC over every latent of an RKBRMI model with only its
+  hyperparameters held at a point, such as a `brm_svi_fit` result (read as the
+  mean of its draws). The hyperparameters are read from the RK coordinate
+  records: random-effect scales and correlation factors, a structured term's
+  own parameters (an `hsgp`'s amplitude and length scales, a `cdar`'s scale
+  and AR coefficient, an `rw`'s or `car`'s scale, a `gmrf`'s scale and
+  lengths), LKJ factors and constrained declared scalars. Random-effect
+  draws, basis weights (shared ones included), innovations, fields,
+  coefficients, declared vectors and matrices and real-line scalars stay free.
+  `fixed=` edits the set; `fixed = ()` samples the full model from the start.
+  The draws are complete packed RK points (snag `mixed-membership-1a1930a6`,
+  design decision `0b9jgl5`).
+- A simplex per `@plate` cell: `theta ~ Dirichlet(K, a)` or `theta ~
+  Dirichlet(alpha)` on a bare cell name, on SBBRMI and RKBRMI. It is sampled in
+  K − 1 coordinates per cell, `theta = softmax(sum_to_zero_constrain(y))` (the
+  coordinates of `shares(total)` with the total 1), with the Dirichlet density
+  at `theta` plus the change of variables; `brm_coordinate_transport`,
+  `brm_start` (one vector per cell or one flat vector), `rk_restore_draws` and
+  the model description read it by its name. `K` is a literal or a data field;
+  the concentration may be sampled. RKBRMI refuses a concentration vector
+  shared by every cell (ReactiveKernels snag `rkppl-joint-cell-c8a61b47`), and
+  SVI keeps the simplexes global (ReactiveKernels snag
+  `joint-cell-laten-9a3ad461`). Snag `mixed-membership-1a1930a6`.
+- The model description shows a `T::shares(total)` cell latent's law as written
+  with its sum as an equation, and describes `shares` and Dirichlet cell
+  coordinates; before, it printed internal law keywords and listed `brm_shares`
+  as a coverage gap.
+- `brm_start(sb, model, (; x = …))` takes one vector per cell for a cell latent
+  of one length in every cell too, as RKBRMI does.
+- A `@plate` cell reads whole rows of a matrix: `G[p, :]` in a `groups(g)`
+  plate, `G[rows[i], :]` through a binding `rows = groups(g => labels)`, on
+  SBBRMI and RKBRMI. `G` is a model-scope matrix (an assignment such as
+  `reshape(g, N, n)`, the n curves of a grouped HSGP side by side) or a data
+  matrix with one row per entry of `g`. With a Dirichlet cell latent this
+  spells a per-unit mixture of n curves for any n,
+  `y[p] ~ Normal(mu[p] .+ G[p, :] * theta, sigma)` (snag
+  `mixed-membership-1a1930a6`). Before, `@brm` refused it ("kernel `@plate`
+  inputs use one cell slice").
+
+## 0.2.356
+
+- The sparse embedded Laplace (`brm_laplace_problem(rk; integrate = (...))`)
+  stays finite and exact where a `car` field's or a sum-to-zero `rw` walk's
+  level is held only by its soft sum-to-zero: at a vanishing field scale, or
+  with `integrate = (..., :coefficients)` integrating an intercept beside the
+  field. Before, the factor of the conditional curvature failed there and
+  `brm_laplace_problem: the integrated effects' density has a stationary point
+  that is not a maximum` stopped `brm_laplace_mode`, `brm_laplace_integration`
+  and sampler chains (snag `brm-laplace-coef-2aea38ff`: the Scottish lip cancer
+  ICAR model with its coefficients integrated, at log scale below about -15).
+  The message now names the population point. Values elsewhere are unchanged
+  to rounding; draws from the conditional Gaussians follow a different random
+  stream.
+- A `car` field's Newton search no longer throws `ArgumentError: invalid
+  index: 2.0 of type Float64` when a step falls back to its blocks, a
+  regression from the second-order and sum-to-zero `rw` walks.
+
+## 0.2.355
+
+- **Breaking:** SelectedInversion is a weak dependency too (decision
+  `0mdvrl1`). Building a model with a `car` term needs it, since every `car`
+  term computes its scaling factor with it at preparation, and so do the
+  sparse Laplace, GMRF and collapsed-SVI variances. Add it to the environment
+  and `import SelectedInversion` first, beside the seven fitting packages of
+  0.2.353; without it, preparation or a fit stops with an error that names it.
+  A consumer that builds no `car` model and does not fit installs none of the
+  eight.
+
+## 0.2.354
+
+- `brm_laplace_problem(rk; integrate = (..., :coefficients))`, `brm_laplace_plan`
+  and rung 5c of `brm_ladder_fit` integrate a formula coefficient whose Normal
+  prior reads its mean or scale from a scalar data field
+  (`effect(p, :) ~ Normal(0.0, fixed_sd)`) or a `name = constant(expr)`, as
+  they integrate its literal twin. Earlier only literal numbers were admitted,
+  and such a prior was refused as "not a Normal of constant mean and scale".
+- `:coefficients` now also integrates a factor block with per-level priors
+  (`effect(lp, g) .~ Normal.(0.0, w_scale)`), one block per level. Earlier
+  such a block stayed a population coordinate without notice, although the
+  name promises every population coefficient. **Breaking:** a per-level prior
+  of another family (`.~ Cauchy.(…)`) under `:coefficients` is now refused by
+  name, as any coefficient's is; such a model previously built with the block
+  sampled. Leave `:coefficients` out to sample it.
+
+## 0.2.353
+
+- **Breaking:** KLU, Krylov, KrylovKit, LimitedLDLFactorizations,
+  MCMCDiagnosticTools, MUMPS and SparseMatrixColorings are weak dependencies
+  (decision `0ilan3m`); 0.2.349 loaded them on first use. A consumer that fits
+  adds them to its environment and loads them before fitting, for example
+  `import KLU, Krylov, KrylovKit, LimitedLDLFactorizations, MCMCDiagnosticTools,
+  MUMPS, SparseMatrixColorings`; each loads BRM's extension for it. Fitting
+  code that needs one that is not loaded stops with an error naming it and the
+  line that loads every one the session lacks. A consumer that only builds
+  models and simulates installs none of them. SelectedInversion stays a hard
+  dependency loaded with BRM, because every `car` term computes its scaling
+  factor with it at preparation.
+
+## 0.2.352
+
+- `rw(time; order = 2)` is a second-order random walk, and
+  `rw(time; order = 1 | 2, sum_to_zero = true)` the intrinsic walk of either
+  order identified by a soft sum-to-zero (R-INLA's `rw1` / `rw2` with
+  `constr = TRUE`): its values have log density
+  `-(n - order) log(sigma) - sum(d.^2) / (2 sigma^2)` over their `order`-th
+  differences `d`, with `sum(x) ~ Normal(0, 0.001 n sigma)`, and a
+  second-order walk's linear trend has a flat prior. `rw(time)` is unchanged
+  (`order = 1`, zero start). `sd(lp, rw(time))` addresses every law's scale.
+  A sum-to-zero walk samples its standardized values (descriptor component
+  `:structured`); SBBRMI forecasts of every law continue its recurrence.
+- RKBRMI lowers `rw(time; ...)` (before, it refused `rw` entirely), with
+  SBBRMI's law at the same coordinates (`brm_coordinate_transport`).
+- `brm_laplace_problem(rk; integrate = (:time,))` integrates an `rw` walk whole
+  by its time column: a sum-to-zero walk as one sparse block whose precision is
+  its difference precision plus the soft sum, at any length; a zero-start walk
+  by its innovations, one dense block like a `cdar` walk's. The sparse
+  Laplace's field blocks take weighted edges for this.
+
+## 0.2.351
+
+- `brm_population_effect_coordinates(d, logical, names; coefficient, submodel)`
+  addresses a population coefficient of one member of a component repeated
+  over records, by the member's key, as `brm_term_coordinates` and
+  `brm_ranef_sd_coordinates` do. For a member formula
+  `shift ~ 1 + settings.dose`,
+  `brm_population_effect_coordinates(d, :shift, names; submodel=(:blocks, :left))`
+  returns the left member's intercept. This includes a member whose formula
+  also puts a margin in the parent's block, such as
+  `base ~ 1 + (1 | parentblock(:p) | entry.site)`. The result also carries
+  `submodel`.
+- `brm_coordinate_transport` pairs a member's population coefficients by the
+  member and the coefficient label. Earlier an intercept-only member's
+  coefficients did not pair. A member whose formula has a covariate paired
+  completely but exchanged the coefficients of different members, so RK and
+  Stan densities disagreed through the transport. Such transports are now
+  correct. A member's own random-effect block still does not pair.
+
+## 0.2.350
+
+- A component repeated over records can return a per-member vector beside
+  other named values, such as `return (; curve, scale)`, read in its
+  `@observe` clause as `member.curve[entry.read_index[s]]` and `member.scale`.
+  SBBRMI now lowers it; before, `stan_code` refused the member's returned
+  values. This needs StanBlocks 0.2.57.
+- A member that returns its `parentblock` margin as a vector prepares under
+  the ReactiveKernels preference `type_stability = "error"` with
+  MutatingFunctions 0.1.2 or later. BRM's test environment pins it.
+
+## 0.2.349
+
+- `using BayesianRegressionModels` no longer loads the packages only fitting
+  reaches: KLU, Krylov, KrylovKit, LimitedLDLFactorizations, MCMCDiagnosticTools,
+  MUMPS (and with it MPI), SelectedInversion and SparseMatrixColorings. Each
+  loads the first time BRM calls it, through BRM's extension for it: a sparse
+  or matrix-free Laplace, `brm_laplace_draws`, GaussianBlockLaplace, collapsed
+  SVI sites, SVI's stationarity check, or a `car` term's BYM2 scaling at
+  preparation (SelectedInversion). A consumer that builds models and simulates
+  without these never loads them. They stay hard dependencies, so nothing
+  changes in a consumer's code or `[deps]`; an environment resolved before this
+  version must be resolved again so its manifest records the new extensions.
+
+## 0.2.348
+
+- A record-component member formula can carry its own terms beside a margin
+  in the parent's correlated block, for example
+  `shift ~ 1 + (1 | parentblock(:p) | setting.site)`. The member keeps its
+  predictor, so `effect(shift, Intercept) ~ Normal(0, 1)` sets that member's
+  intercept prior. Earlier such a model built, but neither backend lowered it
+  when the member had only an intercept or stated an `effect` prior.
+  **Breaking:** A member formula that combined a covariate or a smooth with a
+  `parentblock` margin already lowered. Its parameters were named after a
+  generated `..._local` predictor and are now named after the authored one.
+  The density is unchanged; refit such a model to read its draws by name.
+- RKBRMI accepts an offset that gathers a model value at data rows, such as
+  `offset(level[pick])`, as SBBRMI does. A predictor with no data column,
+  group or response of its own takes its rows from that offset.
+
+## 0.2.347
+
+- `car(area; edges=(from, to), type=:icar, scaled=true)` is the variance-scaled
+  ICAR (Besag) field, R-INLA's `besag` with `scale.model = TRUE`: each area's
+  ICAR value is divided by `sqrt(s_c)`, the scaling factor of its connected
+  component, so `sd(lp, car(area))` is the field's marginal SD, and each island
+  has its own `Normal(0, sigma)` effect. It is the BYM2 field with its mixing
+  share held at 1. It works on SBBRMI, RKBRMI, adaptive centering and
+  `brm_laplace_problem(rk; integrate = (:area,))`. `scaled` defaults to `false`
+  for `:icar`, so existing models keep their meaning; `:bym2` is always scaled
+  and refuses `scaled=false`. The `rkppl_model(:car_icar_scaled)` body and
+  `StatisticalPreparation.car_graph`'s new `n_island` and `island_pos` fields
+  serve hand-written `@rkppl` models.
+
+## 0.2.346
+
+- `brm_laplace_integration(problem)` integrates a sparse Laplace problem's
+  marginal over its population coordinates deterministically, as R-INLA
+  does. It evaluates the marginal on a design around the mode, standardized
+  by the curvature there: a grid for up to two coordinates, a central
+  composite design for three or more. It weights each point by the Laplace
+  marginal and returns the weighted points and each coordinate's marginal
+  density table. On a grid it also returns the log evidence. Its packed draws
+  resample the design points by weight and draw the integrated effects
+  jointly at each point through the factor. It refuses above
+  `max_dimension = 10` coordinates.
+- `brm_laplace_problem(rk; integrate = (..., :coefficients))` and
+  `brm_laplace_plan` integrate the formula's population coefficients with the
+  effects, as INLA keeps fixed effects in the latent field. Each coefficient
+  becomes its own block. Every coefficient must have a Normal prior of
+  constant mean and scale. Automatic plans never integrate coefficients.
+- `brm_ladder_fit(...; upto = 5)` runs it as rung 5c after the curvature
+  diagnostic. When every coefficient has such a prior, the rung integrates the
+  coefficients too and starts from that target's own marginal mode. Its
+  design then spans only the remaining coordinates (scales, correlations,
+  dispersions). It runs when at most 10 coordinates remain. Pass keywords
+  through `integration = (; ...)`, including `coefficients = false`. Rung 5b's
+  comparison adds `integration_mean_shift` and `integration_sd_ratio`.
+  **Breaking:** without a `sampler`, `fit.draws` at `upto = 5` are rung 5c's
+  draws instead of rung 4's. Pass `integration = nothing` for the previous
+  result.
+
+## 0.2.345
+
+- `gmrf((east, north); mesh=…)` is a purely spatial Matérn (ν = 1) field: it
+  takes no time column, so it has no temporal length, and its hyperparameters
+  are `sd(lp, gmrf((east, north)))` and `length_scale(lp, gmrf((east, north)))`
+  (`, space` is accepted). It has one state per mesh vertex and one channel, so
+  it takes no `cor=`. It also takes `neighbors=m` and `multiresolution=m`, works
+  in `@plate` cells, on SBBRMI and RKBRMI, under `reprocess`, `brm_fitted_state`,
+  `brm_start` and the sparse embedded Laplace, and its descriptions say it has
+  no time axis. Its law is the space-time field's on one time with any temporal
+  length, which one time never reads. `brm_gmrf_predict` takes no `time` for
+  such a field.
+- A term-prior address names a term's only parameter of its class without a
+  component.
 
 ## 0.2.344
 

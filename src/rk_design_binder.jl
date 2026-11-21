@@ -35,7 +35,14 @@ into that replay's lowered program.
   fit, while the rows read the design's own levels by position (`g_level`). So
   `u` is a draw of the fit for any number of new levels, and the new levels'
   effects come in HAVE (`have=(:unconstrained, :b_g, ...)`, one row per new
-  level in level order). This is where `binder(design)` differs from
+  level in level order). A grouped `hsgp(x; by = g)` term is sized by the same
+  level set: its new levels' standardized basis weights (`<term>.z`, levels ×
+  basis functions) and per-level hyper effects (`<term>.sigma_z`,
+  `<term>.rho_z`) come in HAVE as well, and the graph scales them at the
+  draw's fitted length scale and amplitude. `binder.level_inputs` names every
+  value the new levels take (`(; columns, kind)` by name, `kind` one of
+  `:group_effects`, `:hsgp_weights`, `:hsgp_sd_effects`,
+  `:hsgp_length_scale_effects`). This is where `binder(design)` differs from
   `rk_bound_data(reprocess(...))`: that replay is a model of its own rows, whose
   new levels' standardized draws are its own coordinates. A block whose draws
   the design's own columns size (`gr(g, by = s)`, or a multi-membership block of
@@ -76,6 +83,9 @@ struct RKDesignBinder{B<:RKBRMI}
     # The fit's data columns: what a design's kind is read from.
     columns::Vector{Symbol}
     fitted::NamedTuple
+    # The values a cut supplies for the resampled groupings' new levels, by
+    # name (`_rk_level_inputs`).
+    level_inputs::NamedTuple
     # The fit's level sets of the resampled groupings, which keep a draw of the
     # fit in the fit's coordinates (`_rk_fit_coordinate_levels`).
     levels::Any
@@ -130,7 +140,7 @@ function rk_design_binder(rk::RKBRMI; resample_groups=(),
     groups = Tuple(sort!(collect(groups)))
     levels = _rk_fit_coordinate_levels(rk, groups)
     RKDesignBinder(rk, groups, Tuple(held_out), sort!(collect(training)),
-        merge(_rk_design_fitted(rk, groups), levels.values), levels,
+        merge(_rk_design_fitted(rk, groups), levels.values), levels.inputs, levels,
         Dict{Any,Any}(), ReentrantLock())
 end
 
@@ -161,7 +171,11 @@ end
 # `g_level`. With the fit's value in its place, the block keeps the fit's
 # coordinates and the rows keep the design's level positions. The caller
 # supplies the new levels' effects (`b_g`) in HAVE, as with any number of new
-# levels. A `gr(g, by = s)` block reads its sizes from the raw grouping columns
+# levels. A grouped `hsgp(...; by = g)` term's block is sized the same way, and
+# the caller supplies its new levels' standardized weights (`<term>.z`) and any
+# per-level hyper effects (`<term>.sigma_z`, `<term>.rho_z`) in HAVE: `inputs`
+# names every value the new levels take, with its grouping columns and kind.
+# A `gr(g, by = s)` block reads its sizes from the raw grouping columns
 # themselves, and a data-free fit holds no multi-membership level set. Those
 # blocks are uncovered: a design whose levels give them other coordinates than
 # the fit's is refused.
@@ -170,10 +184,11 @@ struct _RKFitCoordinateLevels
     sized::Set{Symbol}
     uncovered::Vector{String}
     fit_names::Vector{Symbol}
+    inputs::NamedTuple
 end
 
 function _rk_fit_coordinate_levels(rk::RKBRMI, groups)
-    none = _RKFitCoordinateLevels((;), Set{Symbol}(), String[], Symbol[])
+    none = _RKFitCoordinateLevels((;), Set{Symbol}(), String[], Symbol[], (;))
     isempty(groups) && return none
     statements = [_brm_undoc(s) for s in _rk_retained_program(rk).main.args
         if !(s isa LineNumberNode)]
@@ -183,29 +198,91 @@ function _rk_fit_coordinate_levels(rk::RKBRMI, groups)
     inputs = Set{Symbol}(keys(rk_bound_data(rk)))
     values = Pair{Symbol,Any}[]
     uncovered = String[]
-    for bucket in _rk_replay_buckets(rk.plan)
-        grouping = bucket.grouping
-        columns = Symbol[grouping.columns...]
-        grouping.by === nothing || push!(columns, grouping.by)
-        any(in(groups), columns) || continue
-        name = _rk_bucket_level_set(grouping, definitions, twins)
+    # The grouping columns each level set is the levels of.
+    level_columns = Dict{Symbol,Vector{Symbol}}()
+    for (what, columns, name) in _rk_resampled_level_sets(rk.plan, groups, definitions, twins)
         value = name === nothing || !_rk_sizes_only(statements, name, inputs) ? nothing :
             _rk_fitted_level_set(rk, name, definitions[name], twins)
         if value === nothing
-            push!(uncovered, string("the `", grouping.form, "(...)` block over ",
-                join(("`$c`" for c in columns), ", ")))
+            push!(uncovered, what)
         else
             any(p -> first(p) === name, values) || push!(values, name => only(value))
+            union!(get!(level_columns, name, Symbol[]), columns)
         end
     end
     isempty(values) && isempty(uncovered) && return none
     levels = NamedTuple{Tuple(first.(values))}(Tuple(last.(values)))
-    sized = Set{Symbol}(_rk_record_root(s.args[2]) for s in statements
+    # Each block a level set sizes: its value's name, and that level set.
+    blocks = [_rk_record_root(s.args[2]) => s.args[3].args[2] for s in statements
         if Meta.isexpr(s, :call, 3) && s.args[1] === :~ && Meta.isexpr(s.args[3], :call) &&
-            length(s.args[3].args) >= 2 && s.args[3].args[2] in keys(levels))
+            length(s.args[3].args) >= 2 && s.args[3].args[2] in keys(levels)]
+    sized = Set{Symbol}(first.(blocks))
     fit_names = rk.fitted === nothing ? Vector{Symbol}(_rk_layout_coordinate_names(rk)) :
         copy(_rk_fitted_state(rk).coordinates)
-    _RKFitCoordinateLevels(levels, sized, uncovered, fit_names)
+    # A grouped HSGP's block takes its new levels' values under the names of
+    # its sampled locals, which its coordinate record names.
+    grouped = Set{Symbol}(term.options.id for predictor in _rk_replay_predictors(rk.plan)
+        for term in predictor.terms if term.kind === :hsgp && haskey(term.options, :group_index))
+    hsgp = isdisjoint(grouped, first.(blocks)) ? Dict{Symbol,Any}() :
+        Dict{Symbol,Any}(r.declaration => r for r in _rk_coordinate_records(rk)
+            if r.kind === :hsgp && r.grouped)
+    entries = Pair{Symbol,Any}[]
+    for (block, level_set) in blocks
+        append!(entries, _rk_level_inputs(get(hsgp, block, nothing), block,
+            Tuple(level_columns[level_set])))
+    end
+    _RKFitCoordinateLevels(levels, sized, uncovered, fit_names,
+        NamedTuple{Tuple(first.(entries))}(Tuple(last.(entries))))
+end
+
+# The values a cut supplies for a sized block's new levels, one row per level
+# in level order: a random-effect block's effects (`b_g`, levels × margins, on
+# the effects' scale), or a grouped HSGP's standardized basis weights
+# (`<term>.z`, levels × basis functions, `Normal(0, 1)` under the fitted law)
+# and the standardized effects of each per-level hyper-predictor
+# (`<term>.sigma_z` for `log(sd(hsgp(…)))`, `<term>.rho_z` for
+# `log(length_scale(hsgp(…)))`, one per level, `Normal(0, 1)`): the graph
+# scales them by the draw's fitted hyperparameters.
+_rk_level_inputs(::Nothing, block, columns) = [block => (; columns, kind=:group_effects)]
+function _rk_level_inputs(record, block, columns)
+    inputs = Pair{Symbol,Any}[Symbol(block, ".", record.locals.weights) =>
+        (; columns, kind=:hsgp_weights)]
+    for hyper in (:length_scale, :sd)
+        effects = getproperty(record.locals.hypers, hyper)
+        effects === nothing || push!(inputs, Symbol(block, ".", effects.z) =>
+            (; columns, kind=Symbol(:hsgp_, hyper, :_effects)))
+    end
+    inputs
+end
+
+# Each block whose per-level rows a resampled grouping sizes, as
+# `(what, columns, level_set)`: a random-effect block over the grouping, and a
+# grouped `hsgp(...; by = g)` term, whose standardized weights (and per-level
+# hyper effects) have one row per level of its in-graph level set
+# (`g_fit_levels = brm_fit_levels(g_fit)`). `level_set` is that definition's
+# name, `nothing` when no fitted level set sizes the block.
+function _rk_resampled_level_sets(plan, groups, definitions, twins)
+    sets = Tuple{String,Vector{Symbol},Union{Nothing,Symbol}}[]
+    for bucket in _rk_replay_buckets(plan)
+        grouping = bucket.grouping
+        columns = Symbol[grouping.columns...]
+        grouping.by === nothing || push!(columns, grouping.by)
+        any(in(groups), columns) || continue
+        push!(sets, (string("the `", grouping.form, "(...)` block over ",
+            join(("`$c`" for c in columns), ", ")), columns,
+            _rk_bucket_level_set(grouping, definitions, twins)))
+    end
+    for predictor in _rk_replay_predictors(plan), term in predictor.terms
+        options = term.options
+        term.kind === :hsgp && haskey(options, :group_fit_source) &&
+            !(get(options, :level_cor, nothing) isa _BRMMultigroupCoordinates) &&
+            options.group_column in groups || continue
+        fit = Expr(:call, :brm_fit_levels, options.group_fit_source)
+        name = findfirst(rhs -> isequal(rhs, fit), definitions)
+        push!(sets, (string("the grouped `hsgp(...; by = ", options.group_column,
+            ")` term `", options.id, "`"), Symbol[options.group_column], name))
+    end
+    sets
 end
 
 # The data-only definition that sizes a block's standardized draws: a plain

@@ -39,6 +39,9 @@ _brm_term_prior_slots(::typeof(mo1)) = _brm_term_prior_slots(mo)
 _brm_term_prior_slots(::typeof(me)) =
     (_BRMTermPriorSlot(:latent, :term_latent, :real),)
 _brm_term_prior_slots(::typeof(interval_censored)) = _brm_term_prior_slots(me)
+# A written term's own slots: its callable's, unless its arguments change them
+# (a spatial `gmrf((east, north); …)` has no temporal length).
+_brm_term_prior_slots(term::ExprColumn) = _brm_term_prior_slots(getf(term))
 
 _brm_term_prior_rank(spec) = isnothing(spec.predictor) ? 0 : 1
 
@@ -348,10 +351,13 @@ _brm_term_slot_ambiguity(::typeof(t2)) = "a tensor smooth has three independent 
 function _brm_resolve_term_slot(term, spec; prefix="BRM preparation")
     callable = getf(term)
     spelling = _brm_term_prior_spelling(spec)
-    slots = filter(slot -> slot.class === spec.class, _brm_term_prior_slots(callable))
+    slots = filter(slot -> slot.class === spec.class, _brm_term_prior_slots(term))
     isempty(slots) && error(
         "$prefix: `$spelling` — `$(nameof(callable))` has no " *
         "$(_brm_term_prior_class(Val(spec.class))) to configure")
+    # The term's only slot of the class needs no component to name it, as a
+    # spatial `gmrf`'s one length (`length_scale(lp, gmrf((x, y)))`).
+    isnothing(spec.component) && length(slots) == 1 && return only(slots)
     matches = filter(slot -> slot.component === spec.component, slots)
     if isempty(matches)
         isnothing(spec.component) && error(
@@ -372,7 +378,7 @@ Base.@nospecializeinfer function _brm_term_address_map(@nospecialize(brmi::BRMI)
     isnothing(operation) && return result
     for term in _brm_additive_terms(last(getargs(operation, 2)))
         term isa ExprColumn || continue
-        isempty(_brm_term_prior_slots(getf(term))) && continue
+        isempty(_brm_term_prior_slots(term)) && continue
         push!(get!(result, _brm_prepared_term_key(term), Any[]), term)
     end
     result

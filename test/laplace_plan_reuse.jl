@@ -1,5 +1,6 @@
 # Retained preparation must save actual setup calls, preserve the marginal,
 # and give every target independent state, including strict term subsets.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, Random, LinearAlgebra
 

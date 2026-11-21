@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_producer_audit.jl"))
 using ReactiveKernelsPPL: density_factors, select_factors, factor_coordinates,

@@ -1,5 +1,6 @@
 # Exact finite-population controls for the production batch sampler. Only
 # stdlibs: no model preparation, AD, posterior simulation or environment setup.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_sampling.jl"))
 

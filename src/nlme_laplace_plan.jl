@@ -32,7 +32,7 @@ Base.deepcopy_internal(p::_BRMLaplacePreparation, ::IdDict) = p
 
 Which latent terms of a model [`brm_laplace_problem`](@ref) integrates, from
 [`brm_laplace_plan`](@ref). `plan.terms` holds one entry per latent term
-(random-effect block, `cdar` walk, `car` field or declared vector): its `declaration`, `grouping`,
+(random-effect block, `cdar` or `rw` walk, `car` field or declared vector): its `declaration`, `grouping`,
 `kind`, `class` (`:integrated`, `:gated`, `:sampled` or `:never`), `reason`,
 whether it is `admitted` (integrated by the problem), and for a gated term its
 `importance_ess` (`(; min, median, below, blocks, draws)`) or `nothing`.
@@ -126,6 +126,12 @@ and correlated vector priors are never admitted. Derived Normal observations
 stay sampled automatically because their dependence on the vector can be nonlinear;
 name the vector in `integrate` to opt in.
 
+The formula's population coefficients are terms only when `:coefficients` is
+named in `integrate` or `sample`, so an automatic plan never integrates them.
+Named in `integrate`, each coefficient with a Normal prior of constant mean
+and scale is its own term over the grouping `:coefficients`, integrated with
+the effects as INLA does. A coefficient with another prior is `:never`.
+
 - **integrated:** every row reading the term is recognized as affine Normal,
   with scale fixed conditional on the sampled coordinates. Its Laplace is exact
   with exact determinant algebra;
@@ -210,13 +216,17 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     forced = integrate === :auto ? Symbol[] : Symbol[_brm_plan_names(integrate)...]
     sampled = Symbol[_brm_plan_names(sample)...]
     named(t, names) = t.declaration in names || t.grouping in names
-    records = [r for r in _rk_coordinate_records(backend) if r.kind in _BRM_SPL_LATENT]
+    # Formula coefficients are terms only when `:coefficients` is named, so an
+    # automatic plan never integrates them (decision `0r49iwd`).
+    coefficients = :coefficients in forced || :coefficients in sampled
+    records = [c for r in _rk_coordinate_records(backend) for c in
+        (r.kind in _BRM_SPL_LATENT ? [r] : coefficients ? _brm_spl_coefficient_records(r) : [])]
     isempty(records) && _brm_nlme_error("brm_laplace_plan: the model has no random-effect " *
-        "block, `cdar` walk, `car` field or declared vector to integrate")
+        "block, `cdar` or `rw` walk, `car` field or declared vector to integrate")
     terms = map(records) do r
         (; declaration=_brm_spl_record_declaration(r), grouping=_brm_spl_record_group(r),
             kind=r.kind === :stratified_ranef ? :ranef : r.kind,
-            never=_brm_plan_never(r))
+            never=_brm_plan_never(backend, r))
     end
     outer = _brm_spl_gaussian_outer(backend, [t for t in terms if t.never === nothing])
     terms = [any(d -> _brm_nlme_owned(d, t.declaration), outer) ?
@@ -354,7 +364,7 @@ _brm_plan_entry(t, class, reason, admitted, importance_ess) = (; t.declaration,
     t.grouping, t.kind, class, reason, admitted, importance_ess)
 
 # Why the sparse Laplace never integrates a record, or `nothing`.
-function _brm_plan_never(r)
+function _brm_plan_never(backend, r)
     r.kind === :vector && get(r, :gaussian, nothing) === nothing &&
         return "the declared vector does not have an unconstrained independent Normal prior"
     r.kind === :stratified_ranef && return "a stratified block is not integrated yet"
@@ -362,6 +372,8 @@ function _brm_plan_never(r)
         return "a Student-t block's draws are not Gaussian"
     r.kind === :car && r.separation !== nothing &&
         return "a `car_units` field's draws are not integrated"
+    r.kind === :population && _brm_spl_coefficient_prior(backend, r) === nothing &&
+        return "its prior `$(r.prior)` is not a Normal of constant mean and scale"
     nothing
 end
 
@@ -559,7 +571,7 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
     end
     for e in unique(e for i in I for e in cache.edges_by_effect[i])
         i, j = cache.edges[e]
-        total -= (z[i] - z[j])^2 / 2
+        total -= cache.edge_weights[e] * (z[i] - z[j])^2 / 2
     end
     # A native GMRF field's −½ zᵀQz, as far as it depends on z[I]: a pair
     # inside I once each way, a pair leaving I twice.
@@ -691,7 +703,7 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
     p.population = setdiff(eachindex(p.u), p.integrated)
     p.names = _rk_layout_coordinate_names(p.backend)[p.population]
     p.blocks = [_BRMSlapBlock(b.declaration, b.group, b.K, zmap[b.z], b.omega,
-        b.edges, b.sums, b.λ, b.prior) for b in p.blocks[keep]]
+        b.edges, b.sums, b.λ, b.prior, b.weights) for b in p.blocks[keep]]
     p.integrate = unique(b.group for b in p.blocks)
     old = (; p.rptr, p.rblock, p.rlevel, p.rentry)
     p.rptr = [1]; p.rblock = Int[]; p.rlevel = Int[]; p.rentry = Int[]; p.coff = Int[]

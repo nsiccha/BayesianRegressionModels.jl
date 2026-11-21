@@ -1,4 +1,5 @@
 # Run: julia --project=test test/spline_basis_signs.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using LinearAlgebra
 using Random

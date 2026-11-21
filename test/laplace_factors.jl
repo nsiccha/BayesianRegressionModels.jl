@@ -1,5 +1,6 @@
 # Consumer-side reconstruction through RKPPL's public sum-factor boundary.
 # Dense references are confined to the eight-row fixture below.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, Random
 using SparseArrays

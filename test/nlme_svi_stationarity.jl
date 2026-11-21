@@ -1,5 +1,6 @@
 # Statistical and storage controls for the iterate gate; no model compilation.
 # RUN: julia --project=test test/nlme_svi_stationarity.jl [testset-filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, Random, Statistics, Serialization, LinearAlgebra
 include(joinpath(@__DIR__, "testset_filter.jl"))
 const BRM = BayesianRegressionModels

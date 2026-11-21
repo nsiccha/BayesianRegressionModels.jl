@@ -82,7 +82,7 @@ decay = @brm begin
     rows = groups(observation_unit => unit)
     @plate for i in eachindex(rate)
         mean_y = amplitude * exp.(-rate[i] .* time[rows[i]])
-        y[rows[i]] ~ Normal(mean_y, noise)
+        y[rows[i]] .~ Normal.(mean_y, noise)
     end
 
     amplitude ~ LogNormal(0, 0.5)
@@ -98,9 +98,15 @@ model = decay((; unit=["a", "b"],
 
 The loop follows the unit-level `rate` vector. Inside the cell, `rate[i]` is a unit's value, `time[rows[i]]` its observations,
 and bare `amplitude` is shared. Cell code uses Julia broadcasting explicitly.
-A bare left-hand name is local; an indexed left-hand name exposes a model
-output. Observe the response slice directly: an assignment that aliases it
-does not become a new observation.
+An assignment to a bare name is local. An assignment to `name[i]` exposes a
+model output. Observe the response slice directly, as in `y[rows[i]]` above.
+
+For four independent standard-normal draws in each cell, write
+`z[1:4] .~ Normal.(0, 1)` and read the vector as `z` inside the cell.
+Use `z[1:K]` when an integer data field sets the width. When the location
+is a vector, `z .~ Normal.(mu[i], s)` follows its length in each cell,
+including when cells differ in length. A scalar draw uses `a ~ Normal(0, 1)`.
+A single joint draw also uses `~`, as in `p ~ Dirichlet(alpha[i])`.
 
 For long-format series, `@plate for p in groups(unit; order=time)` iterates
 each unit's ordered row indices. An `@scan` within the cell states a recurrence;
@@ -200,6 +206,54 @@ For example, `brm_outputs(brm_descriptor(SBBRMI(model)); submodel=(:channels,
 `channels[item]` uses positions as keys. For a fit with a different selection
 of members or declaration flags, call the builder on the new records.
 
+When instruments measure different covariates, store the fixed-effect formula
+on each record. In this calibration model the left sensor adjusts for
+temperature and the right sensor fits only an intercept. Its offset vector
+gives each instrument the rows on which to evaluate its calibration.
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:RecordFormulaGuide), raw"""
+@brm function calibration(entry)
+    level ~ rhs(entry.formula) + offset(entry.offset)
+    effect(level, :) ~ Normal(0, entry.width)
+    effect(level, Intercept) ~ Normal(0, 1)
+    return sum(level)
+end
+
+survey = @brm begin
+    for sensor in sensors
+        channels[sensor.id] ~ calibration(sensor)
+    end
+    y ~ Normal(channels, 1)
+end
+
+sensors = [(id=:left, formula="1 + standardize(temp)", temp=[8., 10., 12.],
+            offset=zeros(3), width=0.4),
+           (id=:right, formula=1, offset=zeros(2), width=0.7)]
+model = survey((; sensors, y=[0.2, 1.0]))
+""", :model; title="Calibration covariates selected by instrument", require_stan=true)
+```
+
+```@example record_formulas
+using BayesianRegressionModels
+model = Main.BRMDocsComparisons.example_module(:RecordFormulaGuide).model
+sb = SBBRMI(model)
+left = brm_transform_constants(sb, :standardize_entry_temp; submodel=(:channels, :left))
+(left.center, left.scale, brm_transform_constants(sb; submodel=(:channels, :right)))
+```
+
+A formula may be text, a Julia expression such as `:(1 + standardize(temp))`,
+a column symbol, or the integer `0` or `1`. Combine record columns with `+`
+and `&`, transform a column with `center`, `standardize` or `zscale`, or index
+by a record column. BRM uses the same coefficient labels as the written-out
+member formula. For example, `temp` is `:entry_temp` and `standardize(temp)`
+is `:standardize_entry_temp`. To give that term its own prior wherever it
+appears, write `optional(effect(level, :standardize_entry_temp)) ~ Normal(0, 0.3)`.
+Pass the label as `coefficient` and the same
+`submodel` key to `brm_population_effect_coordinates`. Each predictor can
+read a different formula field. A change to the selected terms needs a new fit.
+
 To give selected instruments their own smooth time effects, put the formula
 inside the guard. Each enabled instrument supplies its time grid and basis
 size. The fixed instrument below contributes its known mean.
@@ -296,7 +350,11 @@ use different likelihoods in the same subject plate. A grouped intercept
 `(1 | p | setting.site)` belongs to that member. Use
 `(1 | parentblock(:p) | setting.site)` to put its margin in the parent's
 `p` correlation block. The site labels match rows across members and the
-parent, including when their rows have different orders or lengths.
+parent, including when their rows have different orders or lengths. The
+member's formula can carry its own terms beside that margin, as in
+`shift ~ 1 + (1 | parentblock(:p) | setting.site)`, and
+`effect(shift, Intercept) ~ Normal(0, 1)` then sets that member's intercept
+prior.
 
 Query a member's observation draws with
 `brm_output_coordinates(descriptor, :y, names; role=:posterior_predictive,

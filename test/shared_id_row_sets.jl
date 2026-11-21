@@ -8,6 +8,7 @@
 # labels of `kreis` and `kreis_b`, and each predictor gathers its own rows by
 # its own column (user decision 05d6dw7, snag a-correlated-kre-f027abd1). Before,
 # SBBRMI silently built two uncorrelated blocks and RKBRMI refused the model.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using WarmupHMC
 using LinearAlgebra, Random, Statistics

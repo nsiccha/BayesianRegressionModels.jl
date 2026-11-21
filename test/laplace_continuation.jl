@@ -6,6 +6,7 @@
 # counter, finite differences on each smooth piece, and that the sparse and
 # whole-model targets agree. A log-concave model takes one stage.
 # RUN: julia --project=test test/laplace_continuation.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems
 

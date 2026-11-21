@@ -13,6 +13,7 @@
 # RUN: `julia --project=test test/rk_robust_edges.jl`
 # BRM_ROBUST_RUNTIME=0 skips the BridgeStan layer (emission + stanc only).
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

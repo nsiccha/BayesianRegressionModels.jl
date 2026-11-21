@@ -1,3 +1,4 @@
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 include("smc_tuning_lifecycle_fixture.jl")
 include("smc_window_selective_fixture.jl")

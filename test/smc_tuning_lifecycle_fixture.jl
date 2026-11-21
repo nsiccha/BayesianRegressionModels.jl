@@ -1,5 +1,6 @@
 module SMCTuningLifecycleFixture
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, DifferentiationInterface, SequentialMonteCarlo, WarmupHMC
 using Random, Serialization, Treebars, LogDensityProblems

@@ -11,6 +11,7 @@
 #
 # RUN: julia --project=test --threads=<max T> research/svi_threads/benchmark.jl \
 #          <shape> <units> <rows> <batch> <iterations> [T ...]
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LinearAlgebra, Random, Statistics

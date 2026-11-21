@@ -6,6 +6,7 @@
 # model at fixed unconstrained hyperparameter coordinates instead; it does not
 # claim known-value declaration support or integrate those hyperparameters.
 # julia --project=test research/shared_field_laplace/gaussian_coupled_control.jl 'Gaussian coupled control'
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("whole_window_probe.jl")
 using Serialization, Statistics
 

@@ -2,6 +2,7 @@
 # Run under one compute token:
 # julia --project=test research/shared_field_laplace/posterior_probe.jl 'shared-field posterior comparison'
 # Reference chains and data-only fits are retained in the task scratchpad.
+include(joinpath(@__DIR__, "..", "..", "test", "fitting_packages.jl"))
 include("joint_svi_probe.jl")
 using WarmupHMC, MCMCDiagnosticTools, Serialization, Statistics
 

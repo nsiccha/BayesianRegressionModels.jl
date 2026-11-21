@@ -11,6 +11,7 @@
 #     julia --project=test test/adaptive_centering_threads.jl
 #
 # Synthetic toy blocks only; no compiled Stan model is involved.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, WarmupHMC, Enzyme, LogDensityProblems, Random, LinearAlgebra
 using DifferentiationInterface: AutoEnzyme
 include("threaded_gradient_stress.jl")
@@ -153,19 +154,24 @@ function _cdar_problem()
 end
 
 # Areal car cells: a BYM2 field over 7 areas (two components and an island;
-# its `theta` cells read the intercept and their area's `phi` coordinate) and an
-# ICAR field.
+# its `theta` cells read the intercept and their area's `phi` coordinate), an
+# ICAR field, and a scaled ICAR field over 4 areas with an island (its `phi`
+# cells scaled by `1 / sqrt(s_c)`, its island's `theta` cell reading the intercept).
 # `offset` shifts every coordinate past another family's.
 function _car_blocks(offset=0)
     struct_idx = [1, 2, 3, 0, 4, 5, 6]
-    bym2 = BRM._CARAdaptiveCenteringBlock(:mu, :car_mu_area, true,
+    bym2 = BRM._CARAdaptiveCenteringBlock(:mu, :car_mu_area, true, false,
         offset .+ collect(1:6), offset .+ collect(7:13), struct_idx, [1, 2, 3, 5, 6, 7],
-        log.([1.4, 1.4, 1.4, 4.0, 4.0, 4.0]), offset + 14, 0.0, Inf, offset + 15, 0.0, 1.0,
-        offset + 22, collect(Any, 1:7))
-    icar = BRM._CARAdaptiveCenteringBlock(:sigma, :car_sigma_area, false,
-        offset .+ collect(16:20), Int[], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5], zeros(5),
+        Int[], log.([1.4, 1.4, 1.4, 4.0, 4.0, 4.0]), offset + 14, 0.0, Inf, offset + 15,
+        0.0, 1.0, offset + 22, collect(Any, 1:7))
+    icar = BRM._CARAdaptiveCenteringBlock(:sigma, :car_sigma_area, false, false,
+        offset .+ collect(16:20), Int[], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5], Int[], zeros(5),
         offset + 21, 0.0, Inf, 0, 0.0, 1.0, 0, collect(Any, 1:5))
-    [bym2, icar], offset + 22
+    scaled = BRM._CARAdaptiveCenteringBlock(:nu, :car_nu_area, false, true,
+        offset .+ collect(23:25), [offset + 26], [1, 0, 2, 3], [1, 3, 4], [2],
+        log.([2.5, 2.5, 2.5]), offset + 27, 0.0, Inf, 0, 0.0, 1.0, offset + 22,
+        collect(Any, 1:4))
+    [bym2, icar, scaled], offset + 27
 end
 
 function _car_problem()

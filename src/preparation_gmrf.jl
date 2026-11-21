@@ -13,6 +13,36 @@ _brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(gmrf)}) =
     (; sigma=term.state.sigma_prior, spatial_length=term.state.spatial_prior,
        temporal_length=term.state.temporal_prior)
 
+# A spatial field, `gmrf((east, north); …)`, has no time axis: its rows all
+# read the one fitted time 0.0, so it has no temporal length to address, and
+# its source names only the two spatial columns. Inside, it is the space-time
+# field on that one time with its temporal length held at 1.0: one time forms
+# no OU transition, so that value never enters the law (`_brm_gmrf_logpdf`
+# uses only the stationary first step), and it is no parameter, data input or
+# term role of either backend.
+_brm_gmrf_spatial_term(term) = length(getargs(term)) == 1
+_brm_gmrf_spatial(source) = length(source) == 2
+_brm_gmrf_has_channel(source) = length(source) == 4
+const _BRM_GMRF_SPATIAL_TIME = 0.0
+const _BRM_GMRF_SPATIAL_TEMPORAL_LENGTH = _BRMKnownTermValue(1.0)
+const _BRM_GMRF_SPATIAL_PARAMETER_BINDINGS = (; sd=:sigma, spatial_length=:spatial_length, field=:field)
+_brm_term_prior_slots(term::ExprColumn{typeof(gmrf)}) = _brm_gmrf_spatial_term(term) ?
+    _brm_term_prior_slots(gmrf)[1:2] : _brm_term_prior_slots(gmrf)
+_brm_gmrf_parameter_bindings(term) = _brm_gmrf_spatial_term(term) ?
+    _BRM_GMRF_SPATIAL_PARAMETER_BINDINGS : _BRM_GMRF_PARAMETER_BINDINGS
+
+# The rows' time and channel reads, from the data columns the field's `source`
+# names: every row of a spatial field reads its one time, and a field without
+# a channel column reads channel 1.
+_brm_gmrf_row_time(source, data) = _brm_gmrf_spatial(source) ?
+    fill(_BRM_GMRF_SPATIAL_TIME, length(data[source[1]])) : data[source[3]]
+_brm_gmrf_row_channel(source, data) = _brm_gmrf_has_channel(source) ?
+    data[source[4]] : ones(Int, length(data[source[1]]))
+# The fit-role rows' times: the training rows' under a frozen replay.
+_brm_gmrf_fit_time(source, x, time) = _brm_gmrf_spatial(source) ?
+    fill(_BRM_GMRF_SPATIAL_TIME, length(_brm_fit_input_source(source[1], x))) :
+    _brm_fit_input_source(source[3], time)
+
 function _brm_prepared_term_key(term::ExprColumn{typeof(gmrf)})
     args = getargs(term)
     axes = first(args)
@@ -20,13 +50,15 @@ function _brm_prepared_term_key(term::ExprColumn{typeof(gmrf)})
         throw(ArgumentError("gmrf needs two named spatial columns as `(east, north)`"))
     rest = map(a -> _brm_term_arg_name(a), args[2:end])
     all(!isnothing, rest) || throw(ArgumentError("gmrf time and channel must name data columns"))
+    isempty(rest) && return Symbol("gmrf((", join(name.(axes), ","), "))")
     Symbol("gmrf((", join(name.(axes), ","), "),", join(rest, ","), ")")
 end
 
 function _brm_gmrf_arguments(term)
     args, kw = getargs(term), getkwargs(term)
-    length(args) in (2, 3) || throw(ArgumentError(
-        "gmrf takes `(east, north), time` and an optional channel column"))
+    length(args) in (1, 2, 3) || throw(ArgumentError(
+        "gmrf takes `(east, north)`, then an optional time column and, after it, " *
+        "an optional channel column"))
     axes = first(args)
     axes isa Tuple && length(axes) == 2 || throw(ArgumentError(
         "gmrf needs two spatial columns as `(east, north)`"))
@@ -36,6 +68,12 @@ function _brm_gmrf_arguments(term)
     get(kw, :spatial, :matern) === :matern || throw(ArgumentError(
         "gmrf currently supports spatial=:matern (two-dimensional smoothness ν=1)"))
     get(kw, :temporal, :ou) === :ou || throw(ArgumentError("gmrf currently supports temporal=:ou"))
+    length(args) == 1 && haskey(kw, :temporal) && throw(ArgumentError(
+        "gmrf((east, north); …) is a spatial field with no time axis, so it takes no " *
+        "`temporal=`; give a time column, `gmrf((east, north), time; …)`, for OU evolution"))
+    length(args) == 1 && haskey(kw, :cor) && throw(ArgumentError(
+        "gmrf((east, north); …) is a spatial field with one channel, and `cor=` correlates " *
+        "channels; a channel axis comes after a time column, `gmrf((east, north), time, channel; cor=…)`"))
     mesh = get(kw, :mesh, nothing)
     neighbors = get(kw, :neighbors, nothing)
     multiresolution = get(kw, :multiresolution, nothing)
@@ -47,7 +85,8 @@ function _brm_gmrf_arguments(term)
         mesh isa NamedTuple && Set(keys(mesh)) == Set((:vertices, :cells)) || throw(ArgumentError(
             "gmrf needs mesh=(vertices=xy, cells=triangles)"))
     end
-    (; axes, time=args[2], channel=length(args) == 3 ? args[3] : nothing,
+    (; axes, time=length(args) >= 2 ? args[2] : nothing,
+       channel=length(args) == 3 ? args[3] : nothing,
        mesh, neighbors=_brm_gmrf_count(:neighbors, neighbors),
        neighbors_source=_brm_gmrf_count_source(neighbors),
        multiresolution=_brm_gmrf_count(:multiresolution, multiresolution),
@@ -78,12 +117,16 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
         geometry::Bool=true)
     arguments = _brm_gmrf_arguments(term)
     spatial = map(arg -> _brm_term_data(:gmrf, arg, context), arguments.axes)
-    time_source, time = _brm_term_data(:gmrf, arguments.time, context)
+    timed = arguments.time !== nothing
+    time_source, time = timed ? _brm_term_data(:gmrf, arguments.time, context) :
+        (nothing, fill(_BRM_GMRF_SPATIAL_TIME, length(last(first(spatial)))))
     nrows = length(time)
     all(pair -> last(pair) isa AbstractVector{<:Real} && length(last(pair)) == nrows, spatial) ||
-        throw(ArgumentError("gmrf spatial columns must be numeric vectors on the time rows"))
+        throw(ArgumentError(timed ? "gmrf spatial columns must be numeric vectors on the time rows" :
+            "gmrf spatial columns must be numeric vectors of one length"))
     time isa AbstractVector{<:Real} || throw(ArgumentError("gmrf time must be a numeric vector"))
-    times = _brm_fitted(_brm_gmrf_times, :gmrf_times, time_source, time)
+    times = timed ? _brm_fitted(_brm_gmrf_times, :gmrf_times, time_source, time) :
+        [_BRM_GMRF_SPATIAL_TIME]
     channel_source, row_channels, channels = if arguments.channel === nothing
         nothing, ones(Int, nrows), [1]
     else
@@ -95,15 +138,16 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
     correlation = _brm_gmrf_correlation(arguments.cor)
     correlation === nothing || correlation.K == length(channels) || throw(DimensionMismatch(
         "gmrf channel correlation dimension must equal the fitted channel count"))
-    source = (first.(spatial)..., time_source,
+    source = (first.(spatial)..., (timed ? (time_source,) : ())...,
         (channel_source === nothing ? () : (channel_source,))...)
     priors = (;
         sigma_prior=_brm_term_prior_expression(term, target, context, :term_sd;
             default=ExprColumn(LogNormal, 0.0, 1.0)),
         spatial_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
             component=:space, default=ExprColumn(LogNormal, 0.0, 1.0)),
-        temporal_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
-            component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
+        temporal_prior=timed ? _brm_term_prior_expression(term, target, context, :term_length_scale;
+            component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)) :
+            _BRM_GMRF_SPATIAL_TEMPORAL_LENGTH)
     correlation_source = correlation === nothing ? () : (correlation.name,)
     for (option, count) in ((:neighbors, arguments.neighbors),
             (:multiresolution, arguments.multiresolution))
@@ -163,7 +207,7 @@ function _brm_prepare_gmrf_footprint(source, correlation_source, spatial, time,
     footprint = _brm_fitted_value(:gmrf_footprint, Symbol(target, :_, join(source, :_))) do
         _brm_vecchia_footprint(_brm_fit_input_source(source[1], last(spatial[1])),
             _brm_fit_input_source(source[2], last(spatial[2])),
-            _brm_fit_input_source(source[3], time), length(channels); neighbors)
+            _brm_gmrf_fit_time(source, last(spatial[1]), time), length(channels); neighbors)
     end
     index = _brm_vecchia_field_index(footprint, channels, last(spatial[1]), last(spatial[2]),
         time, row_channels)
@@ -183,9 +227,9 @@ end
 
 function _brm_replay_gmrf(training, context)
     state = training.state
-    x, y, time = map(s -> context.data[s], training.source[1:3])
-    row_channels = length(training.source) == 3 ? ones(Int, length(time)) :
-        context.data[training.source[4]]
+    x, y = map(s -> context.data[s], training.source[1:2])
+    time = _brm_gmrf_row_time(training.source, context.data)
+    row_channels = _brm_gmrf_row_channel(training.source, context.data)
     if get(state, :multiresolution, nothing) !== nothing
         reads, index = _brm_multiresolution_rows(state.support, state.channels, x, y, time, row_channels)
         return _BRMPreparedTerm(gmrf, training.source, merge(state, (; reads, index)), training.dependencies)
@@ -201,7 +245,7 @@ function _brm_replay_gmrf(training, context)
 end
 function _brm_replay_term(::typeof(gmrf), training, fresh::ExprColumn, context)
     args = _brm_gmrf_arguments(fresh)
-    source = (name.(args.axes)..., name(args.time),
+    source = (name.(args.axes)..., (args.time === nothing ? () : (name(args.time),))...,
         (args.channel === nothing ? () : (name(args.channel),))...)
     source == training.source || throw(ArgumentError("gmrf fitted columns changed"))
     _brm_replay_gmrf(training, context)
@@ -220,7 +264,7 @@ function _brm_prepare_gmrf_multiresolution(source, correlation_source, spatial, 
     support = _brm_fitted_value(:gmrf_multiresolution, Symbol(target, :_, join(source, :_))) do
         _brm_multiresolution_support(_brm_fit_input_source(source[1], last(spatial[1])),
             _brm_fit_input_source(source[2], last(spatial[2])),
-            _brm_fit_input_source(source[3], time), length(channels); rank=multiresolution)
+            _brm_gmrf_fit_time(source, last(spatial[1]), time), length(channels); rank=multiresolution)
     end
     reads, index = _brm_multiresolution_rows(support, channels, last(spatial[1]), last(spatial[2]),
         time, row_channels)

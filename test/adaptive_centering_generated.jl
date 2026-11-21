@@ -16,6 +16,7 @@
 #
 # Run: julia --project=test test/adaptive_centering_generated.jl
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 using BayesianRegressionModels
 using StanBlocks

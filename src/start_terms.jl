@@ -27,7 +27,7 @@ function _brm_start_term_targets(brmi::BRMI, term_inits)
     targets = NamedTuple[]
     for (predictor, terms) in resolved, (_, slots) in terms, (key, entry) in slots
         (; spec, term) = entry
-        slot = only(s for s in _brm_term_prior_slots(getf(term)) if s.name === key)
+        slot = only(s for s in _brm_term_prior_slots(term) if s.name === key)
         spelling = _brm_term_prior_spelling(merge(spec, (; predictor)))
         prior = get(something(_brm_term_override(get(priors, predictor, Dict()), term),
             Dict()), key, nothing)

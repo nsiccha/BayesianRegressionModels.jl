@@ -10,6 +10,7 @@
 #     renders,
 # and that the model has a finite RK log density and gradient.
 
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Markdown, Random
 using BayesianRegressionModels, StanBlocks
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme

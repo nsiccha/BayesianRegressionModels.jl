@@ -1,5 +1,6 @@
 # Fixed-total count vectors are one likelihood event per plate cell.
 # Run: julia --startup-file=no --project=test test/dirichlet_multinomial.jl
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 dm_shared(data) = @brm data begin

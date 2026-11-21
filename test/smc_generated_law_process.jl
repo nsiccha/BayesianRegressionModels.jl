@@ -3,6 +3,7 @@
 # A gmrf field's law is a binding of the RK program's fresh generated module
 # (`##RKEmittedModels#N`), so its raw prior expression names a module that a
 # fresh process does not have. Checkpoints and tuning identities must not.
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test
 include("smc_tuning_lifecycle_fixture.jl")
 using .SMCTuningLifecycleFixture

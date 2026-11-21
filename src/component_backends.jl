@@ -339,10 +339,24 @@ function _brm_component_rk_plan(component, call)
     plan, instance
 end
 
+# A record member's grouped HSGP sizes its rows by the member's fitted level
+# table (`_rk_collection_smooth_inputs!`), so its grouping's level twin
+# (`group_fit_source`) passes nothing unless another part of the member reads it.
+function _rk_drop_unread_level_twins!(fit_inputs, plan, emitted)
+    read = _rk_source_symbols!(Set{Symbol}(), emitted.main)
+    for predictor in _rk_replay_predictors(plan), term in predictor.terms
+        twin = get(term.options, :group_fit_source, nothing)
+        term.kind === :hsgp && haskey(term.options, :collection_levels) &&
+            twin !== nothing && !(twin in read) && delete!(fit_inputs, twin)
+    end
+    fit_inputs
+end
+
 function _rk_submodel_rhs!(definitions, statements, data, bindings,
         target::Symbol, component::BRMComponent, call; reserved=(), cell=nothing)
-    plan, instance = _brm_component_replay_scope(target, component, call; cell) do
-        _brm_component_rk_plan(component, call)
+    plan, instance, transforms = _brm_component_replay_scope(target, component, call; cell) do
+        plan, instance = _brm_component_rk_plan(component, call)
+        plan, instance, isnothing(cell) ? nothing : _rk_member_transform_plan(plan, instance)
     end
     cell === nothing || _rk_collection_smooth_inputs!(plan)
     cells = Dict{Symbol,Symbol}()
@@ -385,6 +399,7 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     # computations still execute at binding time; no Julia-side fitting or
     # sampled value is substituted for them.
     fit_inputs = _rk_plan_fit_inputs(plan)
+    cell === nothing || _rk_drop_unread_level_twins!(fit_inputs, plan, emitted)
     fitted = cell !== nothing ? Dict{Symbol,Set{Symbol}}() :
         _rk_fitted_definitions(emitted, plan, Set{Symbol}(keys(fit_inputs)))
     for key in sort!(collect(keys(fitted)))
@@ -431,12 +446,15 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     push!(definitions, _brm_documented_statement(definition, header))
     push!(statements, Expr(:call, :~, target, Expr(:call, entry, args...)))
     # A plate invocation keeps its fit computations inside the indexed
-    # submodel. Its caller supplies their per-member inputs.
+    # submodel. Its caller supplies their per-member inputs. The member's own
+    # coordinate records travel with it, so the coordinate transport can pair
+    # what the member declares (its population coefficients) by meaning.
     if cell !== nothing
         # Some fitted inputs, such as HSGP mode counts, are model settings
         # without a separate raw data column in the enclosing program.
-        return Dict{Symbol,Symbol}(column_names[input] =>
+        fits = Dict{Symbol,Symbol}(column_names[input] =>
             get(column_names, source, column_names[input]) for (input, source) in fit_inputs)
+        return (; fits, coordinates, transforms)
     end
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs

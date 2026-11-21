@@ -1,4 +1,5 @@
-using AlgebraOfVega, CairoMakie, CSV, JSON
+using AlgebraOfVega, CSV, JSON
+using CairoMakie: Figure, Label, save
 import AlgebraOfGraphics
 out=only(ARGS)
 rows=CSV.File(joinpath(out,"efficiency_plot.tsv");delim='\t')

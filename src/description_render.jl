@@ -88,6 +88,11 @@ _brmd_call_math(::typeof(StanBlocks.stan.builtin.reshape),args,kwargs,c) = lengt
     "\\operatorname{"*_brmd_text(c,:math_reshape)*"}\\left("*join(args,",")*"\\right)"
 _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.reshape),c)=length(c.arguments)==3 ?
     BRMDescriptionFragment(prose=(_brmd_text(c,:matrix_reshape),),covers=(c.id,)) : nothing
+# Julia's `reshape(v, m, n)` in a model statement fills column by column too.
+_brmd_call_math(::typeof(Base.reshape),args,kwargs,c) =
+    _brmd_call_math(StanBlocks.stan.builtin.reshape,args,kwargs,c)
+_brmd_builtin_call(::typeof(Base.reshape),c) =
+    _brmd_builtin_call(StanBlocks.stan.builtin.reshape,c)
 function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_matrix),args,_kwargs,_c)
     length(args)==3 && return first(args)*"\\,\\mathbf1_{"*args[2]*"\\times "*args[3]*"}"
     "\\operatorname{rep}_{\\mathrm{matrix}}\\left("*join(args,",")*"\\right)"
@@ -483,6 +488,12 @@ _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
     _brmd_coordinatewise_fragment(c)
+# The coordinates of a cell latent through a bijection (cell_total_coordinates.jl):
+# their density is the cell's law, described with the cell's statements.
+_brmd_builtin_call(::typeof(brm_shares),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:cell_shares_coordinates),),covers=(c.id,))
+_brmd_builtin_call(::typeof(brm_cell_dirichlet),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:cell_simplex_coordinates),),covers=(c.id,))
 # `x[1:n] .~ Family.(...)` (`_brm_vector_prior(n, law)`): one element law,
 # itself a described component, shared by every coordinate.
 _brmd_builtin_call(::typeof(_brm_vector_prior),c)=BRMDescriptionFragment(
@@ -789,7 +800,9 @@ _brmd_builtin_call(::typeof(cdar),c)=haskey(c.keywords,:cor) ? BRMDescriptionFra
     BRMDescriptionFragment(
     prose=(_brmd_text(c,:damped_walk_independent),),
     equations=("\\delta_1=\\sigma z_1,\\quad\\delta_t=\\rho\\delta_{t-1}+\\sigma\\sqrt{1-\\rho^2}z_t,\\quad z_t\\sim\\mathcal N(0,I)",),covers=(c.id,))
-_brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
+# A spatial field (`gmrf((east, north); …)`) has no time axis and one channel.
+_brmd_builtin_call(::typeof(gmrf),c)=length(c.arguments)==1 ? _brmd_spatial_gmrf(c) :
+    haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
     prose=(_brmd_text(c,:space_time_gmrf_multiresolution),),
     equations=("f(s,t,c)=\\sigma\\sum_k b_{sk}(\\ell_s)z_k(t,c),\\quad\\sum_k b_{sk}^2=1",
         "\\operatorname{Cov}(f(s,t,c),f(s',t',c'))=\\sigma^2(b_s^\\mathsf{T}b_{s'})\\exp(-|t-t'|/\\ell_t)\\Omega_{cc'},\\quad\\rho=2\\ell_s"),
@@ -804,10 +817,39 @@ _brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:multiresolution) ? BRMDe
         "a_t=\\exp[-(t_t-t_{t-1})/\\ell_t],\\quad u_1\\sim\\mathcal N(0,\\Omega\\otimes Q_s^{-1}),\\quad u_t\\mid u_{t-1}\\sim\\mathcal N(a_tu_{t-1},(1-a_t^2)\\Omega\\otimes Q_s^{-1})",
         "f_i=\\sigma\\sum_{v\\in\\triangle_i}w_{iv}u_{v,c_i,t_i},\\quad\\sum_v w_{iv}=1"),
     covers=(c.id,))
+_brmd_spatial_gmrf(c)=haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
+    prose=(_brmd_text(c,:spatial_gmrf_multiresolution),),
+    equations=("f(s)=\\sigma\\sum_k b_{sk}(\\ell_s)z_k,\\quad\\sum_k b_{sk}^2=1,\\quad z_k\\sim\\mathcal N(0,1)",
+        "\\operatorname{Cov}(f(s),f(s'))=\\sigma^2 b_s^\\mathsf{T}b_{s'},\\quad\\rho=2\\ell_s"),
+    covers=(c.id,)) : haskey(c.keywords,:neighbors) ? BRMDescriptionFragment(
+    prose=(_brmd_text(c,:spatial_gmrf_vecchia),),
+    equations=("K_{ij}=M_1(\\kappa r_{ij}),\\quad M_1(x)=xK_1(x),\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
+        "x_i\\mid x_{N(i)}\\sim\\mathcal N(b_i^{\\mathsf T}x_{N(i)},F_i),\\quad b_i=K_{N(i)N(i)}^{-1}K_{N(i)i},\\quad F_i=1-K_{iN(i)}b_i",
+        "f_i=\\sigma x_i"),
+    covers=(c.id,)) : BRMDescriptionFragment(
+    prose=(_brmd_text(c,:spatial_gmrf),),
+    equations=("K=\\kappa^2 C+G,\\quad Q_s=\\frac{KC^{-1}K}{4\\pi\\kappa^2},\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
+        "u\\sim\\mathcal N(0,Q_s^{-1})",
+        "f_i=\\sigma\\sum_{v\\in\\triangle_i}w_{iv}u_v,\\quad\\sum_v w_{iv}=1"),
+    covers=(c.id,))
 # Temporal terms require their recurrence, rather than just a term caption.
-_brmd_builtin_call(::typeof(rw),c) = BRMDescriptionFragment(
-    prose=(_brmd_text(c,:random_walk),),
-    equations=("f_1=0,\\quad f_{t+1}=f_t+\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
+# `rw`'s law follows its `order` and `sum_to_zero` keywords (literal values).
+function _brmd_builtin_call(::typeof(rw),c)
+    (; order, sum_to_zero) = _brm_rw_options(c.keywords)
+    sum_to_zero ? BRMDescriptionFragment(
+        prose=(_brmd_text(c,:random_walk_sum_to_zero),),
+        equations=(order==1 ?
+            "\\log p(f)=-(n-1)\\log\\sigma-\\frac{1}{2\\sigma^2}\\sum_{t=2}^{n}(f_t-f_{t-1})^2+\\log\\mathcal N\\!\\left(\\textstyle\\sum_t f_t\\mid 0,\\,0.001\\,n\\,\\sigma\\right)" :
+            "\\log p(f)=-(n-2)\\log\\sigma-\\frac{1}{2\\sigma^2}\\sum_{t=2}^{n-1}(f_{t+1}-2f_t+f_{t-1})^2+\\log\\mathcal N\\!\\left(\\textstyle\\sum_t f_t\\mid 0,\\,0.001\\,n\\,\\sigma\\right)",),
+        covers=(c.id,)) :
+    order==1 ? BRMDescriptionFragment(
+        prose=(_brmd_text(c,:random_walk),),
+        equations=("f_1=0,\\quad f_{t+1}=f_t+\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,)) :
+    BRMDescriptionFragment(
+        prose=(_brmd_text(c,:random_walk_second_order),),
+        equations=("f_1=0,\\quad f_2=\\sigma z_1,\\quad f_{t+1}-2f_t+f_{t-1}=\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),
+        covers=(c.id,))
+end
 # The areal field's law depends on `type=`; the keyword rides on the call.
 function _brmd_builtin_call(::typeof(car),c)
     type=get(c.keywords,:type,nothing)
@@ -817,6 +859,11 @@ function _brmd_builtin_call(::typeof(car),c)
     type===:bym2 ? BRMDescriptionFragment(
         prose=(common*" "*_brmd_text(c,:areal_bym2),),
         equations=("b_k=\\sigma\\left(\\sqrt{\\rho/s_{c(k)}}\\,\\phi_k+\\sqrt{1-\\rho}\\,\\theta_k\\right),\\quad\\theta_k\\sim\\mathcal N(0,1)",
+            "\\log p(\\phi)=-\\tfrac12\\sum_{i\\sim j}(\\phi_i-\\phi_j)^2+\\sum_c\\log\\mathcal N\\!\\left(\\textstyle\\sum_{k\\in c}\\phi_k\\mid 0,\\,0.001\\,n_c\\right)"),
+        covers=(c.id,)) :
+    get(c.keywords,:scaled,false)===true ? BRMDescriptionFragment(
+        prose=(common*" "*_brmd_text(c,:areal_icar_scaled),),
+        equations=("b_k=\\sigma\\,\\phi_k/\\sqrt{s_{c(k)}}\\ (d_k>0),\\quad b_k=\\sigma\\,\\theta_k\\ (d_k=0),\\quad\\theta_k\\sim\\mathcal N(0,1)",
             "\\log p(\\phi)=-\\tfrac12\\sum_{i\\sim j}(\\phi_i-\\phi_j)^2+\\sum_c\\log\\mathcal N\\!\\left(\\textstyle\\sum_{k\\in c}\\phi_k\\mid 0,\\,0.001\\,n_c\\right)"),
         covers=(c.id,)) :
     BRMDescriptionFragment(

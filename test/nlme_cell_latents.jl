@@ -15,8 +15,9 @@
 # it: "coordinate record kind `cell_latent` has no NLME role").
 #
 # Run: julia --startup-file=no --project=test test/nlme_cell_latents.jl [filter...]
+include(joinpath(@__DIR__, "fitting_packages.jl"))
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
-using Random
+using Random, LogDensityProblems
 
 # Four windows of unequal length; each cell's latent has its window's length.
 const CELL_LATENT_DATA = (; win=["w1", "w2", "w3", "w4"],
@@ -306,4 +307,129 @@ end
     m = brm_nlme_model(RKBRMI(deviation_latent_model(data)); ad_backend=NLME_AD)
     @test count(==(:shared_latent), m.view.role) == sum(length, data.loc)
     check_cell_split(BRM._brm_svi_target(m))
+end
+
+# A model whose units hold no random-effect block: each series' only coordinate
+# of its own is the latent its `@plate for p in groups(series)` cell declares.
+# `subject_group` names the units (snag brm-svi-fit-refu-d79b878a; before, the
+# view refused every model without a `(... | group)` block: "the model has no
+# subject-level random effects"). Series labels first appear out of order.
+const UNIT_LATENT_DATA = (;
+    series=["s3", "s3", "s1", "s1", "s1", "s4", "s3", "s2", "s2", "s4", "s2"],
+    x=[0.1, -0.4, 0.8, 0.3, -0.2, 0.5, 0.0, -0.7, 0.9, 0.2, -0.1],
+    y=[0.6, 0.1, 1.2, -0.3, -0.6, 1.4, 0.9, 0.2, 1.8, -0.9, -1.1])
+
+unit_latent_model(data) = @brm data begin
+    sigma ~ Exponential(1)
+    b ~ Normal(0.0, 1.0)
+    @plate for p in groups(series)
+        m ~ Normal(0.0, 1.0)
+        y[p] ~ Normal(m .+ b .* x[p], sigma)
+    end
+end
+
+# The same model with the series means a block whose SD is known to be 1.
+unit_block_model(data) = @brm data begin
+    sigma ~ Exponential(1)
+    b ~ Normal(0.0, 1.0)
+    mu ~ 0 + (1 | series)
+    sd(mu, series) = 1.0
+    @plate for p in groups(series)
+        y[p] ~ Normal(mu[p] .+ b .* x[p], sigma)
+    end
+end
+
+@stestset "subject_group names the units of a model with no random-effect block" begin
+    data = UNIT_LATENT_DATA
+    backend = RKBRMI(unit_latent_model(data))
+    # Without subject_group nothing names the units; the message says how to.
+    err = try brm_nlme_view(backend); nothing catch e; e end
+    @test err isa BRM.BRMNLMEViewError
+    @test occursin("no subject-level random effects", err.message)
+    @test occursin("`subject_group = :g`", err.message)
+    @test_throws "subject_group `region` is not a grouping column" brm_nlme_view(backend;
+        subject_group=:region)
+    @test_throws "must be a column name" brm_nlme_view(backend; subject_group="series")
+
+    v = brm_nlme_view(backend; subject_group=:series)
+    @test v.group === :series
+    @test v.levels == ["s1", "s2", "s3", "s4"]
+    @test isempty(v.families) && all(isempty, v.subject_coordinates)
+    @test !any(==(:unclaimed), v.role)
+    @test all(c -> length(cell_coordinates(v, :m, c)) == 1, 1:4)
+    @test all(c -> v.role[only(cell_coordinates(v, :m, c))] === :shared_latent, 1:4)
+    @test [r for r in v.rows] == [findall(==(level), data.series) for level in v.levels]
+
+    # SVI gives each unit its own series' latent; the split is exact.
+    m = brm_nlme_model(backend; ad_backend=NLME_AD, subject_group=:series)
+    t = BRM._brm_svi_target(m)
+    @test owns_cells(t, m, c -> cell_coordinates(m.view, :m, c))
+    @test sort(m.view.coordinates[t.globals]) == [:b, :sigma]
+    check_cell_split(t)
+    fit = brm_svi_fit(backend; subject_group=:series, ad_backend=NLME_AD, rng=Xoshiro(11),
+        batch_size=2, max_iterations=6, ndraws=4, threads=1)
+    @test size(fit.draws) == (length(m.unit), 4)
+    @test all(isfinite, fit.draws)
+
+    # It is the model whose series means are a block with SD 1: the densities
+    # agree at every point once each latent `m.<c>` is the block's draw `z.<c>.1`.
+    twin = RKBRMI(unit_block_model(data))
+    names = Vector{Symbol}(BRM._rk_layout_coordinate_names(backend))
+    twin_names = Vector{Symbol}(BRM._rk_layout_coordinate_names(twin))
+    twin_of = map(names) do n
+        c = match(r"^m\.(\d+)$", String(n))
+        c === nothing ? findfirst(==(n), twin_names) :
+            findfirst(t -> endswith(String(t), string(".z.", c[1], ".1")), twin_names)
+    end
+    @test sort(twin_of) == eachindex(twin_names)
+    p = rk_logdensity_problem(backend; ad_backend=NLME_AD)
+    q = rk_logdensity_problem(twin; ad_backend=NLME_AD)
+    for seed in 1:3
+        u = 0.3 .* randn(Xoshiro(seed), length(names))
+        w = zeros(length(twin_names))
+        w[twin_of] .= u
+        @test LogDensityProblems.logdensity(p, u) ≈ LogDensityProblems.logdensity(q, w) rtol=1e-12
+    end
+end
+
+# The mixed-membership shape (snag brm-svi-fit-refu-d79b878a's report): cluster
+# curves from one level-correlated grouped HSGP, read by every series' cell
+# through its simplex, and the series mean a cell latent, with no block. The
+# HSGP's multigroup weights have no row form, so every cell reads them as one
+# shared value: the units, which own no coordinate in the view, are declared
+# to RKPPL as owning none (`partitioned = :none`), which computes them once.
+# Before, the strict locality check refused the cells' queries
+# (`PartitionLocalityError`: `hsgp_tg.value.z_multigroup` "is computed whole").
+const MG_UNIT_DATA = let S = 4, n = 2, t = collect(range(0.0, 1.0; length=5))
+    series = repeat(1:S, inner=length(t))
+    tg = repeat(t, S)
+    N = length(tg)
+    (; y=round.(sin.(3 .* tg) .+ 0.2 .* series; digits=3), series,
+        tg=repeat(tg, n), cg=repeat(["c1", "c2"]; inner=N), N, n, alpha=1.0)
+end
+
+mg_unit_model(data) = @brm data begin
+    Omega ~ LKJCholesky(n, 2.0)
+    tau ~ LogNormal(0.0, 1.0)
+    sigma ~ Exponential(1.0)
+    g ~ 0 + hsgp(tg; k=3, domain=(-0.5, 1.5), by=cg, cor=multigroup(Omega, tau))
+    G = reshape(g, N, n)
+    @plate for p in groups(series)
+        m ~ Normal(0.0, 1.0)
+        theta ~ Dirichlet(n, alpha)
+        y[p] ~ Normal(m .+ G[p, :] * theta, sigma)
+    end
+end
+
+@stestset "a multigroup HSGP read by units with no random-effect block" begin
+    backend = RKBRMI(mg_unit_model(MG_UNIT_DATA))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD, subject_group=:series)
+    @test length(m.view.levels) == 4 && isempty(m.view.families)
+    t = BRM._brm_svi_target(m)
+    for c in 1:4
+        coords = m.view.coordinates[t.units[c]]
+        @test Symbol("m.", c) in coords
+        @test Symbol("theta.", c, ".1") in coords
+    end
+    check_cell_split(t)
 end

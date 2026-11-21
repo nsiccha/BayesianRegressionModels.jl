@@ -2255,7 +2255,12 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   draws are lowered non-centered, as by [`brm_nlme_fit`](@ref). Every
   observation must belong to one subject's cells: a
   cell of a `@plate for` over the subjects or over their rows, or a row of a
-  flat-row response grouped by the subjects.
+  flat-row response grouped by the subjects. A model with no random-effect
+  block over its units names them with `subject_group` (a `@plate for p in
+  groups(g)` with `subject_group = :g`): each unit's factor then holds its
+  cells' local latent coordinates, including the K − 1 coordinates of a
+  `Dirichlet` simplex read only by that unit. Dotted cell latents under a
+  transformed univariate law such as `LogNormal` can still enter the global factor.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
   `LowRankGlobal(r)` (diagonal plus rank `r`).
 - `centering` — fresh fits default to [`LearnedCentering`](@ref), jointly
