@@ -38,7 +38,12 @@ function _sb_collection_cell!(body, data, axis, names, params, scope)
     syntax = _sb_cell_formula_syntax(model.model)
     all(fit -> _sb_cell_formula_syntax(fit.model.model) == syntax, fits) ||
         throw(ArgumentError("component `$(component.name)` produced different declarations within a collection variant"))
-    reads = _rk_source_symbols!(Set{Symbol}(), model.model)
+    # The shared body ends in the component's return. A returned field the body
+    # does not read is still an input of it: a vector that reads record data alone
+    # (`curve = entry.no_curve`) is resolved into a data field of each member,
+    # which only that return reads.
+    result = _sb_component_return(component)
+    reads = _rk_source_symbols!(Set{Symbol}(), Expr(:block, model.model.args..., result))
     args = _brm_component_arguments(component, _brm_component_cell_ir(component, call, scope))
     arguments = Any[Expr(:kw, formal, _sb_scalar_expr(arg, data))
         for (formal, arg) in zip(component.inputs, args) if formal in reads]
@@ -58,7 +63,7 @@ function _sb_collection_cell!(body, data, axis, names, params, scope)
     key = _rk_ast_fresh_name(string(lhs, "_cell_fits"), taken)
     _sb_record_preproc!(data, key, PreprocEntry(:collection_cells,
         _BRMCollectionCellReplay(fits, formal_inputs, prepared), first(axis.path), true))
-    submodel = StanBlocks.SlicModel(Expr(:block, model.model.args..., _sb_component_return(component)),
+    submodel = StanBlocks.SlicModel(Expr(:block, model.model.args..., result),
         Dict{Symbol,Any}(), component.scope, model.observations)
     rewritten = copy(body)
     rewritten[i] = Expr(:call, :~, lhs, Expr(:call, submodel, Expr(:parameters, arguments...)))

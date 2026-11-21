@@ -149,4 +149,186 @@ end
         @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient)
     end
 end
+
+# A member's returned curve is either fitted or its record's own data vector
+# (snag `component-data-o-a8b79baf`). A vector that reads record fields alone
+# is data of each member, which only the member's return reads.
+@brm function site_curve(entry)
+    offset ~ Normal(0.0, 1.0)
+    shift ~ 0 + (1 | parentblock(:p) | entry.site)
+    scale ~ LogNormal(-0.7, 1.0)
+    if entry.fitted
+        gain ~ Normal(0.0, 1.0)
+        curve = gain .* entry.x
+    else
+        curve = entry.baseline
+    end
+    @observe s trajectory member begin
+        entry.y[s] ~ Normal(member.offset .+ member.shift[entry.subject_rows[s]] .+
+            member.curve[entry.pick[s]] .+ trajectory[entry.stack[s]], member.scale)
+    end
+    return (; offset, shift, curve, scale)
+end
+# The same return without a guard: every member's curve is data.
+@brm function site_baseline(entry)
+    offset ~ Normal(0.0, 1.0)
+    shift ~ 0 + (1 | parentblock(:p) | entry.site)
+    scale ~ LogNormal(-0.7, 1.0)
+    curve = entry.baseline
+    @observe s trajectory member begin
+        entry.y[s] ~ Normal(member.offset .+ member.shift[entry.subject_rows[s]] .+
+            member.curve[entry.pick[s]] .+ trajectory[entry.stack[s]], member.scale)
+    end
+    return (; offset, shift, curve, scale)
+end
+const curve_parent = quote
+    level ~ 1 + (1 | p | site)
+    effect(level, Intercept) ~ Normal(0.0, 1.0)
+    sd(:, p) ~ Exponential(0.3333333333333333)
+    cor(:, p) ~ LKJCholesky(n_margins, 2.0)
+    for entry in records
+        channels[entry.id] ~ COMPONENT(entry)
+    end
+    @plate for i in eachindex(level)
+        path = exp(level[i]) .* exp.(-0.1 .* read_time[i])
+        decay[i] = path
+        observe(channels, i, decay[i])
+    end
+end
+with_component(x, component) = x === :COMPONENT ? component :
+    x isa Expr ? Expr(x.head, (with_component(a, component) for a in x.args)...) : x
+parent_of(component) = brm(with_component(curve_parent, component); mod=@__MODULE__)
+const curve_model = parent_of(:site_curve)
+const baseline_model = parent_of(:site_baseline)
+# The same models without components: each member's curve read is a data
+# column, or a fitted gain times one.
+const curve_twin = @brm begin
+    level ~ 1 + (1 | p | site)
+    effect(level, Intercept) ~ Normal(0.0, 1.0)
+    sd(:, p) ~ Exponential(0.3333333333333333)
+    cor(:, p) ~ LKJCholesky(n_margins, 2.0)
+    a_offset ~ Normal(0.0, 1.0)
+    a_shift ~ 0 + (1 | p | a_site)
+    a_scale ~ LogNormal(-0.7, 1.0)
+    b_offset ~ Normal(0.0, 1.0)
+    b_shift ~ 0 + (1 | p | b_site)
+    b_scale ~ LogNormal(-0.7, 1.0)
+    c_offset ~ Normal(0.0, 1.0)
+    c_shift ~ 0 + (1 | p | c_site)
+    c_scale ~ LogNormal(-0.7, 1.0)
+    c_gain ~ Normal(0.0, 1.0)
+    ya ~ Normal(a_offset + a_shift[a_rows] + a_curve + exp(level[a_rows]) * a_decay, a_scale)
+    yb ~ Normal(b_offset + b_shift[b_rows] + b_curve + exp(level[b_rows]) * b_decay, b_scale)
+    yc ~ Normal(c_offset + c_shift[c_rows] + c_gain * c_x + exp(level[c_rows]) * c_decay, c_scale)
+end
+const baseline_twin = @brm begin
+    level ~ 1 + (1 | p | site)
+    effect(level, Intercept) ~ Normal(0.0, 1.0)
+    sd(:, p) ~ Exponential(0.3333333333333333)
+    cor(:, p) ~ LKJCholesky(n_margins, 2.0)
+    a_offset ~ Normal(0.0, 1.0)
+    a_shift ~ 0 + (1 | p | a_site)
+    a_scale ~ LogNormal(-0.7, 1.0)
+    b_offset ~ Normal(0.0, 1.0)
+    b_shift ~ 0 + (1 | p | b_site)
+    b_scale ~ LogNormal(-0.7, 1.0)
+    ya ~ Normal(a_offset + a_shift[a_rows] + a_curve + exp(level[a_rows]) * a_decay, a_scale)
+    yb ~ Normal(b_offset + b_shift[b_rows] + b_curve + exp(level[b_rows]) * b_decay, b_scale)
+end
+
+const curve_reads = [[1, 2, 3], [1, 3], [2, 3], [1, 2, 3]]
+const curve_times = [[2.0, 12.0, 48.0], [1.0, 9.0, 30.0], [3.0, 14.0, 50.0], [2.5, 11.0, 40.0]]
+# Members carry curves of different lengths; `pick` reads one entry per read.
+# The field `subject_rows` shares its name with the segment column BRM emits for
+# each indexed read of a member vector, so the clauses above (two such reads)
+# need three distinct Stan-legal names for it.
+function curve_entry(id, level; fitted=false, baseline=Float64[], x=Float64[], pick)
+    (; id, fitted, baseline, x, pick, stack=curve_reads,
+        y=[level .+ 0.1 .* r for r in curve_reads], site=collect(1:4),
+        subject_rows=[fill(s, length(curve_reads[s])) for s in eachindex(curve_reads)])
+end
+function curve_flat(record, curve)
+    (; rows=reduce(vcat, record.subject_rows), y=reduce(vcat, record.y),
+        curve=reduce(vcat, [curve[record.pick[s]] for s in eachindex(curve_reads)]),
+        decay=reduce(vcat, [exp.(-0.1 .* curve_times[s][record.stack[s]]) for s in eachindex(curve_reads)]))
+end
+# The twin's name of each member's own coordinate, by its plate and position.
+member_names(plate, letters...) = Dict(
+    Symbol("channels_member_", plate, ".", field, ".", i) => Symbol(letter, "_", field)
+    for (i, letter) in enumerate(letters) for field in (:offset, :scale, :gain))
+function curve_parity(model, twin, design, twin_design, rename, name)
+    m = model(design)
+    rk, problem = strict(() -> consumer_problem(m))
+    rkt, reference = consumer_problem(twin(twin_design))
+    names = coordinate_names(rk.model.layout)
+    tnames = coordinate_names(rkt.model.layout)
+    to_twin = [coordinate(tnames, get(rename, name, name)) for name in names]
+    @test sort(to_twin) == 1:length(tnames)
+    n = length(names)
+    sb = SBBRMI(m; mod=@__MODULE__, total_groups=())
+    stan = consumer_stan(m, name; mod=@__MODULE__)
+    transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
+    for u in (zeros(n), collect(range(-0.37, 0.31; length=n)), [0.3sin(1.7i) for i in 1:n])
+        v = similar(u); v[to_twin] = u
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        expected, reference_gradient = LogDensityProblems.logdensity_and_gradient(reference, v)
+        @test value ≈ expected atol=2e-11 rtol=2e-11
+        @test gradient ≈ reference_gradient[to_twin] atol=2e-9 rtol=2e-9
+        stan_u = brm_rk_point_to_stan(transport, u)
+        stan_value, stan_gradient = BridgeStan.log_density_gradient(stan.model, stan_u; propto=false)
+        @test value ≈ brm_stan_logdensity_to_rk(transport, u, stan_value)
+        @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient)
+    end
+    sb
+end
+
+@stestset "Generated names never end in a double underscore" begin
+    # SBBRMI emits generated names as Stan identifiers; Stan reserves `x__`.
+    taken = Set{Symbol}()
+    names = [BRM._rk_ast_fresh_name("x", taken) for _ in 1:4]
+    @test names == [:x, :x_, :x_2, :x_3]
+    @test BRM._rk_ast_fresh_name("y_", Set([:y_])) === :y_1
+    @test !any(name -> endswith(string(name), "__"), names)
+end
+
+@stestset "A named return holds a member's own data vector" begin
+    # Two members return their record's curve (of lengths 3 and 2), one its
+    # fitted curve; supplied out of key order.
+    alt = curve_entry(:alt, 0.2; baseline=[0.3, -0.1, 0.45], pick=curve_reads)
+    ast = curve_entry(:ast, -0.3; baseline=[-0.2, 0.15],
+        pick=[[1, 2, 2], [1, 2], [2, 2], [1, 1, 2]])
+    bil = curve_entry(:bil, 0.1; fitted=true, x=[0.5, 1.5, 2.5, 3.5],
+        pick=[r .+ 1 for r in curve_reads])
+    design(records) = (; site=collect(1:4), read_time=curve_times, records, n_margins=4)
+    a, b, c = curve_flat(alt, alt.baseline), curve_flat(ast, ast.baseline), curve_flat(bil, bil.x)
+    twin_design = (; site=collect(1:4), n_margins=4,
+        a_site=collect(1:4), a_rows=a.rows, a_decay=a.decay, a_curve=a.curve, ya=a.y,
+        b_site=collect(1:4), b_rows=b.rows, b_decay=b.decay, b_curve=b.curve, yb=b.y,
+        c_site=collect(1:4), c_rows=c.rows, c_decay=c.decay, c_x=c.curve, yc=c.y)
+    records = [ast, bil, alt]
+    # Members with equal declarations share one plate (`channels_member_0`:
+    # alt, then ast; `channels_member_1`: bil).
+    sb = curve_parity(curve_model, curve_twin, design(records), twin_design,
+        merge(member_names(0, :a, :b), member_names(1, :c)), "named-data-curve")
+    # Replay on new curves binds them, as a fresh build on that data does.
+    moved = [(; r..., baseline=r.baseline .+ 0.25) for r in records]
+    replay = reprocess(sb, design(moved))
+    fresh = SBBRMI(curve_model(design(moved)); mod=@__MODULE__, total_groups=())
+    @test stan_code(replay) == stan_code(sb)
+    @test stan_data(replay) == stan_data(fresh)
+    @test stan_data(replay) != stan_data(sb)
+end
+
+@stestset "An unguarded named return holds each member's data vector" begin
+    alt = curve_entry(:alt, 0.2; baseline=[0.3, -0.1, 0.45], pick=curve_reads)
+    ast = curve_entry(:ast, -0.3; baseline=[-0.2, 0.15],
+        pick=[[1, 2, 2], [1, 2], [2, 2], [1, 1, 2]])
+    a, b = curve_flat(alt, alt.baseline), curve_flat(ast, ast.baseline)
+    twin_design = (; site=collect(1:4), n_margins=3,
+        a_site=collect(1:4), a_rows=a.rows, a_decay=a.decay, a_curve=a.curve, ya=a.y,
+        b_site=collect(1:4), b_rows=b.rows, b_decay=b.decay, b_curve=b.curve, yb=b.y)
+    curve_parity(baseline_model, baseline_twin,
+        (; site=collect(1:4), read_time=curve_times, records=[ast, alt], n_margins=3),
+        twin_design, member_names(:all, :a, :b), "unguarded-data-curve")
+end
 end

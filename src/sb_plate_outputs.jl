@@ -51,6 +51,16 @@ StanBlocks.@deffun begin
         end
         ends
     end
+    # The length of a ragged value's memory, read from its ends: a size that is
+    # data when the ends are. `num_elements(mem)` of a model value is not, and
+    # Stan refuses it in a top-level size declaration.
+    brm_ends_total(ends::int[n])::int = begin
+        total = 0
+        if n > 0
+            total = ends[n]
+        end
+        total
+    end
     @inline brm_member_vectors(x::matrix[k, n]) =
         RaggedVector(to_vector(x), brm_column_ends(k, n))
     @inline brm_member_vectors(x::RaggedVector) = x
@@ -58,7 +68,7 @@ StanBlocks.@deffun begin
     @inline brm_concat_members(a::int[n], b::int[m]) = append_array(a, b)
     @inline brm_concat_members(a::RaggedVector, b::RaggedVector) =
         RaggedVector(append_row(a.mem, b.mem),
-            append_array(a.ends, brm_shifted_ends(b.ends, num_elements(a.mem))))
+            append_array(a.ends, brm_shifted_ends(b.ends, brm_ends_total(a.ends))))
     @inline brm_concat_members(a::matrix[k,n], b::matrix[j,m]) =
         brm_concat_members(brm_member_vectors(a), brm_member_vectors(b))
     @inline brm_concat_members(a::matrix[k,n], b::RaggedVector) =
