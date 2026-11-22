@@ -32,6 +32,11 @@ mutable struct BRMAdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_container_start::Vector{Int}
     pair_containers::Vector{Int}
     pair_container_mask::Vector{UInt8}
+    pair_factor_weights::Vector{Float64}
+    pair_factor_scales::Vector{Int}
+    pair_walk_start::Vector{Int}
+    pair_walks::Vector{Int}
+    pair_walk_weights::Vector{Float64}
     extended::Bool
 end
 
@@ -88,14 +93,37 @@ function _ranef_container_layout(blocks, locations, originals, pair_blocks, pair
     n = length(pair_blocks)
     factor_start = ones(Int, n + 1)
     factors = Int[]
+    factor_weights = Float64[]
+    factor_scales = Int[]
     container_start = ones(Int, n + 1)
     containers = Int[]
     mask = UInt8[]
+    walk_start = ones(Int, n + 1)
+    walks = Int[]
+    walk_weights = Float64[]
     for p in 1:n
         bi, k, g = pair_blocks[p], pair_terms[p], pair_groups[p]
         locs = isnothing(locations) ? nothing : locations[bi]
         if locs isa BRM._AdaptiveRanefLocations && !isnothing(locs.factors)
             append!(factors, locs.factors[k, g])
+            append!(factor_weights, locs.factor_weights[k, g])
+            append!(factor_scales, locs.factor_scales[k, g])
+            # A walk cell this level reads is an earlier pair (walk blocks come
+            # first), read at its model value like a containing cell.
+            for (block, step, weight) in locs.walks[k, g]
+                ci = findfirst(o -> o === block, originals)
+                isnothing(ci) && error(
+                    "BRM adaptive centering: block `$(blocks[bi].ranef.binding)` is " *
+                    "centred on the walk `$(block.ranef.binding)`, whose cells this " *
+                    "wrapper does not map; refusing an inexact transform.")
+                q = pair_lookup[ci][1, step]
+                q < p || error(
+                    "BRM adaptive centering: block `$(blocks[bi].ranef.binding)` is " *
+                    "centred on the walk `$(block.ranef.binding)`, whose cells are " *
+                    "mapped after it; walk cells must come first.")
+                push!(walks, q)
+                push!(walk_weights, weight)
+            end
             first_entry = length(containers) + 1
             for (block, term, group) in locs.containers[k, g]
                 ci = findfirst(o -> o === block, originals)
@@ -134,9 +162,11 @@ function _ranef_container_layout(blocks, locations, originals, pair_blocks, pair
         end
         factor_start[p + 1] = length(factors) + 1
         container_start[p + 1] = length(containers) + 1
+        walk_start[p + 1] = length(walks) + 1
     end
-    (factor_start, factors, container_start, containers, mask,
-     !isempty(factors) || !isempty(containers))
+    (factor_start, factors, container_start, containers, mask, factor_weights,
+     factor_scales, walk_start, walks, walk_weights,
+     !isempty(factors) || !isempty(containers) || !isempty(walks))
 end
 
 BRMAdaptiveCenteringState(blocks, locations=nothing) =
@@ -152,17 +182,53 @@ _block_locations(blocks, locations) =
 # A location is read, never transformed: a coefficient some cell rewrites
 # would make the triangular Jacobian wrong.
 function _check_locations_read_only(state, rewritten)
-    for j in Iterators.flatten((state.pair_location, state.pair_factors))
+    for j in Iterators.flatten((state.pair_location, state.pair_factors,
+                                state.pair_factor_scales))
         j == 0 || !(j in rewritten) || error(
             "BRM adaptive centering: a random-effect cell is centred on coordinate " *
             "$j, which another cell rewrites; refusing an inexact transform.")
     end
 end
 
-# Whether pair `p`'s location reads factor levels or containing cells.
+# Whether pair `p`'s location reads factor levels, containing cells or walk cells.
 @inline _reads_containers(state, p) =
     state.extended && (state.pair_factor_start[p] < state.pair_factor_start[p + 1] ||
-                       state.pair_container_start[p] < state.pair_container_start[p + 1])
+                       state.pair_container_start[p] < state.pair_container_start[p + 1] ||
+                       state.pair_walk_start[p] < state.pair_walk_start[p + 1])
+
+# Factor entry `f` of a location: `w * x[j]`, times `exp(x[k])` for an entry
+# with a scale coordinate `k` (a sum-to-zero walk's level `sigma * phi[t]`). A
+# factor level constant within the level has `w = 1` and no scale, so it adds
+# `1.0 * x[j]`, which is `x[j]` bit for bit (snag adaptive-centrin-647119ba).
+@inline function _factor_term(x, state, f)
+    j = state.pair_factors[f]
+    k = state.pair_factor_scales[f]
+    w = state.pair_factor_weights[f]
+    k == 0 ? w * x[j] : (w * exp(x[k])) * x[j]
+end
+
+# Walk entry `e` of a location at a model-frame `x`: weight times the walk
+# cell's effect `sigma * z`. Walk cells are scalar, compiled non-centred and
+# mapped before every random-effect cell, so `x` holds their model value `z`.
+@inline function _walk_model_term(x, state, e)
+    a = state.pair_walks[e]
+    block = state.blocks[state.pair_blocks[a]]
+    y = x[block.effects[1, state.pair_groups[a]]]
+    state.pair_walk_weights[e] * (_block_cholesky_entry(x, block, 1, 1) * y)
+end
+
+# The same at a source-frame `x`: the walk cell's model value is rebuilt from
+# its source `u` and control `c` as WarmupHMC's pair map at location 0 and
+# target 0, `u * exp(log(s) * (0 - c))`.
+@inline function _walk_source_term(x, src, state, e)
+    a = state.pair_walks[e]
+    block = state.blocks[state.pair_blocks[a]]
+    s = _block_cholesky_entry(x, block, 1, 1)
+    c = state.sources[a]
+    u = src[block.effects[1, state.pair_groups[a]]]
+    y = u * exp(_log_cell_scale(s, x, block, 1, zero(eltype(x))) * (0 - c))
+    state.pair_walk_weights[e] * (s * y)
+end
 
 # Pair `p`'s location as its accessor returns it: the conditional mean `m` plus,
 # for a pair centred on a population coefficient, that coefficient's value, plus
@@ -194,7 +260,10 @@ end
     T = eltype(x)
     acc = zero(T)
     for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
-        acc += x[state.pair_factors[f]]
+        acc += _factor_term(x, state, f)
+    end
+    for e in state.pair_walk_start[p]:state.pair_walk_start[p + 1] - 1
+        acc += _walk_model_term(x, state, e)
     end
     for e in state.pair_container_start[p]:state.pair_container_start[p + 1] - 1
         a = state.pair_containers[e]
@@ -231,7 +300,10 @@ end
     T = promote_type(eltype(x), eltype(src))
     acc = zero(T)
     for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
-        acc += x[state.pair_factors[f]]
+        acc += _factor_term(x, state, f)
+    end
+    for e in state.pair_walk_start[p]:state.pair_walk_start[p + 1] - 1
+        acc += _walk_source_term(x, src, state, e)
     end
     lo = state.pair_container_start[p]
     buffer = ntuple(_ -> zero(T), Val(_MAX_LOCATION_CONTAINERS))
@@ -240,7 +312,10 @@ end
         j = state.pair_location[a]
         L = j == 0 ? zero(T) : convert(T, x[j])
         for f in state.pair_factor_start[a]:state.pair_factor_start[a + 1] - 1
-            L += x[state.pair_factors[f]]
+            L += _factor_term(x, state, f)
+        end
+        for w in state.pair_walk_start[a]:state.pair_walk_start[a + 1] - 1
+            L += _walk_source_term(x, src, state, w)
         end
         bits = state.pair_container_mask[e]
         for i in 1:e - lo
@@ -279,6 +354,11 @@ mutable struct BRMR2D2AdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_container_start::Vector{Int}
     pair_containers::Vector{Int}
     pair_container_mask::Vector{UInt8}
+    pair_factor_weights::Vector{Float64}
+    pair_factor_scales::Vector{Int}
+    pair_walk_start::Vector{Int}
+    pair_walks::Vector{Int}
+    pair_walk_weights::Vector{Float64}
     extended::Bool
 end
 
@@ -3130,8 +3210,14 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         "centeredness must be a real in [0, 1], one such value per cell, or " *
         "`:midpoint`; got `:$centeredness`"))
     blocks = BRM.adaptive_centering_blocks(model, names)
-    # Hierarchical centring: each eligible cell's population coefficient.
-    locations = BRM._adaptive_ranef_locations(model, blocks, names)
+    # `rw(...)` walks: a zero-start walk's innovations are cells of their own,
+    # mapped before the random-effect cells that read them (snag
+    # adaptive-centrin-647119ba).
+    walks = BRM._adaptive_walk_terms(model, names)
+    walk_blocks = BRM._adaptive_walk_blocks(walks)
+    # Hierarchical centring: each eligible cell's population coefficient, plus
+    # the projection of the predictor's other summands on the level's design.
+    locations = BRM._adaptive_ranef_locations(model, blocks, names; walks)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
     level_blocks = BRM._adaptive_hsgp_level_centering_blocks(model, names)
     cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)
@@ -3143,8 +3229,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         isempty(cdar_blocks) || throw(ArgumentError(
             "adaptive total coefficients and S2Z contrasts cannot yet be mixed with cdar blocks; use total_groups=() and s2z_groups=() for the conventional model"))
     end
-    if scalar && isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks) &&
-            isempty(level_blocks)
+    if scalar && isempty(blocks) && isempty(walk_blocks) && isempty(hsgp_blocks) &&
+            isempty(car_blocks) && isempty(level_blocks)
         isempty(total_blocks) || return _mean_totals_centering_problem(
             model, problem, ad_backend, names, centeredness)
         state,ir = _adaptive_scalar_centering_reparametrizer(model,names)
@@ -3152,8 +3238,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         return WarmupHMC.ReparametrizedProblem(ir,problem,ad_backend;
                                                scoring_plan=_candidate_scoring_plan(state))
     end
-    if isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) &&
-            isempty(car_blocks) && isempty(level_blocks)
+    if isempty(blocks) && isempty(walk_blocks) && isempty(hsgp_blocks) &&
+            isempty(cdar_blocks) && isempty(car_blocks) && isempty(level_blocks)
         generated = BRM._adaptive_generated_labels(model)
         error("BRM adaptive centering: this model has no supported random-effect " *
             "blocks (ordinary or R2D2), squared-exponential or periodic HSGPs, " *
@@ -3164,8 +3250,9 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
             "re-draws those, so there is nothing to adapt; bind the response " *
             "that reads them, or sample this model without adaptive centering."))
     end
-    ordinary = BRM.AdaptiveCenteringBlock[
-        b for b in blocks if b isa BRM.AdaptiveCenteringBlock]
+    # Walk cells first: the random-effect cells read them at their model values.
+    ordinary = vcat(walk_blocks, BRM.AdaptiveCenteringBlock[
+        b for b in blocks if b isa BRM.AdaptiveCenteringBlock])
     r2d2_blocks = BRM.R2D2AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.R2D2AdaptiveCenteringBlock]
     _containers_first!(ordinary, locations)
@@ -3391,17 +3478,28 @@ _control_row(cell, index, names, family; binding=nothing, group=nothing,
        rank, location, c=Float64(c), target=Float64(target))
 
 # The coordinates a cell's location reads: its population coefficient, the factor
-# levels its level sits in, and the coordinate of each containing cell (whose
-# effect is added), joined by ` + `; `nothing` for a cell centred on 0.
+# levels and covariates its level sits in (weight-prefixed when not 1, a
+# sum-to-zero walk's path entry also by `exp(<log SD>)`), the coordinate of each
+# containing cell (whose effect is added), and of each walk cell it reads
+# (weight-prefixed), joined by ` + `; `nothing` for a cell centred on 0.
+_weighted_label(w, name) = w == 1 ? name : string(round(w; sigdigits=6), "*", name)
+
 function _location_label(state, p, names)
     parts = String[]
     j = state.pair_location[p]
     j == 0 || push!(parts, names[j])
     for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
-        push!(parts, names[state.pair_factors[f]])
+        k = state.pair_factor_scales[f]
+        name = names[state.pair_factors[f]]
+        k == 0 || (name = string("exp(", names[k], ")*", name))
+        push!(parts, _weighted_label(state.pair_factor_weights[f], name))
     end
     for e in state.pair_container_start[p]:state.pair_container_start[p + 1] - 1
         push!(parts, names[_pair_index(state, state.pair_containers[e])])
+    end
+    for e in state.pair_walk_start[p]:state.pair_walk_start[p + 1] - 1
+        push!(parts, _weighted_label(state.pair_walk_weights[e],
+                                     names[_pair_index(state, state.pair_walks[e])]))
     end
     isempty(parts) ? nothing : join(parts, " + ")
 end
@@ -3413,8 +3511,10 @@ function _control_rows!(rows, state::_BRMRanefCenteringState, orders, offset, va
         bi, k, g = _pair_location(state, p)
         ranef = state.blocks[bi].ranef
         labels = get(margins, ranef.binding, ())
+        # A walk's innovations (`:rw_walk` blocks) are `:rw` cells.
         push!(rows, _control_row(offset + p, state.blocks[bi].effects[k, g], names,
-            :ranef; binding=ranef.binding, group=ranef.group,
+            ranef.family === :rw_walk ? :rw : :ranef; binding=ranef.binding,
+            group=ranef.group,
             margin=length(labels) == ranef.n_terms ? labels[k] : nothing,
             level=ranef.levels[g], term=k,
             rank=isnothing(orders) ? k : findfirst(==(k), view(orders[bi], :, g)),

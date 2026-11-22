@@ -223,6 +223,7 @@ export modeled_covariates
 using SHA: sha256
 include("description.jl")
 include("adaptive_centering.jl")
+include("adaptive_centering_projection.jl")
 include("rk_adaptive_centering.jl")
 include("adaptive_centering_cells.jl")
 include("posterior_diagnostics.jl")

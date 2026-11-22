@@ -16,10 +16,14 @@
 # containing cells keeps its pair order. The WarmupHMC extension's
 # `_containers_first!` is this rule.
 function _adaptive_containers_first!(blocks, locations)
+    # A walk block a level reads (snag adaptive-centrin-647119ba) counts as a
+    # containing block: it has none itself, so it sorts first.
     count_containers(block) = begin
         l = get(locations, block, nothing)
         l isa _AdaptiveRanefLocations && !isnothing(l.containers) ?
-            length(unique(objectid(first(c)) for cs in l.containers for c in cs)) : 0
+            length(unique(Iterators.flatten((
+                (objectid(first(c)) for cs in l.containers for c in cs),
+                (objectid(first(w)) for ws in l.walks for w in ws))))) : 0
     end
     sort!(blocks; by=count_containers, alg=Base.Sort.MergeSort)
 end
@@ -31,8 +35,10 @@ end
 # order) uses this order.
 function _adaptive_cell_blocks(model, names)
     blocks = adaptive_centering_blocks(model, names)
-    locations = _adaptive_ranef_locations(model, blocks, names)
-    ordinary = AdaptiveCenteringBlock[b for b in blocks if b isa AdaptiveCenteringBlock]
+    walks = _adaptive_cell_walks(model, names)
+    locations = _adaptive_ranef_locations(model, blocks, names; walks)
+    ordinary = vcat(_adaptive_walk_blocks(walks),
+        AdaptiveCenteringBlock[b for b in blocks if b isa AdaptiveCenteringBlock])
     derived = R2D2AdaptiveCenteringBlock[
         b for b in blocks if b isa R2D2AdaptiveCenteringBlock]
     _adaptive_containers_first!(ordinary, locations)
@@ -141,7 +147,9 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
         K, G = r.n_terms, r.n_groups
         labels = get(margins, r.binding, ())
         margin = [length(labels) == K ? labels[k] : nothing for k in 1:K]
-        push!(blocks, (; block=bi, family=:ranef, binding=r.binding, group=r.group,
+        # A walk's innovation cells (`:rw_walk` blocks) are `:rw` cells.
+        family = r.family === :rw_walk ? :rw : :ranef
+        push!(blocks, (; block=bi, family, binding=r.binding, group=r.group,
             id=r.id, by=r.by,
             levels=[_adaptive_cell_level(l) for l in r.levels], n_terms=K, n_levels=G,
             margins=margin, target=b.target_c, log_scales=_adaptive_cell_log_scales(b),
@@ -153,6 +161,28 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
             coefficient = isnothing(locs) ? 0 : locs.coefficient[k]
             factors = isnothing(locs) || isnothing(locs.factors) ? Int[] :
                 copy(locs.factors[k, g])
+            factor_weights = isnothing(locs) || isnothing(locs.factors) ? Float64[] :
+                copy(locs.factor_weights[k, g])
+            factor_scales = isnothing(locs) || isnothing(locs.factors) ? Int[] :
+                copy(locs.factor_scales[k, g])
+            walks = Int[]
+            walk_weights = Float64[]
+            if !isnothing(locs) && !isnothing(locs.walks)
+                for (walk, step, weight) in locs.walks[k, g]
+                    wl = get(lookup, walk, nothing)
+                    isnothing(wl) && error(
+                        "BRM adaptive centering cells: block `$(r.binding)` is centred " *
+                        "on the walk `$(walk.ranef.binding)`, whose cells the wrapper " *
+                        "does not map; refusing an inexact description.")
+                    a = wl[1, step]
+                    a < q || error(
+                        "BRM adaptive centering cells: block `$(r.binding)` is centred " *
+                        "on the walk `$(walk.ranef.binding)`, whose cells are mapped " *
+                        "after it; walk cells must come first.")
+                    push!(walks, a)
+                    push!(walk_weights, weight)
+                end
+            end
             containers = Int[]
             if !isnothing(locs) && !isnothing(locs.containers)
                 for (container, term, level) in locs.containers[k, g]
@@ -169,18 +199,19 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
                     push!(containers, a)
                 end
             end
-            for j in Iterators.flatten((coefficient, factors))
+            for j in Iterators.flatten((coefficient, factors, factor_scales))
                 j == 0 || !(j in effects) || error(
                     "BRM adaptive centering cells: a random-effect cell is centred " *
                     "on coordinate $j, which another cell rewrites; refusing an " *
                     "inexact description.")
             end
-            push!(cells, (; cell=q, family=:ranef, block=bi, binding=r.binding,
+            push!(cells, (; cell=q, family, block=bi, binding=r.binding,
                 group=r.group, level=_adaptive_cell_level(r.levels[g]), level_index=g,
                 term=k, margin=margin[k], effect=b.effects[k, g],
                 name=names[b.effects[k, g]],
                 conditioning=[lookup[b][l, g] for l in 1:k-1],
-                location=(; coefficient, factors, containers)))
+                location=(; coefficient, factors, factor_weights, factor_scales,
+                            containers, walks, walk_weights)))
         end
     end
     # HSGP basis-weight cells next (`_joint_centering_state`): term by term, a
