@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.381
+
+- In model-scope assignments and likelihoods, `X * b` can contract a data
+  matrix with coefficients computed by elementwise arithmetic, such as
+  `b = z .* tau`. Both backends use the same dimension and row-broadcast
+  rules as for a declared vector. Replay keeps the fitted operation.
+
 ## 0.2.380
 
 - RKBRMI's JAX export supports a Dirichlet simplex inside a `@plate`,
