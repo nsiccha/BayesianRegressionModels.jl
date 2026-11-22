@@ -120,15 +120,18 @@ pinned:
   log density `-(n - order) * log(sigma) - sum(d .^ 2) / (2 sigma^2)`, `d` the
   `order`-th differences of the `n` values, times the soft sum-to-zero `car`
   uses, `sum(x) ~ Normal(0, 0.001 n sigma)` (`car`'s `Normal(0, 0.001 n)` on the
-  standardized values `x / sigma`, which are its coordinates). A formula intercept is the
-  walk's mean level, and an order-2 walk's linear trend has a flat prior
-  (identified by the data): R-INLA's `rw1` / `rw2` with `constr = TRUE`. The
-  walk needs at least `order + 1` distinct times.
+  standardized values `x / sigma`). Order 1 samples those standardized values.
+  Order 2 samples the mean in units of `0.001 sigma`, the least-squares slope
+  in physical units per step, and a banded basis for the second differences.
+  Convert a draw of standardized field values with [`brm_rw2_coordinates`](@ref).
+  A formula intercept gives the baseline level. The order-2 walk's linear trend
+  has a flat prior and is identified by the data. These are R-INLA's `rw1` and
+  `rw2` with `constr = TRUE`. The walk needs at least `order + 1` distinct times.
 
 On replay, times after the last fitted one are appended (a forecast): their
 innovations are drawn in generated quantities, so the walk continues from its
-fitted end by its recurrence. Dispatch tag — see `_sb_rw1`, `_sb_rw2` and
-`_sb_rw_sum`.
+fitted end by its recurrence. The Stan components are `_sb_rw1`, `_sb_rw2`,
+`_sb_rw_sum` and `_sb_rw2_sum`.
 """
 function rw end
 

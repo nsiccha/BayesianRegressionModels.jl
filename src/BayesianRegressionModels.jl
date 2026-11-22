@@ -175,6 +175,7 @@ include("nlme_laplace.jl")
 include("nlme_laplace_structured.jl")
 include("nlme_laplace_factors.jl")
 include("nlme_laplace_sparse.jl")
+include("rw_laplace_coordinates.jl")
 include("nlme_laplace_gaussian.jl")
 include("nlme_laplace_gmrf.jl")
 include("nlme_laplace_sum_solver.jl")
@@ -262,6 +263,7 @@ export brm_total, brm_total_recover_rng, brm_total_deviations, brm_total_locatio
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
+export brm_rw2_coordinates
 export me, mi, s, t2, ar, dar, rw, cdar, car, gmrf, mo, mo1, hsgp, multigroup, OrderedLogistic, Ordinal,
        OrdinalStructure, Cumulative, StoppingRatio,
        OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
@@ -463,7 +465,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        ranef_correlated_draws_completion,
        brm_col_variances, brm_r2d2_scale, brm_cat_variances, brm_member_effects,
        multi_membership_intercept, multi_membership_correlated,
-       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_rw2, _sb_rw_sum, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_icar_scaled, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
+       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_rw2, _sb_rw_sum, _sb_rw2_sum, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_icar_scaled, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
        _sb_interval_censored_predictor,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,

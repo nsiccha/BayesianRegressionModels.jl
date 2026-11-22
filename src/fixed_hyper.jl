@@ -97,8 +97,10 @@ function _brm_mark_hyperparameters!(hyper, names, transforms,
 end
 
 _brm_term_draw_locals(::Val{:cdar}, record) = (record.locals.eta,)
-_brm_term_draw_locals(::Val{:rw}, record) =
-    record.sum_to_zero ? (record.locals.phi,) : (record.locals.z,)
+function _brm_term_draw_locals(::Val{:rw}, record)
+    record.sum_to_zero || return (record.locals.z,)
+    (record.order == 2 ? record.locals.basis : record.locals.phi,)
+end
 _brm_term_draw_locals(::Val{:car}, record) =
     Tuple(getproperty(record.locals, l) for l in (:phi, :theta, :z)
         if hasproperty(record.locals, l) && getproperty(record.locals, l) !== nothing)

@@ -1283,9 +1283,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             name(_sb_named_inner(:rw, only(getargs(e.value)))) === record.time,
         "`rw($(record.time))`")
     base = (; kind=:rw, predictor=record.predictor, term=entry.term)
-    roles = record.sum_to_zero ? ((:sd, :sigma), (:structured, :phi)) :
-        ((:sd, :sigma), (:innovations, :z))
-    for (parameter, local_name) in roles
+    for (parameter, local_name) in Base.pairs(_brm_term_parameter_bindings(rw, entry.value))
         # A scale held at a known value, or set to a value computed from model
         # values, is no coordinate on either backend.
         isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,

@@ -2021,12 +2021,11 @@ end
 # grid of one declaration is one program (user principle `0ikeidi`); each row
 # reads the walk at its step (`step_rows`, positions in the fitted levels).
 # A zero-start walk draws its `n - 1` standardized innovations `z` and integrates
-# them once (order 1) or twice (order 2) from 0. A sum-to-zero walk draws its
-# standardized values `phi` flat and states their law as factors: the
-# `order`-th differences standard normal, `car`'s soft sum-to-zero on their sum,
-# and for order 2 the flat linear trend's Jacobian `log(sigma)`, so that the trend
-# is flat in the walk's own units (R-INLA's `rw2`); `Exponential(1 / sigma)` has
-# exactly that log density at 0.
+# them once (order 1) or twice (order 2) from 0. An intrinsic walk puts a
+# standard normal prior on its standardized differences and a soft constraint
+# on its mean. Order 2 has a flat physical slope. Its public basis separates
+# the slope and level and rescales the curvature. Sparse integration can use
+# standardized field values, where the flat slope contributes log(sigma).
 function _rk_ast_rw_block!(definitions, taken, term, step_rows, step_levels;
         bindings=Pair{Symbol,Any}[])
     options = term.options
@@ -2040,8 +2039,35 @@ function _rk_ast_rw_block!(definitions, taken, term, step_rows, step_levels;
     path, value = _rk_block_local!(block, :path), _rk_block_local!(block, :value)
     push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior),
         Expr(:(=), n, Expr(:call, :length, steps)))
-    if sum_to_zero
-        phi, d = _rk_block_local!(block, :phi), _rk_block_local!(block, :d)
+    if sum_to_zero && order == 2 && !get(options, :field_coordinates, false)
+        basis, transformed, differences, roughness, level, jac_scale = (_rk_block_local!(block, key) for key in
+            (:basis, :transformed, :differences, :roughness, :level, :jac_scale))
+        # Multiplying both the level and its SD by n retains the original
+        # absolute density's 1/n constant. The slope has Lebesgue measure.
+        # Spread the determinant across the Gaussian roughness factors. Scoring
+        # s*r at SD s contributes log|T| when s = exp(-log|T|/(n-2)).
+        statements = quote
+            $basis[1:$n] .~ Flat.()
+            $transformed = brm_rw2_transform($sigma, $basis)
+            $differences = first($transformed, $n)
+            $jac_scale = exp(-last($transformed) / ($n - 2))
+            $roughness = $jac_scale .* last($differences, $n - 2)
+            $roughness .~ Normal.(0, $jac_scale)
+            $level = $n * $basis[1]
+            $level ~ Normal(0, 1.0 * $n)
+            $path = brm_rw2_basis_path($sigma, $differences)
+            $value = $path[$step_position]
+        end
+        append!(block.statements, Base.remove_linenums!(statements).args)
+        locals = (; sigma, basis)
+        doc = @_rk_definition_doc """
+            An intrinsic second-order walk. The first coordinate is the standardized
+            mean, the second is the flat physical slope per step, and the remaining
+            coordinates map to standardized second differences through a scale-dependent
+            banded factor. Returns the fitted path
+            at each row's step."""
+    elseif sum_to_zero
+        phi, d = _rk_block_local!(block, order == 2 ? :basis : :phi), _rk_block_local!(block, :d)
         total = _rk_block_local!(block, :total)
         slice(lo, hi) = Expr(:ref, phi, Expr(:call, :(:), lo,
             hi == 0 ? n : Expr(:call, :-, n, hi)))
@@ -2062,7 +2088,7 @@ function _rk_ast_rw_block!(definitions, taken, term, step_rows, step_levels;
         end
         push!(block.statements, Expr(:(=), path, Expr(:call, :.*, sigma, phi)),
             Expr(:(=), value, Expr(:ref, path, step_position)))
-        locals = (; sigma, phi)
+        locals = order == 2 ? (; sigma, basis=phi) : (; sigma, phi)
         law = order == 1 ? "first differences" :
             "second differences `$phi[t+1] - 2$phi[t] + $phi[t-1]`"
         doc = @_rk_definition_doc """

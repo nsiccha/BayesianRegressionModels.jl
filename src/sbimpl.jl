@@ -3210,6 +3210,150 @@ _sb_rw_sum = StanBlocks.@slic begin
     return brm_rw_sum_rows(sigma, phi, z_new, order, time_idx)
 end
 
+# D takes second differences. If AA' = DD' and CC' = A'A + sigma² I,
+# r = A(C' \ z) transforms the packed curvature to standardized differences.
+# This whitens the prior plus unit curvature in physical field values. The
+# actual prior scores r and includes log|A| - log|C| for the change of measure.
+StanBlocks.@deffun begin
+    @juliacompat brm_rw2_factors(sigma::real, m::int)::matrix[m, 6] = begin
+        # Columns 1:3 and 4:6 store the diagonal and first two subdiagonals
+        # of each lower triangular factor, indexed by row. A is known exactly.
+        bands = rep_matrix(0., m, 6)
+        for i in 1:m
+            denom = (1. * i) * (i + 1.)
+            bands[i, 1] = sqrt((i + 2.) * (i + 3.) / denom)
+            if i > 1
+                bands[i, 2] = -2. * sqrt((i - 1.) * (i + 2.) / denom)
+            end
+            if i > 2
+                bands[i, 3] = 1. / bands[i - 2, 1]
+            end
+        end
+        # QR of [A; sigma*I] gives C' directly. Insert rows in order of
+        # their first nonzero and carry a 2-by-2 upper triangle to the next
+        # column. Orthogonal rotations avoid subtracting nearly equal squares
+        # in the final pivots of a long walk with a small innovation scale.
+        carry_diag = bands[1, 1]
+        carry_off = 0.
+        carry_next = 0.
+        if m > 1
+            carry_diag = hypot(bands[1, 1], bands[2, 2])
+            carry_off = (bands[2, 2] / carry_diag) * bands[2, 1]
+            carry_next = (bands[1, 1] / carry_diag) * bands[2, 1]
+        end
+        for i in 1:m
+            pivot = hypot(carry_diag, sigma)
+            bands[i, 4] = pivot
+            if i < m
+                super1 = (carry_diag / pivot) * carry_off
+                next_diag = hypot(carry_next, (sigma / pivot) * carry_off)
+                if i + 1 < m
+                    # The new row of A spans columns i through i+2.
+                    pivot2 = hypot(pivot, bands[i + 2, 3])
+                    cosine = pivot / pivot2
+                    sine = bands[i + 2, 3] / pivot2
+                    bands[i, 4] = pivot2
+                    bands[i + 1, 5] = cosine * super1 + sine * bands[i + 2, 2]
+                    bands[i + 2, 6] = sine * bands[i + 2, 1]
+                    rem1 = cosine * bands[i + 2, 2] - sine * super1
+                    rem2 = cosine * bands[i + 2, 1]
+                    carry_diag = hypot(next_diag, rem1)
+                    carry_off = (rem1 / carry_diag) * rem2
+                    carry_next = (next_diag / carry_diag) * rem2
+                else
+                    bands[i + 1, 5] = super1
+                    carry_diag = next_diag
+                end
+            end
+        end
+        bands
+    end
+    @juliacompat brm_rw2_transform(sigma::real, basis::vector[n])::vector[n + 1] = begin
+        m = n - 2
+        bands = brm_rw2_factors(sigma, m)
+        work = rep_vector(0., m)
+        out = rep_vector(0., n + 1)
+        out[1] = basis[1]
+        out[2] = basis[2]
+        for k in 1:m
+            i = m + 1 - k
+            rhs = basis[i + 2]
+            if i < m
+                rhs -= bands[i + 1, 5] * work[i + 1]
+            end
+            if i + 1 < m
+                rhs -= bands[i + 2, 6] * work[i + 2]
+            end
+            work[i] = rhs / bands[i, 4]
+        end
+        for i in 1:m
+            r = bands[i, 1] * work[i]
+            if i > 1
+                r += bands[i, 2] * work[i - 1]
+            end
+            if i > 2
+                r += bands[i, 3] * work[i - 2]
+            end
+            out[i + 2] = r
+            out[n + 1] += log(bands[i, 1]) - log(bands[i, 4])
+        end
+        out
+    end
+    @lpxf brm_rw2_basis_lpdf(basis::vector[n], sigma::real)::real = begin
+        parts = brm_rw2_transform(sigma, basis)
+        std_normal_lpdf(basis[1]) + std_normal_lpdf(parts[3:n]) + parts[n + 1] - log(1.0 * n)
+    end
+    brm_rw2_basis_lpdfs(basis::vector[n], sigma::real)::vector[n] = begin
+        out = rep_vector(0., n)
+        out[1] = brm_rw2_basis_lpdf(basis, sigma)
+        out
+    end
+    brm_rw2_basis_rng(vector[n], sigma::real)::vector[n] = begin
+        reject("brm_rw2_basis_rng: an intrinsic second-order walk has a flat linear trend and no prior draw")
+        rep_vector(0., n)
+    end
+    @juliacompat brm_rw2_basis_path(sigma::real, basis::vector[n])::vector[n] = begin
+        x = rep_vector(0., n)
+        increment = 0.
+        for t in 3:n
+            increment += basis[t]
+            x[t] = x[t - 1] + increment
+        end
+        level = sum(x) / n
+        moment = 0.
+        mid = (n + 1.) / 2.
+        for t in 1:n
+            moment += (t - mid) * x[t]
+        end
+        slope = 12. * moment / (n * (n - 1.) * (n + 1.))
+        for t in 1:n
+            x[t] = sigma * ((x[t] - level) - (t - mid) * slope + 0.001 * basis[1]) +
+                (t - mid) * basis[2]
+        end
+        x
+    end
+    brm_rw2_basis_rows(sigma::real, basis::vector[n], z_new::vector[m],
+                       idx::int[N])::vector[N] = begin
+        parts = brm_rw2_transform(sigma, basis)
+        x = append_row(brm_rw2_basis_path(sigma, parts[1:n]), rep_vector(0., m))
+        for j in 1:m
+            x[n + j] = 2. * x[n + j - 1] - x[n + j - 2] + sigma * z_new[j]
+        end
+        out::vector[N]
+        for i in 1:N
+            out[i] = x[idx[i]]
+        end
+        out
+    end
+end
+
+_sb_rw2_sum = StanBlocks.@slic begin
+    sigma ~ normal(0., 0.2; lower=0.)
+    basis::vector[n_steps] ~ brm_rw2_basis(sigma)
+    z_new ~ std_normal(; n=n_new_steps)
+    return brm_rw2_basis_rows(sigma, basis, z_new, time_idx)
+end
+
 # Grouped correlated damped walk: per-group deviations over W steps whose
 # innovations are correlated across the P groups by the Cholesky factor `L`
 # (data, from the term's `cor=`), damped by `rho` with the stationary scaling
@@ -12301,10 +12445,11 @@ function _sb_dar_submodel_expr(term_overrides, t)
 end
 
 # The law follows `rw`'s keywords: the zero-start walk of order 1 or 2, or the
-# intrinsic sum-to-zero walk of either order (`_sb_rw_sum`, `order` as data).
+# intrinsic sum-to-zero walk (order 2 uses its level, physical slope and innovations).
 function _sb_rw_submodel_expr(term_overrides, t)
     (; order, sum_to_zero) = _brm_rw_options(getkwargs(t))
-    name, submodel = sum_to_zero ? (:_sb_rw_sum, _sb_rw_sum) :
+    name, submodel = sum_to_zero && order == 2 ? (:_sb_rw2_sum, _sb_rw2_sum) :
+        sum_to_zero ? (:_sb_rw_sum, _sb_rw_sum) :
         order == 1 ? (:_sb_rw1, _sb_rw1) : (:_sb_rw2, _sb_rw2)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
     isnothing(sigma_cfg) && return name
@@ -17001,14 +17146,14 @@ _sb_predictor_term!(stmts, data, ::typeof(rw), t;
     col_name = Symbol(:rw_, target, :_, xname)
     keys_ = (; n_steps=Symbol(col_name, :_n_steps), n_new_steps=Symbol(col_name, :_n_new_steps),
                time_idx=Symbol(col_name, :_time_idx),
-               (st.sum_to_zero ? (; order=Symbol(col_name, :_order)) : (;))...)
+               (st.sum_to_zero && st.order == 1 ? (; order=Symbol(col_name, :_order)) : (;))...)
     for key in values(keys_)
         haskey(data, key) && error("sbimpl: `rw` reserves data key `$key`, but that name is already used")
     end
     data[keys_.n_steps] = st.n_steps
     data[keys_.n_new_steps] = 0
     data[keys_.time_idx] = st.time_idx
-    st.sum_to_zero && (data[keys_.order] = st.order)
+    haskey(keys_, :order) && (data[keys_.order] = st.order)
     # replay: a forecast appends steps past the fitted grid; recorded on the index key
     _sb_record_preproc!(data, keys_.time_idx, PreprocEntry(:rw, (; steps=st.steps, keys=keys_), xname, true))
     submodel = _sb_rw_submodel_expr(term_overrides, t)
