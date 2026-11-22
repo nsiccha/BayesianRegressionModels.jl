@@ -175,8 +175,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # dcabd24f (0.2.40) evaluates data-only algebraic bounds in native descriptors.
 
 # 0.2.53 retains cell-specific sorted indices for repeated grouped time smooths.
-# StanBlocks 0.2.62 collects ragged subject returns inside a plate of components.
-rev = "58fd8d03faf7028243c6e11c6ccdfdad9ce9e4a2"
+# StanBlocks 0.2.63 reports both endpoint and subject boundaries for nested plate outputs.
+rev = "c51d2878e9bde38d07002a5dce7e651ade524907"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

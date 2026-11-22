@@ -141,14 +141,19 @@ end
     data = (; x=[[.5, 1.], [-.3, .7]], records=[b, a])
     empty_b = (; b..., picks=[Int[], Int[]], y=[Float64[], Float64[]])
     changed = (; x=reverse.(data.x), records=[a, empty_b])
+    no_subjects_a = (; a..., picks=Vector{Int}[], y=Vector{Float64}[])
+    leading_empty = (; data..., records=[b, no_subjects_a])
     trained = observed_collection(data)
     fit = RKBRMI(trained)
     sb = SBBRMI(trained; mod=@__MODULE__, total_groups=())
     path = joinpath(mkpath(joinpath(tempdir(), "brm-rk-consumer")), "keyed-observed-readings.stan")
     U = [.5 -.25; .1 -.4; .25 .7] # gain, offset for a, offset for b
     for (design, rk, sfit) in ((data, fit, sb),
-            (changed, reprocess(fit, changed), reprocess(sb, changed)))
+            (changed, reprocess(fit, changed), reprocess(sb, changed)),
+            (leading_empty, reprocess(fit, leading_empty), reprocess(sb, leading_empty)))
         stan = BRM.stan_instantiate(sfit; path).model
+        names = BridgeStan.param_names(stan; include_tp=true, include_gq=true)
+        descriptor = brm_descriptor(sfit)
         problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
         @test LogDensityProblems.dimension(problem) == size(U, 1)
         draws = Dict(rec.id => rk_draw_values(rk, U, (:loc,); submodel=(:sensors, rec.id)).loc
@@ -169,9 +174,13 @@ end
             stan_value, stan_gradient = BridgeStan.log_density_gradient(stan, point; propto=false)
             @test stan_value ≈ value
             @test stan_gradient ≈ gradient
+            constrained = BridgeStan.param_constrain(stan, point; include_tp=true, include_gq=true,
+                rng=BridgeStan.StanRNG(stan, j))
             for rec in design.records
                 expected = reduce(vcat, (location(rec, s, u) for s in eachindex(rec.y)); init=Float64[])
                 @test draws[rec.id][j] ≈ expected
+                indices = brm_output_coordinates(descriptor, :loc, names; submodel=(:sensors, rec.id))
+                @test constrained[indices] ≈ expected
             end
         end
     end

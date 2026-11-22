@@ -17,9 +17,10 @@ instead of failing at run time.
 - `rk_draw_values(rk, U, (:loc,); submodel=(:sensors, key))` reads a named
   return from one record component at each draw. The member keeps its own
   shape when the supplied records are reordered or its reading schedule changes.
-- On ReactiveKernelsPPL 0.1.250, a repeated component can take subject
-  trajectories from its parent, score its own readings in a subject plate,
-  and return the fitted locations for those readings.
+- A repeated component can take subject trajectories from its parent, score
+  its own readings in a subject plate, and return their fitted locations.
+  On Stan, `brm_output_coordinates(d, :loc, names; submodel=(:sensors, key))`
+  selects that member’s readings in subject order, including on replay.
 
 ## 0.2.385
 
