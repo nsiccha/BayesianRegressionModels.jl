@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.376
+
+- `RKBRMI(builder(design), state)` can open format-2 fits that stored a grouped
+  `hsgp(x; by=g)` with literal group labels and a literal weight-row count
+  before 0.2.363. Frozen replay retains the labels in fitted order, including
+  when the design contains only some groups. The same state supports new
+  groups through `resample_groups` and `rk_design_binder`.
+
 ## 0.2.375
 
 - Declared vectors accept `z[1:n] .~ restricted.(Normal.(0, 1), 0, Inf)`

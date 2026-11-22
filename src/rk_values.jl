@@ -1443,7 +1443,7 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
 end
 
 function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=nothing,
-        documentation=(), collection_cell=false)
+        documentation=(), collection_cell=false, literal_hsgp_levels=(;))
     documentation_owners = _brm_documentation_owners(documentation)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
@@ -1455,7 +1455,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
     union!(reserved, Iterators.flatten(values(kernel_outputs)))
     lone_intercepts = Dict{Symbol,Any}()
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
-        coordinates, lone_intercepts, collection_cell)
+        coordinates, lone_intercepts, collection_cell, literal_hsgp_levels)
     stmts = copy(regression.main.args)
     defs = copy(regression.defs)
     bindings = copy(regression.bindings)

@@ -108,12 +108,16 @@ _rk_hsgp_level_set(options) = get(options, :collection_levels, get(options, :lev
 # A grouped HSGP term with the level set its group index reads (`level_sets`,
 # by index), unless a collection cell supplies its own or its weights are a
 # coordinate field's.
-function _rk_hsgp_with_level_set(term, level_sets)
+function _rk_hsgp_with_level_set(term, level_sets, literal_hsgp_levels)
     options = term.options
     haskey(options, :group_fit_source) && !haskey(options, :collection_levels) &&
         !(get(options, :level_cor, nothing) isa _BRMMultigroupCoordinates) || return term
-    level_set = level_sets[options.group_index]
-    _RKTermSpec(term.kind, term.columns, merge(options, (; level_set)), term.addressee,
+    # For the identity check of an older export, reproduce its literal row
+    # count from the saved levels, including on a design with new levels.
+    literal = get(literal_hsgp_levels, options.group_index, nothing)
+    size = literal === nothing ? (; level_set=level_sets[options.group_index]) :
+        (; n_groups=length(literal))
+    _RKTermSpec(term.kind, term.columns, merge(options, size), term.addressee,
         term.label)
 end
 
