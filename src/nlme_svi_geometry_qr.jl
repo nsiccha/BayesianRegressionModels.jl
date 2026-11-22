@@ -71,3 +71,43 @@ function _brm_svi_sqrt_axes(h::_BRMSVIQRGeometry)
     W = (E.U .* E.S')[invperm(h.rows), :]
     W, hypot.(1, E.S)
 end
+
+function _brm_svi_global_sqrt(h::_BRMSVIQRGeometry)
+    W, root = _brm_svi_sqrt_axes(h)
+    (; s=h.s, W, a=1 ./ (root .+ 1))
+end
+
+# The shared kernels compose their updates from the Cholesky form
+# (`_svi_structured_gradient`, `_svi_structured_adam`, `_svi_structured_trust`).
+# These are the same updates on this geometry.
+function _brm_svi_narrow_gradient(f, gz, gd, e, η)
+    h = _brm_svi_global_geometry(f)
+    score = gd + _brm_svi_global_precision(h, _svi_structured_offset(f.ρ, f.Β, e, η))
+    vcat(gz, score .* h.s .* e, vec(score * η'))
+end
+
+function _brm_svi_narrow_whitened_step!(opt, q, x, grad, lr; clip, rank)
+    D = length(q.ρ)
+    C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
+    scale = vcat(ones(D), rank .* repeat(exp.(q.ρ), size(q.Β, 2)))
+    rest = D+1:length(x)
+    g = vcat(_brm_svi_global_sqrt_tmul(C, view(grad, 1:D)), view(grad, rest) .* scale)
+    step = zeros(length(x))
+    _brm_svi_step!(opt, step, g, lr; clip)
+    x[1:D] .+= _brm_svi_global_sqrt_mul(C, view(step, 1:D))
+    x[rest] .+= scale .* view(step, rest)
+    x
+end
+
+# One scalar shortens the whole move: the mean by at most one old posterior
+# standard deviation, log scales and scaled loadings by at most one half.
+function _brm_svi_narrow_trust(f, old, proposed)
+    d = length(f.ρ)
+    h = _brm_svi_global_geometry(f)
+    Δ = proposed .- old
+    δμ, δρ = view(Δ, 1:d), view(Δ, d+1:2d)
+    δΒ = reshape(view(Δ, 2d+1:length(Δ)), size(f.Β))
+    distance = sqrt(max(0.0, dot(δμ, _brm_svi_global_precision(h, δμ))))
+    relative = max(maximum(abs, δρ; init=0.0), maximum(abs, δΒ ./ h.s; init=0.0))
+    old .+ min(1.0, 1 / distance, 0.5 / relative) .* Δ
+end

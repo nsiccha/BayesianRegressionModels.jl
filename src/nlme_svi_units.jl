@@ -71,7 +71,7 @@ end
 
 _brm_svi_unit_logdet_root(U::AbstractMatrix) = -_svi_unit_entropy(U)
 _brm_svi_unit_logdet_root(U::_BRMSVIUnitRoot) =
-    -_svi_global_logdet(U.factor.ρ, U.factor.Β) / 2
+    -_brm_svi_factor_logdet(U.factor) / 2
 
 function _brm_svi_unit_factors(d, scale, dense_limit, rank)
     if d <= dense_limit
@@ -93,7 +93,9 @@ end
 
 function _brm_svi_lowrank_gradient(f, gz, gd, ε)
     d = length(f.ρ)
-    _svi_structured_gradient(f.ρ, f.Β, gz, gd, view(ε, 1:d), view(ε, d+1:length(ε)))
+    e, η = view(ε, 1:d), view(ε, d+1:length(ε))
+    _brm_svi_narrow(f) && return _brm_svi_narrow_gradient(f, gz, gd, e, η)
+    _svi_structured_gradient(f.ρ, f.Β, gz, gd, e, η)
 end
 
 function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β; rank=1.0)
@@ -104,7 +106,8 @@ function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β; rank=1.0)
     x = copy(old)
     # A unit's own Adam steps only when the unit is drawn, so its bound needs no √w.
     _brm_svi_whitened_global_step!(opt, q, x, gradient, β; clip=_BRM_SVI_GLOBAL_CLIP, rank)
-    x .= _svi_structured_trust(f.ρ, f.Β, old, x)
+    x .= _brm_svi_narrow(f) ? _brm_svi_narrow_trust(f, old, x) :
+        _svi_structured_trust(f.ρ, f.Β, old, x)
     all(isfinite, x) || error("brm_svi_fit: nonfinite low-rank unit parameters")
     _brm_svi_set_global!(q, x)
     nothing

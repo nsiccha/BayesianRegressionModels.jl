@@ -442,15 +442,15 @@ _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
 
 include("nlme_svi_geometry_qr.jl")
 
-# For ordinary scales the determinant lemma needs only an r × r Cholesky.
-# Switch before the roundoff in V'V costs half the precision of the identity
-# term. tr(V'V) bounds its largest eigenvalue.
+# For ordinary scales the determinant lemma needs only an r × r Cholesky, and
+# the shared kernels (nlme_svi_kernels.jl) hold that form for every runtime.
+# `_svi_narrow_geometry` names the factors that need the QR geometry instead.
+_brm_svi_narrow(f) = _svi_narrow_geometry(f.ρ, f.Β)
 function _brm_svi_global_geometry(q)
     s = exp.(q.ρ)
     V = q.Β ./ s
-    gram = V' * V
-    tr(gram) >= inv(sqrt(eps(Float64))) && return _brm_svi_qr_geometry(s, V)
-    K = cholesky(Symmetric(I + gram))
+    _brm_svi_narrow(q) && return _brm_svi_qr_geometry(s, V)
+    K = cholesky(Symmetric(I + V' * V))
     (; s, V, K)
 end
 
@@ -460,9 +460,12 @@ function _brm_svi_global_precision(h, x)
 end
 
 _brm_svi_global_logdet(h) = 2sum(log, h.s; init=0.0) + logdet(h.K)
+function _brm_svi_factor_logdet(f)
+    _brm_svi_narrow(f) || return _svi_global_logdet(f.ρ, f.Β)
+    _brm_svi_global_logdet(_brm_svi_global_geometry(f))
+end
 
 _brm_svi_entropy_diagonal(h) = 1 .- vec(sum(abs2, h.V / h.K.U; dims=2))
-_brm_svi_entropy_gradients(h, Β) = _brm_svi_entropy_diagonal(h), _brm_svi_global_precision(h, Β)
 
 # C = diag(s) (I + V A V'), C C' = diag(s²) + ΒΒ'. The stable divided
 # difference 1/(sqrt(1+λ)+1) also works when a rank column is initially zero.
@@ -471,10 +474,6 @@ function _brm_svi_sqrt_axes(h)
     h.V * E.vectors, sqrt.(1 .+ max.(E.values, 0))
 end
 function _brm_svi_global_sqrt(h)
-    if h isa _BRMSVIQRGeometry
-        W, root = _brm_svi_sqrt_axes(h)
-        return (; s=h.s, W, a=1 ./ (root .+ 1))
-    end
     W, a = _svi_structured_sqrt_basis(h.V)
     (; s=h.s, W, a)
 end
@@ -490,7 +489,7 @@ _brm_svi_unit_offset(q, i, εi) = _brm_svi_unit_offset(q.U[i], εi)
 _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
-_brm_svi_entropy(q) = _svi_global_logdet(q.ρ, q.Β) / 2 -
+_brm_svi_entropy(q) = _brm_svi_factor_logdet(q) / 2 -
     sum(_brm_svi_unit_logdet_root, q.U; init=0.0)
 _brm_svi_unit_entropy(q, i) = -_brm_svi_unit_logdet_root(q.U[i])
 
@@ -564,10 +563,10 @@ end
 # The gradient of the global vector from w, the ELBO's gradient in the global
 # coordinates, the draw's (ε, η), and the entropy's own gradient.
 function _brm_svi_global_gradient(q, w, ε, η)
-    h = _brm_svi_global_geometry(q)
-    diagonal, loading = h isa _BRMSVIQRGeometry ? _brm_svi_entropy_gradients(h, q.Β) :
+    diagonal, loading = _brm_svi_narrow(q) ?
+        _brm_svi_entropy_gradients(_brm_svi_global_geometry(q), q.Β) :
         _svi_global_entropy(q.ρ, q.Β)
-    _svi_global_gradient(w, ε, η, h.s, diagonal, loading)
+    _svi_global_gradient(w, ε, η, exp.(q.ρ), diagonal, loading)
 end
 
 # A scale-preconditioned ("whitened") step: μ moves in units of a square root of
@@ -577,6 +576,7 @@ end
 # factor (`_brm_svi_polish_global_step!`) and steps a structured unit factor
 # (`_brm_svi_lowrank_step!`).
 function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
+    _brm_svi_narrow(q) && return _brm_svi_narrow_whitened_step!(opt, q, x, grad, lr; clip, rank)
     proposed, m, v, t, clipped = _svi_structured_adam(q.ρ, q.Β, x, grad, opt.m, opt.v,
         opt.t, opt.β1, opt.β2, lr, rank, clip)
     x .= proposed
@@ -1871,7 +1871,7 @@ function _brm_svi_numerical_step!(run, t, c, phase)
         run.unit_entropy[i] = entropy
     end
     push!(run.trace, value + run.entropy_sum +
-        _svi_global_logdet(q.ρ, q.Β) / 2 +
+        _brm_svi_factor_logdet(q) / 2 +
         _brm_svi_sparse_entropy(run.sites, q))
     run.iteration = it
     polishing || _brm_svi_record_iterates!(run, batch.indices, c)

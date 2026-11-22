@@ -29,6 +29,16 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         result = vcat(w, grad_scale, vec(grad_loading))
         return result
     end),
+    # The diagonal-plus-low-rank kernels below factor I + V'V, with
+    # V = diag(1/scale) loading. Past this trace, forming V'V rounds away half
+    # the precision of the identity term, and native Julia factors [V; I] by
+    # QR instead (nlme_svi_geometry_qr.jl). tr(V'V) bounds its largest
+    # eigenvalue. A device runner may use those kernels only while this is false.
+    narrow_geometry=:(function _svi_narrow_geometry(log_scale, loading)
+        V = loading ./ exp.(log_scale)
+        result = sum(V .* V) >= $(inv(sqrt(eps(Float64))))
+        return result
+    end),
     global_entropy=:(function _svi_global_entropy(log_scale, loading)
         result = if size(loading, 2) == 0
             (ones(length(log_scale)), loading)

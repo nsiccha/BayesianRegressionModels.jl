@@ -47,6 +47,17 @@ and `B` to `structured_direction`, `structured_variances` and
 the same row ordering. The structured unit's entropy contribution is
 `global_logdet(ρ, B) / 2`.
 
+`global_entropy`, `global_logdet` and the `structured_*` kernels hold the
+Cholesky form of a diagonal-plus-low-rank factor. They apply while
+`narrow_geometry(log_scale, loading)` is false. Once a diagonal scale is
+very small relative to its loadings it becomes true, and the CPU fit
+continues on a QR geometry that these kernels do not contain. Evaluate
+`narrow_geometry` for the global factor and for each structured unit you
+step, and throw before applying an update when it is true. BRM applies the
+same test to the starting state and to every state it receives from
+`synchronize!(:state)`. It stops the fit with an error naming the factor,
+before saving a checkpoint from that state.
+
 For the ELBO, `unit_entropy(root)` is the unit's entropy contribution and
 `global_logdet(log_scale, loading) / 2` is the globals' contribution, both
 up to constants. Polishing initializes a dense unit's covariance average with
@@ -157,12 +168,31 @@ function _brm_svi_execute!(fit!, ::Nothing, target, run, controls)
     (; device=:cpu, backend=:julia)
 end
 
+# The shared kernels stop at `_svi_narrow_geometry`. A device state past it
+# has left the equations the CPU fit uses there, so a device run neither starts
+# from one nor yields a checkpoint, snapshot, phase change or result from one.
+function _brm_svi_require_device_geometry(q, iteration)
+    structured(Λ) = Λ isa _BRMSVIUnitPrecision && _brm_svi_narrow(Λ.factor)
+    factor = _brm_svi_narrow(q) ? "the global factor" :
+        (i = findfirst(structured, q.Λ); i === nothing ? nothing : "the factor of unit $i")
+    factor === nothing && return nothing
+    error("brm_svi_fit: device=:gpu cannot continue at iteration $iteration. A diagonal scale of ",
+        "$factor is so small relative to its rank loadings that the fit needs ",
+        "the QR geometry, which only device=:cpu provides. Continue from the last ",
+        "checkpoint with device=:cpu.")
+end
+
 function _brm_svi_execute!(fit!, runner, target, run, controls)
     advanced = false
     function advance(step!, synchronize! = identity)
         advanced && error("GPU fitting runtime called advance more than once")
         step! === nothing && error("GPU fitting runtime supplied no iteration method")
-        fit!(step!, synchronize!)
+        _brm_svi_require_device_geometry(run.q, run.iteration)
+        fit!(step!, function (what)
+            synchronize!(what)
+            what === :state && _brm_svi_require_device_geometry(run.q, run.iteration)
+            nothing
+        end)
         advanced = true
         nothing
     end
