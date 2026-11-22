@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.385
+
+- `brm_laplace_integration` accepts `latent_marginals=:gaussian` or
+  `:mean_corrected` to return a weighted Normal mixture for each integrated
+  coordinate. Use `draws=0` for deterministic summaries without joint draws.
+  The result includes each design point’s conditional means and standard
+  deviations for transformations to physical units.
+
 ## 0.2.384
 
 - The sparse and per-unit regression Laplace solvers accept

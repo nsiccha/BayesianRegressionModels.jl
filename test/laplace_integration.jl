@@ -136,6 +136,66 @@ function lint_reference(m, mode, se; n=81)
     (; mean=μ, sd, logZ, field)
 end
 
+@stestset "draw-free latent marginals of a Gaussian field" begin
+    m = lint_model(; single=true)
+    p = m.p
+    opt = (; point=[0.0], curvature=(; hessian=fill(-6.25, 1, 1), positive_definite=true))
+    rng = Xoshiro(9)
+    gaussian = brm_laplace_integration(p; opt..., draws=0, rng, latent_marginals=:gaussian)
+    @test rand(rng) == rand(Xoshiro(9))
+    latent = gaussian.latent_marginals
+    idx = LINT_DATA.idx
+    exact_mean = reduce(hcat, m.field_mean(t) for t in eachcol(gaussian.points))
+    exact_sd = [1 / sqrt(exp(-2theta) + count(==(i), idx) / 0.36)
+        for i in 1:LINT_DATA.n, theta in vec(gaussian.points)]
+    @test latent.point_indices == collect(eachindex(gaussian.weights))
+    @test latent.weights == gaussian.weights
+    @test latent.names == BRM._rk_layout_coordinate_names(m.rk)[p.integrated]
+    @test latent.conditional_mean ≈ exact_mean atol=1e-8
+    @test latent.conditional_sd ≈ exact_sd atol=1e-10
+    mu = exact_mean * latent.weights
+    @test latent.mean ≈ mu atol=1e-8
+    @test latent.sd ≈ sqrt.((exact_sd.^2 .+ (exact_mean .- mu).^2) * latent.weights)
+    @test size(gaussian.draws) == (length(p.u), 0)
+    for i in eachindex(latent.names)
+        expected = Normal.(exact_mean[i, :], exact_sd[i, :])
+        @test pdf(latent.distributions[i], 0.31) ≈ dot(latent.weights, pdf.(expected, 0.31))
+        @test cdf(latent.distributions[i], 0.31) ≈ dot(latent.weights, cdf.(expected, 0.31))
+    end
+    corrected = brm_laplace_integration(p; opt..., draws=0, latent_marginals=:mean_corrected)
+    @test corrected.latent_marginals.conditional_mean ≈ exact_mean atol=1e-8
+    @test corrected.latent_marginals.conditional_sd ≈ exact_sd
+    @test brm_laplace_integration(p; opt..., draws=0).latent_marginals === nothing
+    @test_throws ArgumentError brm_laplace_integration(p; latent_marginals=:invalid)
+end
+
+@stestset "draw-free latent marginals shift the Poisson conditional mean" begin
+    counts = [0, 1, 2, 6]
+    rk = RKBRMI(@brm (; counts, group=collect(eachindex(counts))) begin
+        log(mu) ~ 0 + (1 | group)
+        counts ~ Poisson(mu)
+    end)
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:group,))
+    opt = (; point=[0.0], curvature=(; hessian=fill(-3.0, 1, 1), positive_definite=true))
+    gauss = brm_laplace_integration(p; opt..., draws=120, rng=Xoshiro(10), latent_marginals=:gaussian)
+    corr = brm_laplace_integration(p; opt..., draws=120, rng=Xoshiro(10), latent_marginals=:mean_corrected)
+    a, b = gauss.latent_marginals, corr.latent_marginals
+    @test gauss.points == corr.points && gauss.weights == corr.weights
+    @test a.conditional_sd ≈ b.conditional_sd
+    @test gauss.draws[p.population, :] == corr.draws[p.population, :]
+    scale = exp.(gauss.points)
+    lambda = exp.(scale .* a.conditional_mean)
+    variance = 1.0 ./ (1 .+ scale.^2 .* lambda)
+    @test a.conditional_sd ≈ sqrt.(variance)
+    shift = -0.5 .* scale.^3 .* lambda .* variance.^2
+    @test b.conditional_mean ≈ a.conditional_mean .+ shift atol=1e-8
+    @test all(b.mean .< a.mean)
+    for k in axes(gauss.draws, 2)
+        j = only(findall(==(gauss.draws[only(p.population), k]), vec(gauss.points)))
+        @test corr.draws[p.integrated, k] ≈ gauss.draws[p.integrated, k] .+ shift[:, j]
+    end
+end
+
 @stestset "grid at d = 2 agrees with quadrature of the exact marginal" begin
     m = lint_model()
     p = m.p

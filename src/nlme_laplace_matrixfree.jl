@@ -489,22 +489,27 @@ function _brm_operator_sum_covariances(p, F, c)
     (; blocks, cov.SB, cov.BSB)
 end
 
+# Map a white vector to the physical conditional coordinates. The same
+# square-root action serves joint draws and the fixed probes for variances.
+function _brm_operator_root!(out, F, part, r)
+    if part.factor !== nothing
+        out .= part.factor.U \ r
+    elseif part.operator isa _BRMPreconditionedOperator
+        A = part.operator
+        draw = _brm_spl_covariance_root(b -> _brm_checked_cg(A, b, F.options;
+            diagnostics=F.problem.algebra.diagnostics), r).draw
+        _brm_to_physical!(out, A, draw)
+    else
+        out .= _brm_spl_covariance_root(b -> _brm_operator_solve(part.H, b, F.options;
+            diagnostics=F.problem.algebra.diagnostics), r).draw
+    end
+    out
+end
+
 function _brm_operator_draw(F, rng)
     result = zeros(length(F.component))
     for (part, I) in zip(F.parts, F.components)
-        r = randn(rng, length(I))
-        if part.factor !== nothing
-            result[I] .= part.factor.U \ r
-        elseif part.operator isa _BRMPreconditionedOperator
-            A = part.operator
-            draw = _brm_spl_covariance_root(b -> _brm_checked_cg(A, b, F.options;
-                diagnostics=F.problem.algebra.diagnostics), r).draw
-            _brm_to_physical!(view(result, I), A, draw)
-        else
-            result[I] .= _brm_spl_covariance_root(
-                b -> _brm_operator_solve(part.H, b, F.options;
-                    diagnostics=F.problem.algebra.diagnostics), r).draw
-        end
+        _brm_operator_root!(view(result, I), F, part, randn(rng, length(I)))
     end
     result
 end
