@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.376
+
+- **Breaking:** For `rw(t; order=2, sum_to_zero=true)`, the `:structured`
+  coordinates are now named `basis` on both backends. In sorted step order
+  they hold the standardized mean, the physical slope per step, and the
+  standardized second differences. To convert an old `phi` draw, set
+  `x = sigma .* phi` and `t = (1:length(x)) .- (length(x)+1)/2`. Pack
+  `vcat(mean(phi)/0.001, dot(t,x)/sum(abs2,t), diff(diff(phi)))`.
+  The formula, innovation-scale prior, fitted field and forecast law are
+  preserved. Sparse Laplace integrates in field values and returns draws in
+  the new coordinates.
+
 ## 0.2.375
 
 - Declared vectors accept `z[1:n] .~ restricted.(Normal.(0, 1), 0, Inf)`

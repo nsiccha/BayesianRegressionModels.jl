@@ -96,6 +96,7 @@ integrated draws that share likelihood terms.
 """
 mutable struct BRMSparseLaplaceProblem{K}
     backend::RKBRMI
+    walk_frame::Any
     population::Vector{Int}
     names::Vector{Symbol}
     integrate::Vector{Symbol}
@@ -440,7 +441,7 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
             sigma = Symbol(r.declaration, ".", r.locals.sigma)
             n = length(r.steps)
             if r.sum_to_zero
-                phi = Symbol(r.declaration, ".", r.locals.phi)
+                phi = Symbol(r.declaration, ".", only(_brm_term_draw_locals(Val(:rw), r)))
                 walk = _brm_spl_walk_graph(n, r.order)
                 block!(r.declaration, r.time,
                     draws!(reshape([Symbol(phi, ".", t) for t in 1:n], :, 1)), (sigma,);
@@ -491,6 +492,9 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     integrate = Symbol[g for g in (integrate isa Symbol ? (integrate,) : integrate)]
     isempty(integrate) && throw(ArgumentError(
         "brm_laplace_problem: integrate names no grouping"))
+    public_backend = backend
+    selected_records = _brm_spl_records(backend, integrate; declarations)
+    backend, walks = _rw2_field_backend(backend, _brm_spl_record_declaration.(selected_records))
     refusal = _brm_slap_response_refusal(backend; cells=true, values=true)
     refusal === nothing || _brm_nlme_error("brm_laplace_problem: integrate = " *
         "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
@@ -517,7 +521,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     t = _brm_slap_terms(backend, responses, families, ports, _rk_slap_values(kernels, u0),
         (1:nrows,))
     nψ = length(t.port)
-    p = BRMSparseLaplaceProblem(backend, population, names[population], integrate,
+    p = BRMSparseLaplaceProblem(backend, _rw2_draw_frame(backend, walks), population, names[population], integrate,
         integrated, blocks, kernels, nothing, nothing, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], fill(false, length(blocks)), Float64[],
@@ -540,6 +544,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     _brm_spl_pattern!(p)
     _brm_spl_step_blocks!(p)
     _brm_spl_algebra!(p, solver, matrixfree)
+    p.backend = public_backend
     p
 end
 
@@ -2342,6 +2347,9 @@ function _brm_spl_draws(p::BRMSparseLaplaceProblem, m::Integer, state_at;
                 draws[p.integrated[i], k] = proposals[i, pick]
             end
         end
+    end
+    if p.walk_frame !== nothing
+        foreach(u -> _brm_laplace_public_point!(p, u), eachcol(draws))
     end
     diagnostics = conditional > 0 ? (; newton_steps, importance_ess) : (; newton_steps)
     (; draws, diagnostics)

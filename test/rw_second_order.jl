@@ -88,7 +88,11 @@ differences(n, order) = order == 1 ? diff(Matrix(1.0I, n, n); dims=1) :
         code = stan(sb)
         @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
         @test occursin("rw_mu_t_sigma", code)
-        if law.sum_to_zero
+        if law.sum_to_zero && law.order == 2
+            @test occursin("brm_rw2_basis", code)
+            @test occursin("rw_mu_t_basis", code)
+            @test !haskey(sb.data, :rw_mu_t_order)
+        elseif law.sum_to_zero
             @test occursin("brm_rw_sum", code)
             @test occursin("rw_mu_t_phi", code)
             @test sb.data[:rw_mu_t_order] == law.order
@@ -138,18 +142,24 @@ end
         jacobian = prepare_query(rk.model, plan, :log_jacobian)
         lp(u) = Base.invokelatest(prior, u) + Base.invokelatest(jacobian, u)
         is = findfirst(==(Symbol("rw_mu_t.sigma")), names)
-        iphi = [findfirst(==(Symbol("rw_mu_t.phi.", k)), names) for k in 1:n]
-        @test is !== nothing && all(!isnothing, iphi)
+        raw = order == 2 ? "basis" : "phi"
+        iw = [only(findall(==(Symbol("rw_mu_t.", raw, ".", k)), names)) for k in 1:n]
+        @test is !== nothing
         D = differences(n, order)
         law(x, σ) = -(n - order) * log(σ) - sum(abs2, D * x) / (2σ^2) +
             logpdf(Normal(0, 0.001 * n * σ), sum(x))
         x = 0.3 .* randn(rng, n)
         x .-= mean(x) - 1e-4    # near the soft constraint, not on it
-        point(σ) = (u = fill(0.1, length(names)); u[is] = log(σ); u[iphi] = x ./ σ; u)
-        # The other coordinates agree, so the difference is the walk's law in its
-        # values' coordinates (`phi = x / σ` adds `n log σ`), plus the scale's
-        # `restricted(Normal(0, 0.2))` prior and its log Jacobian `log σ`.
-        whole(σ) = law(x, σ) + n * log(σ) + logpdf(Normal(0, 0.2), σ) + log(σ)
+        trend = (1:n) .- (n + 1) / 2
+        function point(σ)
+            u = fill(0.1, length(names))
+            u[is] = log(σ)
+            u[iw] = order == 1 ? x ./ σ :
+                vcat(mean(x) / (0.001σ), dot(trend, x) / sum(abs2, trend), D * x ./ σ)
+            u
+        end
+        # The order-2 slope stays in physical units when the scale changes.
+        whole(σ) = law(x, σ) + (n - order + 1) * log(σ) + logpdf(Normal(0, 0.2), σ) + log(σ)
         @test lp(point(1.9)) - lp(point(0.7)) ≈ whole(1.9) - whole(0.7) atol=1e-9
         @test lp(point(0.4)) - lp(point(0.7)) ≈ whole(0.4) - whole(0.7) atol=1e-9
     end
@@ -165,15 +175,24 @@ end
         query = ReactiveKernels.prepare(rk.model.spec; have=(:unconstrained, keys(bound)...),
             want=(:rw_mu_t,), bound)
         is = findfirst(==(Symbol("rw_mu_t.sigma")), names)
-        local_name = law.sum_to_zero ? "phi" : "z"
+        local_name = law.sum_to_zero ? (law.order == 2 ? "basis" : "phi") : "z"
         iw = [findfirst(==(Symbol("rw_mu_t.", local_name, ".", k)), names)
             for k in 1:(law.sum_to_zero ? n : n - 1)]
         @test all(!isnothing, iw)
+        @test intersect(names[[is; iw]], brm_hyperparameters(rk)) == [names[is]]
         for u in (collect(range(-0.6, 0.7; length=length(names))),
                   0.3 .* randn(Xoshiro(8), length(names)))
             σ, w = exp(u[is]), u[iw]
-            path = law.sum_to_zero ? σ .* w :
+            path = if law.sum_to_zero && law.order == 2
+                # Independent small dense inverse of the defining linear functionals.
+                trend = (1:n) .- (n + 1) / 2
+                M = vcat(fill(1/n, 1, n), trend' / sum(abs2, trend), differences(n, 2))
+                M \ vcat(0.001σ * w[1], w[2], σ .* w[3:end])
+            elseif law.sum_to_zero
+                σ .* w
+            else
                 law.order == 1 ? vcat(0.0, σ .* cumsum(w)) : vcat(0.0, cumsum(σ .* cumsum(w)))
+            end
             value = Base.invokelatest(query, u)
             @test (value isa Tuple ? only(value) : value) ≈ path[positions] atol=1e-12 rtol=1e-12
         end
@@ -194,7 +213,12 @@ end
         sd(mu, rw(t)) = 0.3
         y ~ Normal(mu, sigma)
     end)
-    for brmi in (map(law -> RW_BUILDERS[law](data), RW_LAWS)..., stated, known)
+    known_intrinsic = @brm(data, begin
+        mu ~ 1 + rw(t; order = 2, sum_to_zero = true)
+        sd(mu, rw(t)) = 0.3
+        y ~ Normal(mu, 1.0)
+    end)
+    for brmi in (map(law -> RW_BUILDERS[law](data), RW_LAWS)..., stated, known, known_intrinsic)
         rk = RKBRMI(brmi)
         problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
         sb = SBBRMI(brmi; mod=@__MODULE__)
@@ -212,6 +236,35 @@ end
             @test value ≈ stan_value + transport.logdensity_offset atol=1e-9 rtol=1e-12
             @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=1e-8 rtol=1e-10
         end
+    end
+end
+
+@stestset "RW2 sampling and field coordinates give the same complete target" begin
+    rk = RKBRMI(RW_BUILDERS[(order=2, sum_to_zero=true)](RW2_DATA))
+    old, _ = BRM._rw2_field_backend(rk, [:rw_mu_t])
+    public_target = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    field_target = rk_logdensity_problem(old; ad_backend=NLME_AD)
+    names = coordinate_names(rk.model.layout)
+    n = length(unique(RW2_DATA.t))
+    idx = [only(findall(==(Symbol("rw_mu_t.basis.", k)), names)) for k in 1:n]
+    is = only(findall(==(Symbol("rw_mu_t.sigma")), names))
+    t = (1:n) .- (n + 1)/2
+    M = vcat(fill(1/n, 1, n), t' / sum(abs2, t), differences(n, 2))
+    function field_density(u)
+        σ = exp(u[is])
+        b = u[idx]
+        v = copy(u)
+        v[idx] = M \ vcat(0.001b[1], b[2]/σ, b[3:end])
+        LogDensityProblems.logdensity(field_target, v) + log(0.001/σ)
+    end
+    rng = Xoshiro(117)
+    for ls in (-3.0, 0.5)
+        u = 0.2 .* randn(rng, length(names))
+        u[is] = ls
+        v, g = LogDensityProblems.logdensity_and_gradient(public_target, u)
+        h = randn(rng, length(u))
+        @test v ≈ field_density(u) atol=1e-9
+        @test dot(g,h) ≈ (field_density(u + 1e-5h) - field_density(u - 1e-5h))/2e-5 rtol=1e-6 atol=1e-6
     end
 end
 
@@ -234,7 +287,12 @@ end
         σ = only(pick(fn, fv, "rw_mu_t_sigma"))
         fitted = pick(fn, fv, "rw_mu_t")
         @test length(fitted) == 5
-        law.sum_to_zero && @test abs(sum(fitted)) < 0.01 * σ * 5 + 1   # soft, not exact
+        if law.sum_to_zero && law.order == 2
+            b = pick(fn, fv, "rw_mu_t_basis")
+            @test mean(fitted) ≈ 0.001σ * b[1] atol=1e-12
+            @test dot(-2:2, fitted) / 10 ≈ b[2] atol=1e-12
+            @test diff(diff(fitted)) ≈ σ .* b[3:end] atol=1e-12
+        end
         for seed in 1:20
             cn, cv = constrained(fc_problem, q; seed)
             path = pick(cn, cv, "rw_mu_t")
@@ -288,6 +346,7 @@ end
     for law in RW_LAWS
         rk = RKBRMI(RW_BUILDERS[law](data))
         p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:t,))
+        @test p.backend === rk
         @test length(p.integrated) == (law.sum_to_zero ? n : n - 1)
         @test length(p.components) == 1
         # The integrated draws' prior precision and their map to the walk's values
@@ -318,7 +377,8 @@ end
             r = data.y .- μ0
             H = Symmetric(P + M' * W * M)
             b = M' * W * r
-            Base.invokelatest(prior, u) + Base.invokelatest(jacobian, u) -
+            field_jacobian = law.sum_to_zero && law.order == 2 ? log(τ / 0.001) : 0.0
+            Base.invokelatest(prior, u) + Base.invokelatest(jacobian, u) + field_jacobian -
                 r' * W * r / 2 + b' * (H \ b) / 2 - logdet(H) / 2 +
                 (size(P, 1) - length(r)) / 2 * log(2π) - sum(log, σ)
         end
@@ -327,6 +387,17 @@ end
             value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
             @test value ≈ oracle(φ) atol=1e-7
             @test gradient ≈ spl_fd(oracle, φ) rtol=1e-6 atol=1e-6
+        end
+        if law.sum_to_zero && law.order == 2
+            # Read a returned draw through the public graph. Reproduce its
+            # conditional Gaussian draw independently in the solver's field frame.
+            φ = zeros(length(p.population))
+            state = BRM._brm_spl_mode!(p, φ)
+            field = state.u[p.integrated] + BRM._brm_spl_draw(p, state, Xoshiro(29))
+            u = vec(brm_laplace_draws(p, reshape(φ, :, 1); rng=Xoshiro(29)).draws)
+            reader = BRM._rk_value_reader(rk, (:rw_mu_t,))
+            @test reader(u).rw_mu_t ≈ A * field atol=1e-10 # scale exp(0) = 1
+            @test u[p.population] == φ
         end
     end
     # Counts, as R-INLA's binomial `rw2` example: the gradient of the Laplace

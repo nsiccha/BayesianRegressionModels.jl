@@ -158,7 +158,7 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         state = _brm_spl_mode!(p, φ0)
         switched = Symbol[]
         if automatic && start !== nothing && state.finite
-            u = copy(state.u)
+            u = _brm_laplace_public_point!(p, copy(state.u))
             p, plan, switched = _brm_ladder_replan(p, u; ad_backend, rng)
             φ0 = u[p.population]
             state = _brm_spl_mode!(p, φ0)
@@ -443,7 +443,7 @@ _brm_ladder_point(rungs) = last(sort([r for r in rungs
 function _brm_ladder_saem end
 
 # One complete packed point (coordinates × 1) at a mode state.
-_brm_ladder_packed(p, state) = reshape(copy(state.u), :, 1)
+_brm_ladder_packed(p, state) = reshape(_brm_laplace_public_point!(p, copy(state.u)), :, 1)
 
 # The Laplace marginal's curvature over the population coordinates at `φ`:
 # central differences of its gradient (2p gradients), symmetrized. Its inverse

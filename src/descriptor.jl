@@ -2773,11 +2773,12 @@ function _brm_term_parameter_bindings(::typeof(hsgp), t)
 end
 _brm_term_parameter_bindings(::typeof(dar), _t) =
     (; ar=:beta, sd=:sigma, innovations=:z)
-# A zero-start walk samples its innovations; a sum-to-zero walk its standardized
-# values `phi`, which (as `car`'s ICAR field) are `:structured`.
-_brm_term_parameter_bindings(::typeof(rw), t) =
-    _brm_rw_options(getkwargs(t)).sum_to_zero ? (; sd=:sigma, structured=:phi) :
-        (; sd=:sigma, innovations=:z)
+# Both intrinsic walks expose their parameter vector as `:structured`.
+function _brm_term_parameter_bindings(::typeof(rw), t)
+    (; order, sum_to_zero) = _brm_rw_options(getkwargs(t))
+    sum_to_zero || return (; sd=:sigma, innovations=:z)
+    (; sd=:sigma, structured=order == 2 ? :basis : :phi)
+end
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
 _brm_term_parameter_bindings(::typeof(gmrf), t) = _brm_gmrf_parameter_bindings(t)
@@ -2926,8 +2927,10 @@ included) and, like `:value`, a transformed parameter; `:structured` is the
 standardized ICAR field over the areas with neighbours, grouped by connected
 component. `:unstructured` is BYM2's standard-normal noise per area, and a scaled
 ICAR field's per island (one per island in sorted label order; empty when the
-graph has none). A sum-to-zero `rw` term's `:structured` is its
-standardized values `x / sigma`, one per fitted time in sorted order.
+graph has none). For a sum-to-zero `rw`, `:structured` holds the standardized
+values `x / sigma` at order 1. At order 2 it holds the mean in units of
+`0.001 sigma`, the physical slope per sorted step, and the standardized
+second differences. Use `:value` for the field at the observed rows.
 
 `:value` is the term's own collected contribution: the per-row vector this
 predictor's occurrence of the term adds to the linear predictor. It is a

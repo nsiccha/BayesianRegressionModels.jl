@@ -248,7 +248,8 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
         uncertified=Dict{Symbol,Set{Symbol}}(),
         integrated_dimension=0, sampled_dimension=length(_rk_layout_coordinate_names(backend))) :
         _brm_with_progress(progress; description="Cell width screening") do _
-            _brm_spl_screen(backend, candidates,
+            working, _ = _rw2_field_backend(backend, [t.declaration for t in candidates])
+            _brm_spl_screen(working, candidates,
                 Set(t.declaration for t in candidates if named(t, forced)), max_cell_width)
         end
     candidates = candidates[screen.active]
@@ -292,8 +293,15 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     retained = Set(t.declaration for t in candidates if named(t, forced) ||
         (!haskey(unknown, t.declaration) && get(gated, t.declaration, nothing) !== :never))
     if !isempty(retained) && length(retained) < length(candidates)
-        _brm_spl_restrict!(p, retained)
-        _brm_spl_algebra!(p, solver, matrixfree)
+        if _rw2_releases_walk(p, retained)
+            p = _brm_sparse_laplace_problem(backend,
+                unique(t.grouping for t in candidates if t.declaration in retained);
+                ad_backend, tol, maxiter, declarations=retained, max_cell_width, screened=true,
+                solver, matrixfree, progress)
+        else
+            _brm_spl_restrict!(p, retained)
+            _brm_spl_algebra!(p, solver, matrixfree)
+        end
     end
     # the diagnostic, at the population point `at`, for the gated terms the
     # caller did not force
@@ -602,6 +610,7 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
     declarations = Set(t.declaration for t in admitted)
     prepared = r.plan.prepared
     if prepared !== nothing && prepared.problem.backend === backend &&
+            !_rw2_releases_walk(prepared.problem, declarations) &&
             isequal(prepared.ad_backend, ad_backend) &&
             issubset(declarations, Set(_brm_plan_problem_terms(prepared.problem)))
         # Backend inputs are read-only. Do not clone the model and its bound

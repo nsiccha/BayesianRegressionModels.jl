@@ -49,6 +49,7 @@ function BRM._brm_laplace_mode(
     value = LogDensityProblems.logdensity(p, φ)
     u = copy(p.u)
     u[p.population] .= φ
+    BRM._brm_laplace_public_point!(p, u)
     converged = Optim.converged(result)
     converged || @warn("brm_laplace_mode: L-BFGS stopped after " *
         "$(Optim.iterations(result)) iterations with gradient norm " *
