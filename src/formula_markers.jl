@@ -122,7 +122,8 @@ pinned:
   uses, `sum(x) ~ Normal(0, 0.001 n sigma)` (`car`'s `Normal(0, 0.001 n)` on the
   standardized values `x / sigma`). Order 1 samples those standardized values.
   Order 2 samples the mean in units of `0.001 sigma`, the least-squares slope
-  in physical units per step, and the second differences in units of `sigma`.
+  in physical units per step, and a banded basis for the second differences.
+  Convert a draw of standardized field values with [`brm_rw2_coordinates`](@ref).
   A formula intercept gives the baseline level. The order-2 walk's linear trend
   has a flat prior and is identified by the data. These are R-INLA's `rw1` and
   `rw2` with `constr = TRUE`. The walk needs at least `order + 1` distinct times.

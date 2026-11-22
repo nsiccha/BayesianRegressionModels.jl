@@ -2929,8 +2929,8 @@ component. `:unstructured` is BYM2's standard-normal noise per area, and a scale
 ICAR field's per island (one per island in sorted label order; empty when the
 graph has none). For a sum-to-zero `rw`, `:structured` holds the standardized
 values `x / sigma` at order 1. At order 2 it holds the mean in units of
-`0.001 sigma`, the physical slope per sorted step, and the standardized
-second differences. Use `:value` for the field at the observed rows.
+`0.001 sigma`, the physical slope per sorted step, and a scale-dependent banded basis
+for the second differences. Use `:value` for the field at the observed rows.
 
 `:value` is the term's own collected contribution: the per-row vector this
 predictor's occurrence of the term adds to the linear predictor. It is a

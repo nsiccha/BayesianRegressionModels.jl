@@ -96,7 +96,7 @@ const _RK_SOURCE_IMPORTS = (
         :brm_t2_fit, :brm_tps_fit, :brm_tps_apply,
         :brm_panel_slice, :brm_flatten_cells, :brm_invprobit, :brm_invcloglog,
         :brm_ragged_rows, :brm_ragged_rows_ordered, :brm_ragged_rows_shared,
-        :brm_walk_rows, :brm_rw2_basis_path))
+        :brm_walk_rows, :brm_rw2_transform, :brm_rw2_basis_path))
 
 # RKPPL heads with a fixed model meaning, including response combinators
 # that also name ordinary Distributions constructors. Value calls to those

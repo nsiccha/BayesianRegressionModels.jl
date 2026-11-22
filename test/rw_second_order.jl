@@ -81,6 +81,31 @@ pick(names, values, prefix) =
 differences(n, order) = order == 1 ? diff(Matrix(1.0I, n, n); dims=1) :
     diff(diff(Matrix(1.0I, n, n); dims=1); dims=1)
 
+# Dense small-grid oracle for the banded map from raw curvature to D²x / σ.
+function roughness_map(n, σ)
+    D = differences(n, 2)
+    A = cholesky(Symmetric(D * D')).L
+    C = cholesky(Symmetric(A' * A + σ^2 * I)).L
+    Matrix(A / C')
+end
+
+@stestset "RW2 banded coordinates round-trip standardized fields" begin
+    for n in (3, 4, 13, 60), σ in (0.005, 0.4, 2.0)
+        phi = randn(Xoshiro(n), n)
+        T = roughness_map(n, σ)
+        packed = brm_rw2_coordinates(σ, phi)
+        t = (1:n) .- (n + 1) / 2
+        @test packed ≈ vcat(mean(phi) / 0.001, σ * dot(t,phi) / sum(abs2,t), T \ diff(diff(phi)))
+        transformed = BRM.brm_rw2_transform(σ, packed)
+        @test transformed[3:n] ≈ diff(diff(phi))
+        @test transformed[end] ≈ logdet(T) atol=1e-9
+        @test BRM.brm_rw2_basis_path(σ, transformed[1:n]) ≈ σ .* phi atol=1e-10
+    end
+    # At vanishing scale the map is orthogonal. Forming A'A before factoring
+    # loses precision in its last pivots for this grid.
+    @test abs(BRM.brm_rw2_transform(1e-13, zeros(5000))[end]) < 1e-8
+end
+
 @stestset "rw keywords: each law's program, and the refusals" begin
     data = RW2_DATA
     for law in RW_LAWS
@@ -155,11 +180,12 @@ end
             u = fill(0.1, length(names))
             u[is] = log(σ)
             u[iw] = order == 1 ? x ./ σ :
-                vcat(mean(x) / (0.001σ), dot(trend, x) / sum(abs2, trend), D * x ./ σ)
+                vcat(mean(x) / (0.001σ), dot(trend, x) / sum(abs2, trend), roughness_map(n, σ) \ (D * x ./ σ))
             u
         end
         # The order-2 slope stays in physical units when the scale changes.
-        whole(σ) = law(x, σ) + (n - order + 1) * log(σ) + logpdf(Normal(0, 0.2), σ) + log(σ)
+        whole(σ) = law(x, σ) + (n - order + 1) * log(σ) + logpdf(Normal(0, 0.2), σ) + log(σ) +
+            (order == 2 ? logdet(roughness_map(n, σ)) : 0.0)
         @test lp(point(1.9)) - lp(point(0.7)) ≈ whole(1.9) - whole(0.7) atol=1e-9
         @test lp(point(0.4)) - lp(point(0.7)) ≈ whole(0.4) - whole(0.7) atol=1e-9
     end
@@ -187,7 +213,7 @@ end
                 # Independent small dense inverse of the defining linear functionals.
                 trend = (1:n) .- (n + 1) / 2
                 M = vcat(fill(1/n, 1, n), trend' / sum(abs2, trend), differences(n, 2))
-                M \ vcat(0.001σ * w[1], w[2], σ .* w[3:end])
+                M \ vcat(0.001σ * w[1], w[2], σ .* (roughness_map(n, σ) * w[3:end]))
             elseif law.sum_to_zero
                 σ .* w
             else
@@ -254,8 +280,8 @@ end
         σ = exp(u[is])
         b = u[idx]
         v = copy(u)
-        v[idx] = M \ vcat(0.001b[1], b[2]/σ, b[3:end])
-        LogDensityProblems.logdensity(field_target, v) + log(0.001/σ)
+        v[idx] = M \ vcat(0.001b[1], b[2]/σ, roughness_map(n, σ) * b[3:end])
+        LogDensityProblems.logdensity(field_target, v) + log(0.001/σ) + logdet(roughness_map(n, σ))
     end
     rng = Xoshiro(117)
     for ls in (-3.0, 0.5)
@@ -291,7 +317,7 @@ end
             b = pick(fn, fv, "rw_mu_t_basis")
             @test mean(fitted) ≈ 0.001σ * b[1] atol=1e-12
             @test dot(-2:2, fitted) / 10 ≈ b[2] atol=1e-12
-            @test diff(diff(fitted)) ≈ σ .* b[3:end] atol=1e-12
+            @test diff(diff(fitted)) ≈ σ .* (roughness_map(5, σ) * b[3:end]) atol=1e-12
         end
         for seed in 1:20
             cn, cv = constrained(fc_problem, q; seed)
@@ -377,7 +403,7 @@ end
             r = data.y .- μ0
             H = Symmetric(P + M' * W * M)
             b = M' * W * r
-            field_jacobian = law.sum_to_zero && law.order == 2 ? log(τ / 0.001) : 0.0
+            field_jacobian = law.sum_to_zero && law.order == 2 ? log(τ / 0.001) - logdet(roughness_map(n, τ)) : 0.0
             Base.invokelatest(prior, u) + Base.invokelatest(jacobian, u) + field_jacobian -
                 r' * W * r / 2 + b' * (H \ b) / 2 - logdet(H) / 2 +
                 (size(P, 1) - length(r)) / 2 * log(2π) - sum(log, σ)
@@ -391,14 +417,34 @@ end
         if law.sum_to_zero && law.order == 2
             # Read a returned draw through the public graph. Reproduce its
             # conditional Gaussian draw independently in the solver's field frame.
-            φ = zeros(length(p.population))
+            φ = fill(log(0.4), length(p.population))
             state = BRM._brm_spl_mode!(p, φ)
             field = state.u[p.integrated] + BRM._brm_spl_draw(p, state, Xoshiro(29))
             u = vec(brm_laplace_draws(p, reshape(φ, :, 1); rng=Xoshiro(29)).draws)
             reader = BRM._rk_value_reader(rk, (:rw_mu_t,))
-            @test reader(u).rw_mu_t ≈ A * field atol=1e-10 # scale exp(0) = 1
+            @test reader(u).rw_mu_t ≈ 0.4 .* (A * field) atol=1e-10
             @test u[p.population] == φ
         end
+    end
+    # The sparse solver must also reconstruct the public field when the walk
+    # scale has no sampling coordinate of its own.
+    for (builder, scale) in ((@brm(begin
+                mu ~ 1 + rw(t; order = 2, sum_to_zero = true)
+                sd(:, rw(t)) = 0.3
+                y ~ Normal(mu, 1.0)
+            end), 0.3), (@brm(begin
+                a ~ Normal(0.0, 1.0)
+                mu ~ 1 + rw(t; order = 2, sum_to_zero = true)
+                sd(:, rw(t)) = exp(a)
+                y ~ Normal(mu, 1.0)
+            end), exp(-0.6)))
+        rk = RKBRMI(builder(data))
+        p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:t,))
+        φ = fill(-0.6, length(p.population))
+        state = BRM._brm_spl_mode!(p, φ)
+        field = state.u[p.integrated] + BRM._brm_spl_draw(p, state, Xoshiro(19))
+        u = vec(brm_laplace_draws(p, reshape(φ, :, 1); rng=Xoshiro(19)).draws)
+        @test BRM._rk_value_reader(rk, (:rw_mu_t,))(u).rw_mu_t ≈ scale .* (A * field) atol=1e-10
     end
     # Counts, as R-INLA's binomial `rw2` example: the gradient of the Laplace
     # marginal itself, where the curvature moves with the mode.

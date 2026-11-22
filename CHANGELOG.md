@@ -17,9 +17,9 @@ instead of failing at run time.
 - **Breaking:** For `rw(t; order=2, sum_to_zero=true)`, the `:structured`
   coordinates are now named `basis` on both backends. In sorted step order
   they hold the standardized mean, the physical slope per step, and the
-  standardized second differences. To convert an old `phi` draw, set
-  `x = sigma .* phi` and `t = (1:length(x)) .- (length(x)+1)/2`. Pack
-  `vcat(mean(phi)/0.001, dot(t,x)/sum(abs2,t), diff(diff(phi)))`.
+  coefficients of a scale-dependent banded basis for the second differences.
+  Convert an old standardized field draw with `brm_rw2_coordinates(sigma, phi)`,
+  using the walk scale from that draw. Use `:value` to read the physical field.
   The formula, innovation-scale prior, fitted field and forecast law are
   preserved. Sparse Laplace integrates in field values and returns draws in
   the new coordinates.

@@ -1,3 +1,51 @@
+"""
+    brm_rw2_coordinates(sigma, phi)
+
+Convert a sum-to-zero order-2 walk's standardized fitted field `phi = x / sigma`
+(in sorted step order) to its current `:structured` sampling coordinates. The
+first two are the standardized soft mean and the physical least-squares slope
+per step. The remaining coordinates encode the standardized second differences
+in a scale-dependent banded basis. Use the walk scale from the same draw.
+
+If `D` takes second differences, let `A` and `C` be the lower Cholesky factors
+of `D * D'` and `A' * A + sigma^2 * I`. For packed curvature `z = basis[3:end]`,
+the standardized differences are `D * phi = A * (C' \\ z)`. This choice uses a
+unit of reference curvature per fitted step in physical field units. The model
+uses its stated likelihood and walk prior. The conversion takes linear time and
+storage in the number of steps.
+"""
+function brm_rw2_coordinates(sigma::Real, phi::AbstractVector{<:Real})
+    n = length(phi)
+    n >= 3 || throw(ArgumentError("a second-order walk needs at least three fitted steps"))
+    isfinite(sigma) && sigma > 0 || throw(ArgumentError("the walk scale must be positive and finite"))
+    m = n - 2
+    bands = brm_rw2_factors(sigma, m)
+    # Undo r = A * (C' \ z) by forward substitution followed by C' * work.
+    work = diff(diff(promote_type(Float64, eltype(phi), typeof(sigma)).(phi)))
+    for i in 1:m
+        if i > 1
+            work[i] -= bands[i, 2] * work[i - 1]
+        end
+        if i > 2
+            work[i] -= bands[i, 3] * work[i - 2]
+        end
+        work[i] /= bands[i, 1]
+    end
+    trend = (1:n) .- (n + 1) / 2
+    basis = vcat(mean(phi) / 0.001, sigma * dot(trend, phi) / sum(abs2, trend), work)
+    for i in 1:m
+        z = bands[i, 4] * work[i]
+        if i < m
+            z += bands[i + 1, 5] * work[i + 1]
+        end
+        if i + 1 < m
+            z += bands[i + 2, 6] * work[i + 2]
+        end
+        basis[i + 2] = z
+    end
+    basis
+end
+
 # The sparse solver integrates the intrinsic RW2 in standardized field values.
 # Only selected walks change frame. Other population coordinates keep the
 # public model's meaning, even when several walks share a time column.
@@ -39,29 +87,21 @@ function _rw2_draw_frame(working, walks)
     blocks = map(walks) do r
         n = length(r.steps)
         ids = [position[Symbol(r.declaration, ".", r.locals.basis, ".", i)] for i in 1:n]
-        # Reading the physical path also covers fixed and model-dependent walk
-        # scales. Repeated observations of a step count once in the projection.
-        rows = Dict(v => i for (i, v) in enumerate(rk_bound_data(working)[r.time]))
-        trend = collect(1:n) .- (n + 1) / 2
-        (; r.declaration, ids, rows=[rows[t] for t in r.steps], slope=trend ./ sum(abs2, trend))
+        (; r.declaration, ids, scale=Symbol(r.declaration, ".", r.locals.sigma))
     end
-    (; blocks, read=_rk_value_reader(working, Tuple(b.declaration for b in blocks)))
+    # Read the model's scale port. It can be sampled, fixed or derived from
+    # another parameter, and several walks can use the same observed grid.
+    (; blocks, scales=_rk_value_reader(working, Tuple(b.scale for b in blocks)))
 end
 
 _brm_laplace_public_point!(p, u) = u
 function _brm_laplace_public_point!(p::BRMSparseLaplaceProblem, u)
     frame = p.walk_frame
     isnothing(frame) && return u
-    paths = frame.read(u)
+    scales = frame.scales(u)
     for b in frame.blocks
         field = view(u, b.ids)
-        path = paths[b.declaration]
-        level = sum(field) / (0.001 * length(field))
-        slope = dot(b.slope, view(path, b.rows))
-        for i in length(field):-1:3
-            field[i] = field[i] - 2 * field[i-1] + field[i-2]
-        end
-        field[1], field[2] = level, slope
+        field .= brm_rw2_coordinates(scales[b.scale], field)
     end
     u
 end

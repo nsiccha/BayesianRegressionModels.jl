@@ -263,6 +263,7 @@ export brm_total, brm_total_recover_rng, brm_total_deviations, brm_total_locatio
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
+export brm_rw2_coordinates
 export me, mi, s, t2, ar, dar, rw, cdar, car, gmrf, mo, mo1, hsgp, multigroup, OrderedLogistic, Ordinal,
        OrdinalStructure, Cumulative, StoppingRatio,
        OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,

@@ -2041,25 +2041,30 @@ function _rk_ast_rw_block!(definitions, taken, term, step_rows, step_levels;
     push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior),
         Expr(:(=), n, Expr(:call, :length, steps)))
     if sum_to_zero && order == 2 && !get(options, :field_coordinates, false)
-        basis, roughness, level = (_rk_block_local!(block, key) for key in
-            (:basis, :roughness, :level))
+        basis, transformed, roughness, level, jac_scale = (_rk_block_local!(block, key) for key in
+            (:basis, :transformed, :roughness, :level, :jac_scale))
         # Multiplying both the level and its SD by n retains the original
         # absolute density's 1/n constant. The slope has Lebesgue measure.
+        # Spread the determinant across the Gaussian roughness factors. Scoring
+        # s*r at SD s contributes log|T| when s = exp(-log|T|/(n-2)).
         statements = quote
             $basis[1:$n] .~ Flat.()
-            $roughness = $basis[3:$n]
-            $roughness .~ Normal.(0, 1)
+            $transformed = brm_rw2_transform($sigma, $basis)
+            $jac_scale = exp(-$transformed[$n + 1] / ($n - 2))
+            $roughness = $jac_scale .* $transformed[3:$n]
+            $roughness .~ Normal.(0, $jac_scale)
             $level = $n * $basis[1]
             $level ~ Normal(0, 1.0 * $n)
-            $path = brm_rw2_basis_path($sigma, $basis)
+            $path = brm_rw2_basis_path($sigma, $transformed[1:$n])
             $value = $path[$step_position]
         end
         append!(block.statements, Base.remove_linenums!(statements).args)
         locals = (; sigma, basis)
         doc = @_rk_definition_doc """
             An intrinsic second-order walk. The first coordinate is the standardized
-            mean, the second is the flat physical slope per step, and each remaining
-            coordinate is a standardized second difference. Returns the fitted path
+            mean, the second is the flat physical slope per step, and the remaining
+            coordinates map to standardized second differences through a scale-dependent
+            banded factor. Returns the fitted path
             at each row's step."""
     elseif sum_to_zero
         phi, d = _rk_block_local!(block, order == 2 ? :basis : :phi), _rk_block_local!(block, :d)
