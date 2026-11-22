@@ -225,6 +225,13 @@ end
     end
 end
 
+const RW2_DERIVED_SCALE = @brm begin
+    a ~ Normal(0.0, 1.0)
+    mu ~ 1 + rw(t; order = 2, sum_to_zero = true)
+    sd(:, rw(t)) = exp(a)
+    y ~ Normal(mu, 1.0)
+end
+
 @stestset "RKBRMI: the same law as SBBRMI at transported coordinates" begin
     data = RW2_DATA
     stated = @brm(data, begin
@@ -244,7 +251,8 @@ end
         sd(mu, rw(t)) = 0.3
         y ~ Normal(mu, 1.0)
     end)
-    for brmi in (map(law -> RW_BUILDERS[law](data), RW_LAWS)..., stated, known, known_intrinsic)
+    for brmi in (map(law -> RW_BUILDERS[law](data), RW_LAWS)..., stated, known,
+                 known_intrinsic, RW2_DERIVED_SCALE(data))
         rk = RKBRMI(brmi)
         problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
         sb = SBBRMI(brmi; mod=@__MODULE__)
@@ -426,26 +434,26 @@ end
             @test u[p.population] == φ
         end
     end
-    # The sparse solver must also reconstruct the public field when the walk
-    # scale has no sampling coordinate of its own.
-    for (builder, scale) in ((@brm(begin
-                mu ~ 1 + rw(t; order = 2, sum_to_zero = true)
-                sd(:, rw(t)) = 0.3
-                y ~ Normal(mu, 1.0)
-            end), 0.3), (@brm(begin
-                a ~ Normal(0.0, 1.0)
-                mu ~ 1 + rw(t; order = 2, sum_to_zero = true)
-                sd(:, rw(t)) = exp(a)
-                y ~ Normal(mu, 1.0)
-            end), exp(-0.6)))
-        rk = RKBRMI(builder(data))
-        p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:t,))
-        φ = fill(-0.6, length(p.population))
-        state = BRM._brm_spl_mode!(p, φ)
-        field = state.u[p.integrated] + BRM._brm_spl_draw(p, state, Xoshiro(19))
-        u = vec(brm_laplace_draws(p, reshape(φ, :, 1); rng=Xoshiro(19)).draws)
-        @test BRM._rk_value_reader(rk, (:rw_mu_t,))(u).rw_mu_t ≈ scale .* (A * field) atol=1e-10
-    end
+    # A fixed scale has no sampling coordinate. Its public draw must still
+    # reconstruct the same physical field as the conditional Gaussian draw.
+    fixed = @brm(data, begin
+        mu ~ 1 + rw(t; order = 2, sum_to_zero = true)
+        sd(:, rw(t)) = 0.3
+        y ~ Normal(mu, 1.0)
+    end)
+    rk = RKBRMI(fixed)
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:t,))
+    φ = fill(-0.6, length(p.population))
+    state = BRM._brm_spl_mode!(p, φ)
+    field = state.u[p.integrated] + BRM._brm_spl_draw(p, state, Xoshiro(19))
+    u = vec(brm_laplace_draws(p, reshape(φ, :, 1); rng=Xoshiro(19)).draws)
+    @test BRM._rk_value_reader(rk, (:rw_mu_t,))(u).rw_mu_t ≈ 0.3 .* (A * field) atol=1e-10
+
+    # The sparse design differentiates the block's own scale coordinates.
+    # An arbitrary population-dependent multiplier is supported by the exact
+    # backends above and retains the existing sparse-design diagnostic.
+    @test_throws "scaled by population coordinates other than their own scales" brm_laplace_problem(
+        RKBRMI(RW2_DERIVED_SCALE(data)); ad_backend=NLME_AD, integrate=(:t,))
     # Counts, as R-INLA's binomial `rw2` example: the gradient of the Laplace
     # marginal itself, where the curvature moves with the mode.
     for law in ((order=2, sum_to_zero=true), (order=2, sum_to_zero=false))
