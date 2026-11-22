@@ -90,8 +90,8 @@ as a divergent step, as at the extreme points a diverging warm-up trajectory
 reaches:
 
 - the model's density, gradient or unit Hessians overflow during the mode
-  search, so that no finite Newton step exists (the full model's density there
-  is not finite either); `problem.nonfinite` counts them;
+  search, or the sparse problem cannot factor the final conditional precision
+  as positive definite. `problem.nonfinite` counts these points;
 - a stage of the mode search has not converged after `maxiter` Newton steps
   (default 200), as when a start lies far up an exponential's slope, where
   Newton gains about one unit per step; `problem.unconverged` counts them, and a warning names the point,

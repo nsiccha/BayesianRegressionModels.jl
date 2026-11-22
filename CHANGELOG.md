@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.376
+
+- The sparse `brm_laplace_problem` scores a population point `-Inf` and
+  counts it in `nonfinite` when the final conditional precision cannot be
+  factored as positive definite. This lets a sampler reject the proposal
+  and `brm_laplace_mode` backtrack, including for a sum-to-zero second-order
+  walk whose linear trend loses curvature at an extreme scale.
+
 ## 0.2.375
 
 - Declared vectors accept `z[1:n] .~ restricted.(Normal.(0, 1), 0, Inf)`
