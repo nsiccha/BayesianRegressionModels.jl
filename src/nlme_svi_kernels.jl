@@ -247,11 +247,116 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         end
         return result
     end),
+    structured_offset=:(function _svi_structured_offset(log_scale, loading, epsilon, eta)
+        result = exp.(log_scale) .* epsilon .+ loading * eta
+        return result
+    end),
+    structured_precision=:(function _svi_structured_precision(log_scale, loading, x)
+        scale = exp.(log_scale)
+        y = x ./ scale
+        result = if size(loading, 2) == 0
+            y ./ scale
+        else
+            V = loading ./ scale
+            lower = _svi_lower_cholesky(transpose(V) * V .+ diagm(ones(size(V, 2))))
+            z = transpose(lower) \ (lower \ (transpose(V) * y))
+            (y .- V * z) ./ scale
+        end
+        return result
+    end),
+    structured_gradient=:(function _svi_structured_gradient(log_scale, loading, mean_gradient, difference, epsilon, eta)
+        offset = _svi_structured_offset(log_scale, loading, epsilon, eta)
+        score = difference .+ _svi_structured_precision(log_scale, loading, offset)
+        result = vcat(mean_gradient, score .* exp.(log_scale) .* epsilon, vec(score * transpose(eta)))
+        return result
+    end),
+    # With V = diag(1/s) B, I + W diag(a) W' is the square root of I + VV'.
+    structured_sqrt_basis=:(function _svi_structured_sqrt_basis(V)
+        result = if size(V, 2) == 0
+            (V, zeros(0))
+        else
+            factor = eigen(Symmetric(transpose(V) * V))
+            (V * factor.vectors, 1 ./ (sqrt.(1 .+ max.(factor.values, 0.0)) .+ 1))
+        end
+        return result
+    end),
+    structured_sqrt_action=:(function _svi_structured_sqrt_action(scale, W, a, x, transposed)
+        result = if transposed
+            y = scale .* x
+            y .+ W * (a .* (transpose(W) * y))
+        else
+            scale .* (x .+ W * (a .* (transpose(W) * x)))
+        end
+        return result
+    end),
+    # Shorten the whole proposed move to one old-factor mean standard deviation
+    # and at most one half in log-scale or diagonal-scaled loading displacement.
+    structured_trust=:(function _svi_structured_trust(log_scale, loading, old, proposed)
+        d = length(log_scale)
+        delta = proposed .- old
+        mean_move = delta[1:d]
+        distance = sqrt(max(0.0, dot(mean_move, _svi_structured_precision(log_scale, loading, mean_move))))
+        relative = d == 0 ? 0.0 : maximum(abs.(delta[d+1:2*d]))
+        magnitude = if length(loading) == 0
+            relative
+        else
+            load_move = reshape(delta[2*d+1:end], size(loading))
+            max(relative, maximum(abs.(load_move ./ exp.(log_scale))))
+        end
+        fraction = min(1 / max(1.0, distance), 0.5 / max(0.5, magnitude))
+        result = old .+ fraction .* delta
+        return result
+    end),
+    structured_direction=:(function _svi_structured_direction(log_scale, loading, gradient)
+        result = exp.(2 .* log_scale) .* gradient .+ loading * (transpose(loading) * gradient)
+        return result
+    end),
+    structured_variances=:(function _svi_structured_variances(log_scale, loading)
+        result = exp.(2 .* log_scale) .+ vec(sum(loading .* loading; dims=2))
+        return result
+    end),
+    structured_metric=:(function _svi_structured_metric(log_scale, loading, direction)
+        diagonal = exp.(2 .* log_scale)
+        w = direction ./ diagonal
+        result = if size(loading, 2) == 0
+            dot(direction, w)
+        else
+            gram = diagm(ones(size(loading, 2))) .+ transpose(loading) * (loading ./ diagonal)
+            lower = _svi_lower_cholesky(transpose(gram))
+            z = lower \ (transpose(loading) * w)
+            dot(direction, w) - sum(z .* z)
+        end
+        return result
+    end),
     adam=:(function _svi_adam(x, moment, variance, gradient, beta1, beta2, correction1, correction2, rate)
         next_moment = beta1 .* moment .+ (1 - beta1) .* gradient
         next_variance = beta2 .* variance .+ (1 - beta2) .* gradient .^ 2
         next_x = x .+ rate .* (next_moment ./ correction1) ./ (sqrt.(next_variance ./ correction2) .+ 1e-8)
         result = (next_x, next_moment, next_variance)
+        return result
+    end),
+    structured_adam=:(function _svi_structured_adam(log_scale, loading, x, gradient, moment, variance,
+            count, beta1, beta2, rate, rank_step, clip)
+        d = length(log_scale)
+        scale = exp.(log_scale)
+        basis = _svi_structured_sqrt_basis(loading ./ scale)
+        W = basis[1]
+        a = basis[2]
+        tail_scale = vcat(ones(d), rank_step .* repeat(scale, size(loading, 2)))
+        g = vcat(_svi_structured_sqrt_action(scale, W, a, gradient[1:d], true),
+            gradient[d+1:end] .* tail_scale)
+        bounded = if count > 0 && isfinite(clip)
+            _svi_clip_gradient(g, variance, 1 - beta2^count, clip)
+        else
+            g
+        end
+        next_count = count + 1
+        update = _svi_adam(zero(x), moment, variance, bounded,
+            beta1, beta2, 1 - beta1^next_count, 1 - beta2^next_count, rate)
+        step = update[1]
+        move = vcat(_svi_structured_sqrt_action(scale, W, a, step[1:d], false),
+            step[d+1:end] .* tail_scale)
+        result = (x .+ move, update[2], update[3], next_count, any(bounded .!= g))
         return result
     end),
 )

@@ -92,6 +92,63 @@ const BRM = BayesianRegressionModels
         :coupling_step => (B, ε, [0.4], 1.4, 0.0, 0.25),
         :adam => (μ, [0.2, -0.1], [0.3, 0.9], ε, 0.9, 0.999, 0.19, 0.001999, 0.1),
     ]
+    for loading in (zeros(2, 0), zeros(2, 2), B, [0.4 -0.3; 0.2 0.7])
+        eta = fill(0.25, size(loading, 2))
+        covariance = Diagonal(exp.(2 .* ρ)) + loading * loading'
+        offset = exp.(ρ) .* ε + loading * eta
+        score = μ + covariance \ offset
+        x = vcat(μ, ρ, vec(loading))
+        gradient = vcat(ε, score .* exp.(ρ) .* ε, vec(score * eta'))
+        @test prepare(kernels.structured_offset)(ρ, loading, ε, eta) ≈ offset
+        @test prepare(kernels.structured_precision)(ρ, loading, μ) ≈ covariance \ μ
+        @test prepare(kernels.structured_gradient)(ρ, loading, ε, μ, ε, eta) ≈ gradient
+        @test prepare(kernels.structured_direction)(ρ, loading, ε) ≈ covariance * ε
+        @test prepare(kernels.structured_variances)(ρ, loading) ≈ diag(covariance)
+        @test prepare(kernels.structured_metric)(ρ, loading, ε) ≈ dot(ε, covariance \ ε)
+        step = 4 .* ones(length(x))
+        fraction = min(1, inv(sqrt(dot(step[1:2], covariance \ step[1:2]))), 0.5/4)
+        size(loading, 2) > 0 && (fraction = min(fraction, 0.5 * minimum(exp.(ρ)) / 4))
+        @test prepare(kernels.structured_trust)(ρ, loading, x, x + step) ≈ x + fraction * step
+        # An independent dense preconditioner for the complete Adam move.
+        # Its mean block is a square root of the covariance, in native order.
+        scale = exp.(ρ)
+        V = loading ./ scale
+        transform = Matrix(Diagonal(vcat(ones(4), 0.7 .* repeat(scale, length(eta)))))
+        transform[1:2, 1:2] .= Diagonal(scale) * sqrt(Symmetric(I + V * V'))
+        for count in (0, 3)
+            m, v = count == 0 ? (zero(x), zero(x)) : (copy(x), fill(0.2, length(x)))
+            g = transform' * (100 .* gradient)
+            bound = count == 0 ? g : clamp.(g, -sqrt.(v ./ (1 - 0.999^count)), sqrt.(v ./ (1 - 0.999^count)))
+            next_m = 0.9 .* m + 0.1 .* bound
+            next_v = 0.999 .* v + 0.001 .* bound.^2
+            t = count + 1
+            step = 0.2 .* (next_m ./ (1 - 0.9^t)) ./ (sqrt.(next_v ./ (1 - 0.999^t)) .+ 1e-8)
+            actual = prepare(kernels.structured_adam)(ρ, loading, x, 100 .* gradient, m, v,
+                count, 0.9, 0.999, 0.2, 0.7, 1.0)
+            @test actual[1] ≈ x + transform * step
+            @test actual[2] ≈ next_m
+            @test actual[3] ≈ next_v
+            @test actual[4:5] == (t, bound != g)
+        end
+        append!(cases, [
+            :structured_offset => (ρ, loading, ε, eta),
+            :structured_precision => (ρ, loading, μ),
+            :structured_gradient => (ρ, loading, ε, μ, ε, eta),
+            :structured_trust => (ρ, loading, x, x),
+            :structured_trust => (ρ, loading, x, x + step),
+            :structured_direction => (ρ, loading, ε),
+            :structured_variances => (ρ, loading),
+            :structured_metric => (ρ, loading, ε),
+            :structured_adam => (ρ, loading, x, gradient, zero(x), zero(x), 0, 0.9, 0.999, 0.2, 0.7, 10.0),
+            :structured_adam => (ρ, loading, x, 100 .* gradient, x, fill(0.2, length(x)), 3, 0.9, 0.999, 0.2, 0.7, 1.0),
+        ])
+    end
+    # An initially zero loading has a unique zero basis. With other loadings,
+    # compare the invariant Adam move above because eigenvector signs may differ.
+    push!(cases, :structured_trust => (Float64[], zeros(0, 0), Float64[], Float64[]),
+        :structured_sqrt_basis => (zeros(2, 1),),
+        :structured_sqrt_action => (exp.(ρ), B, [0.2], ε, true),
+        :structured_sqrt_action => (exp.(ρ), B, [0.2], ε, false))
     @test Set(first.(cases)) == Set(keys(kernels))
     run_jax = brm_jax_require_python()
     mktempdir() do dir
@@ -115,7 +172,8 @@ const BRM = BayesianRegressionModels
                 native = getproperty(BRM, first(signature.args))
                 expected = native(args...)
                 actual = prepare(kernels[name])(args...)
-                if name in (:global_entropy, :global_logdet, :unit_covariance, :dense_logsd)
+                if name in (:global_entropy, :global_logdet, :unit_covariance, :dense_logsd,
+                        :structured_precision, :structured_gradient, :structured_metric, :structured_trust, :structured_adam)
                     # Native Julia and RK may use different Cholesky implementations.
                     @test all(isapprox.(actual, expected; rtol=1e-12, atol=1e-12))
                 else

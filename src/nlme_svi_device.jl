@@ -29,6 +29,22 @@ variate uses the unit gradient evaluated at the global and unit means.
 `coupling_row_update` returns the scale from previous visits, the updated
 mean square and the visit count. Use the factor from before the unit step.
 
+For a structured station factor with covariance `Diagonal(exp.(2ρ)) + B*B'`,
+split its unit noise into the first `d` entries (`epsilon`) and the remaining
+rank entries (`eta`). Use `structured_offset(ρ, B, epsilon, eta)` for the
+antithetic offset. Pass the mean and half-difference of the two local target
+gradients to `structured_gradient(ρ, B, mean_gradient, difference, epsilon, eta)`.
+Pack its parameters as `x = vcat(mean, ρ, vec(B))`.
+`structured_adam(ρ, B, x, gradient, moment, variance, count, beta1, beta2,
+rate, rank_step, clip)` returns the proposed parameters, next moments, next
+visit count and a Boolean clip indicator. Use the unit's own Adam state, the phase controls
+`structured_step` and `structured_rank`, and `problem.global_clip`. Apply `structured_trust(ρ, B, x, proposed)`
+before unpacking. For structured coupling, pass the selected rows of `ρ`
+and `B` to `structured_direction`, `structured_variances` and
+`structured_metric`. Their direction and squared-distance operands use
+the same row ordering. The structured unit's entropy contribution is
+`global_logdet(ρ, B) / 2`.
+
 For the ELBO, `unit_entropy(root)` is the unit's entropy contribution and
 `global_logdet(log_scale, loading) / 2` is the globals' contribution, both
 up to constants. Polishing initializes a dense unit's covariance average with

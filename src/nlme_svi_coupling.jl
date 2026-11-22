@@ -306,7 +306,7 @@ _brm_svi_unit_covariance_mul(q, i, x) = _brm_svi_unit_covariance_mul(q.U[i], x)
 _brm_svi_unit_covariance_mul(U::AbstractMatrix, x) = _svi_coupling_direction(U, x)
 function _brm_svi_unit_covariance_mul(U::_BRMSVIUnitRoot, x)
     f = U.factor
-    exp.(2 .* f.ρ) .* x .+ f.Β * (f.Β' * x)
+    _svi_structured_direction(f.ρ, f.Β, x)
 end
 
 # The natural-gradient direction of the coupled rows R: (Λ_RR)⁻¹ x_R, the inverse
@@ -320,8 +320,7 @@ _brm_svi_coupling_direction(Λ::AbstractMatrix, U, rows, x) =
     _svi_coupling_direction(cholesky(Symmetric(Λ[rows, rows])).L, x)
 function _brm_svi_coupling_direction(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows, x)
     f = U.factor
-    B = f.Β[rows, :]
-    exp.(2 .* f.ρ[rows]) .* x .+ B * (B' * x)
+    _svi_structured_direction(f.ρ[rows], f.Β[rows, :], x)
 end
 
 # The diagonal of the coupled rows' direction operator, (Λ_RR)⁻¹: their
@@ -334,7 +333,7 @@ end
 _brm_svi_coupling_variances(Λ::AbstractMatrix, U, rows) =
     _svi_coupling_variances(cholesky(Symmetric(Λ[rows, rows])).L)
 _brm_svi_coupling_variances(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows) =
-    (f = U.factor; exp.(2 .* f.ρ[rows]) .+ vec(sum(abs2, view(f.Β, rows, :); dims=2)))
+    _svi_structured_variances(U.factor.ρ[rows], U.factor.Β[rows, :])
 
 # y' A y for a step y of the coupled rows, A the inverse of their direction
 # operator: Λ_RR, or for a structured unit Σ_RR⁻¹ (by Woodbury's identity).
@@ -342,11 +341,7 @@ _brm_svi_coupling_norm2(q, i, rows, y) = _brm_svi_coupling_norm2(q.Λ[i], q.U[i]
 _brm_svi_coupling_norm2(Λ::AbstractMatrix, U, rows, y) = _svi_coupling_metric(Symmetric(Λ[rows, rows]), y)
 function _brm_svi_coupling_norm2(::_BRMSVIUnitPrecision, U::_BRMSVIUnitRoot, rows, y)
     f = U.factor
-    d = exp.(2 .* f.ρ[rows])
-    B = f.Β[rows, :]
-    w = y ./ d
-    C = cholesky(Symmetric(I + B' * (B ./ d)))
-    dot(y, w) - sum(abs2, C.L \ (B' * w))
+    _svi_structured_metric(f.ρ[rows], f.Β[rows, :], y)
 end
 
 # Each coupled row's step scale: one over the mean square of its updates so far in
@@ -418,7 +413,7 @@ end
 _brm_svi_unit_variances(U::AbstractMatrix) =
     isempty(U) ? Float64[] : _svi_coupling_variances(U)
 _brm_svi_unit_variances(U::_BRMSVIUnitRoot) =
-    exp.(2 .* U.factor.ρ) .+ vec(sum(abs2, U.factor.Β; dims=2))
+    _svi_structured_variances(U.factor.ρ, U.factor.Β)
 
 # Plain data for a snapshot.
 _brm_svi_coupling_plain(q) = (c = _brm_svi_coupling(q); c === nothing ? nothing :

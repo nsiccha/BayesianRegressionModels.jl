@@ -471,14 +471,15 @@ function _brm_svi_sqrt_axes(h)
     h.V * E.vectors, sqrt.(1 .+ max.(E.values, 0))
 end
 function _brm_svi_global_sqrt(h)
-    W, root = _brm_svi_sqrt_axes(h)
-    (; s=h.s, W, a=1 ./ (root .+ 1))
+    if h isa _BRMSVIQRGeometry
+        W, root = _brm_svi_sqrt_axes(h)
+        return (; s=h.s, W, a=1 ./ (root .+ 1))
+    end
+    W, a = _svi_structured_sqrt_basis(h.V)
+    (; s=h.s, W, a)
 end
-_brm_svi_global_sqrt_mul(c, x) = c.s .* (x + c.W * (c.a .* (c.W' * x)))
-_brm_svi_global_sqrt_tmul(c, x) = begin
-    y = c.s .* x
-    y + c.W * (c.a .* (c.W' * y))
-end
+_brm_svi_global_sqrt_mul(c, x) = _svi_structured_sqrt_action(c.s, c.W, c.a, x, false)
+_brm_svi_global_sqrt_tmul(c, x) = _svi_structured_sqrt_action(c.s, c.W, c.a, x, true)
 
 # A draw of the globals from its two standard normal parts.
 _brm_svi_draw_global(q, ε, η) = _svi_global_draw(q.μ, q.ρ, q.Β, ε, η)
@@ -576,17 +577,13 @@ end
 # factor (`_brm_svi_polish_global_step!`) and steps a structured unit factor
 # (`_brm_svi_lowrank_step!`).
 function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
-    D = length(q.μ)
-    C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
-    scale = vcat(ones(D), rank .* vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
-    grad = copy(grad)
-    grad[1:D] .= _brm_svi_global_sqrt_tmul(C, view(grad, 1:D))
-    rest = D+1:length(x)
-    grad[rest] .*= scale
-    step = zeros(length(x))
-    _brm_svi_step!(opt, step, grad, lr; clip)
-    x[1:D] .+= _brm_svi_global_sqrt_mul(C, view(step, 1:D))
-    x[rest] .+= scale .* view(step, rest)
+    proposed, m, v, t, clipped = _svi_structured_adam(q.ρ, q.Β, x, grad, opt.m, opt.v,
+        opt.t, opt.β1, opt.β2, lr, rank, clip)
+    x .= proposed
+    opt.m .= m
+    opt.v .= v
+    opt.t = t
+    opt.clipped += clipped
     x
 end
 

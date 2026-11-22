@@ -88,16 +88,12 @@ _brm_svi_unit_noise(rng, U::_BRMSVIUnitRoot) =
 
 function _brm_svi_unit_offset(U::_BRMSVIUnitRoot, ε)
     f, d = U.factor, size(U, 1)
-    exp.(f.ρ) .* view(ε, 1:d) + f.Β * view(ε, d+1:length(ε))
+    _svi_structured_offset(f.ρ, f.Β, view(ε, 1:d), view(ε, d+1:length(ε)))
 end
 
 function _brm_svi_lowrank_gradient(f, gz, gd, ε)
     d = length(f.ρ)
-    e, η = view(ε, 1:d), view(ε, d+1:length(ε))
-    h = _brm_svi_global_geometry(f)
-    δ = h.s .* e + f.Β * η
-    score = gd + _brm_svi_global_precision(h, δ)
-    vcat(gz, score .* h.s .* e, vec(score * η'))
+    _svi_structured_gradient(f.ρ, f.Β, gz, gd, view(ε, 1:d), view(ε, d+1:length(ε)))
 end
 
 function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β; rank=1.0)
@@ -108,18 +104,7 @@ function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β; rank=1.0)
     x = copy(old)
     # A unit's own Adam steps only when the unit is drawn, so its bound needs no √w.
     _brm_svi_whitened_global_step!(opt, q, x, gradient, β; clip=_BRM_SVI_GLOBAL_CLIP, rank)
-    Δ = x - old
-    d = length(mean)
-    h = _brm_svi_global_geometry(f)
-    # Bound mean displacement in old posterior sds and factor/scale changes
-    # relative to the old diagonal. One scalar shortens the whole Adam step.
-    δμ, δρ = view(Δ, 1:d), view(Δ, d+1:2d)
-    δΒ = reshape(view(Δ, 2d+1:length(Δ)), size(f.Β))
-    distance = sqrt(max(0.0, dot(δμ, _brm_svi_global_precision(h, δμ))))
-    relative = max(maximum(abs, δρ; init=0.0),
-        maximum(abs, δΒ ./ h.s; init=0.0))
-    fraction = min(1.0, 1 / distance, 0.5 / relative)
-    x .= old .+ fraction .* Δ
+    x .= _svi_structured_trust(f.ρ, f.Β, old, x)
     all(isfinite, x) || error("brm_svi_fit: nonfinite low-rank unit parameters")
     _brm_svi_set_global!(q, x)
     nothing
