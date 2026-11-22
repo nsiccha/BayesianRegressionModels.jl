@@ -28,14 +28,14 @@
     brm_laplace_integration(target; point = nothing, design = :auto,
         draws = 1000, conditional = 0, rng = Random.default_rng(),
         max_dimension = 10, step = 0.75, max_log_drop = 6.0, f0 = 1.1,
-        marginal_points = 401, curvature = nothing) -> NamedTuple
+        marginal_points = 401, curvature = nothing, latent_marginals = :none) -> NamedTuple
 
 Deterministic integration of the embedded-Laplace marginal of `target` (a
 problem from [`brm_laplace_problem`](@ref)) over its population coordinates,
 for models with few of them: R-INLA's integration step. It evaluates the
 Laplace marginal at the points of a design around its mode, weights them, and
 returns the weighted points, each population coordinate's marginal density
-and packed draws.
+and packed draws. Set `draws=0` to skip sampling.
 
 - `point`: the marginal's mode over the population coordinates (in
   `target.names` order). By default [`brm_laplace_mode`](@ref) finds it (needs
@@ -60,7 +60,7 @@ Chopin's (2009, §6.5) Δ_k, which make the rule exact for the first two
 moments of a Gaussian.
 
 Returns `(; draws, point, design, z, points, log_density, weights, ess, mean,
-sd, marginals, log_evidence, standardization, diagnostics)`:
+sd, marginals, log_evidence, standardization, diagnostics, latent_marginals)`:
 - `draws`: `draws` packed draws (coordinates × draws, the shape of
   [`brm_laplace_draws`](@ref)). The population coordinates are design points
   resampled by weight, as R-INLA's posterior sampler does. The integrated
@@ -79,6 +79,27 @@ sd, marginals, log_evidence, standardization, diagnostics)`:
   their mean so that its mean and variance are the design's `mean` and `sd`
   (on a grid each kernel spans its cell; on a CCD it carries half the
   variance).
+- `latent_marginals`: `nothing` by default. With `:gaussian` or
+  `:mean_corrected`, `names`, `mean`, `sd` and `distributions` each have one
+  entry per integrated coordinate. Each distribution is a Normal mixture and
+  supports `pdf`, `cdf` and `quantile`. Column `k` of `conditional_mean`,
+  `conditional_sd` and `packed` goes with `points[:, point_indices[k]]` and
+  `weights[k]` in the latent result. `packed` holds the model's packed
+  coordinates at that point, with the integrated coordinates at their
+  conditional centres, in the shape of `draws`: `rk_restore_draws` and
+  `rk_draw_values` read each point's scales and formula values from it.
+  Transform both conditional parameters at each point before mixing when the
+  physical effect depends on a population scale.
+  Integrated sum-to-zero second-order walks report the standardized field
+  `<declaration>.phi.<step index>` in fitted step order.
+- `:mean_corrected` shifts the conditional centre by the derivative of the
+  Laplace log normalizer under a linear tilt. For exact conditional precision
+  H this gives H⁻¹ (D³ log p : H⁻¹) / 2. Gaussian conditionals have zero
+  shift. Joint Gaussian draws use the selected centres. Positive `conditional`
+  counts use the existing importance-resampled draws targeting the conditional.
+- Matrix-free components above the exact size limit estimate variances with
+  the solver's fixed probes applied through its covariance square root. The
+  mean correction differentiates the solver's fixed-probe log determinant.
 - `log_evidence`: on a grid, the log of the marginal's integral (the log
   marginal likelihood under the Laplace approximation); `nothing` for a CCD,
   whose weights are relative.
@@ -92,7 +113,9 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
         point=nothing, design::Symbol=:auto, draws::Integer=1000, conditional::Integer=0,
         rng=Random.default_rng(), max_dimension::Integer=10, step::Real=0.75,
         max_log_drop::Real=6.0, f0::Real=1.1, marginal_points::Integer=401,
-        curvature=nothing)
+        curvature=nothing, latent_marginals::Symbol=:none)
+    latent_marginals in (:none, :gaussian, :mean_corrected) || throw(ArgumentError(
+        "latent_marginals must be :none, :gaussian or :mean_corrected"))
     d = length(p.population)
     d >= 1 || throw(ArgumentError(
         "brm_laplace_integration: the target has no population coordinates to integrate"))
@@ -129,16 +152,21 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
     isfinite(v0) || _brm_nlme_error(
         "brm_laplace_integration: the Laplace marginal is not finite at the point")
     calls = Ref(1)
-    # each design point's mode search, kept for the draws there (`_brm_lint_draws`)
+    # Record each retained point while its conditional factor is still live.
     states = Dict{Vector{Float64},Any}()
-    draws > 0 && (states[θ(zeros(d))] = _brm_lint_draw_state(p))
-    # and started from the centre's modes (`_brm_lint_logdensity`)
+    summaries = Dict{Vector{Float64},NTuple{3,Vector{Float64}}}()
+    function record(φ)
+        draws > 0 && (states[φ] = _brm_lint_draw_state(p))
+        latent_marginals === :none || (summaries[φ] = _brm_lint_conditional(p, latent_marginals))
+        nothing
+    end
+    record(θ(zeros(d)))
     start = _brm_lint_start(p)
     function value(z)
         calls[] += 1
         φ = θ(z)
         v = _brm_lint_logdensity(p, φ, start)
-        draws > 0 && (states[φ] = _brm_lint_draw_state(p))
+        isfinite(v) && (design === :ccd || v0 - v <= max_log_drop) && record(φ)
         isfinite(v) ? Float64(v) : -Inf
     end
     evaluated = design === :grid ?
@@ -161,7 +189,10 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
         nothing
     marginals = _brm_lint_marginals(p, design, Z, v, w, Θ, μ, σ, θstar, A,
         Float64(step), Int(marginal_points))
-    packed, newton_steps = _brm_lint_draws(p, Θ, w, Int(draws), rng, conditional, states)
+    latent = latent_marginals === :none ? nothing :
+        _brm_lint_latent_marginals(p, Θ, w, summaries, latent_marginals)
+    centers = latent_marginals === :mean_corrected && conditional == 0 ? summaries : nothing
+    packed, newton_steps = _brm_lint_draws(p, Θ, w, Int(draws), rng, conditional, states, centers)
     isempty(evaluated.truncated) || @warn("brm_laplace_integration: the grid walk along " *
         "standardized axes $(evaluated.truncated) stopped at its step limit before the log " *
         "marginal dropped by max_log_drop; the marginal may be improper or very flat there")
@@ -169,7 +200,7 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
         max_gain=gain, truncated=evaluated.truncated, newton_steps)
     (; draws=packed, point=θstar, design, z=Z, points=Θ, log_density=v, weights=w,
         ess=1 / sum(abs2, w), mean=μ, sd=σ, marginals, log_evidence,
-        standardization=(; hessian=H, transform=A), diagnostics)
+        standardization=(; hessian=H, transform=A), diagnostics, latent_marginals=latent)
 end
 
 _brm_lint_logsumexp(x) = isempty(x) ? -Inf : (m = maximum(x); m + log(sum(exp.(x .- m))))
@@ -357,24 +388,25 @@ end
 # so that search runs once per point. The columns are then shuffled. Either
 # way the draws are the same numbers: a point's mode search does not depend on
 # earlier ones (`_brm_spl_mode!`).
-function _brm_lint_draws(p, Θ, w, n, rng, conditional, states=Dict{Vector{Float64},Any}())
+function _brm_lint_draws(p, Θ, w, n, rng, conditional, states=Dict{Vector{Float64},Any}(), centers=nothing)
     n == 0 && return Matrix{Float64}(undef, length(p.u), 0), Int[]
     c = cumsum(w)
     picks = sort!([min(searchsortedfirst(c, rand(rng) * c[end]), length(w)) for _ in 1:n])
-    out = _brm_lint_draws_at(p, Θ, picks, rng, conditional, states)
+    out = _brm_lint_draws_at(p, Θ, picks, rng, conditional, states, centers)
     order = Random.randperm(rng, n)
     out.draws[:, order], out.diagnostics.newton_steps[order]
 end
 
-_brm_lint_draws_at(p, Θ, picks, rng, conditional, states) =
+_brm_lint_draws_at(p, Θ, picks, rng, conditional, states, centers) =
     brm_laplace_draws(p, Θ[:, picks]; rng, conditional)
-function _brm_lint_draws_at(p::BRMSparseLaplaceProblem, Θ, picks, rng, conditional, states)
+function _brm_lint_draws_at(p::BRMSparseLaplaceProblem, Θ, picks, rng, conditional, states, centers)
     P = Θ[:, picks]
     function state_at(k)
         state = get(states, P[:, k], nothing)
         state === nothing ? _brm_spl_mode!(p, view(P, :, k)) : state
     end
-    _brm_spl_draws(p, length(picks), state_at; rng, conditional)
+    mean_at = centers === nothing ? nothing : k -> first(centers[P[:, k]])
+    _brm_spl_draws(p, length(picks), state_at; rng, conditional, mean_at)
 end
 
 # The Laplace marginal at a design point. A sparse problem's mode search there
@@ -396,3 +428,84 @@ _brm_lint_logdensity(p::BRMSparseLaplaceProblem, φ, start) =
 _brm_lint_draw_state(p) = nothing
 _brm_lint_draw_state(p::BRMSparseLaplaceProblem) =
     p.last === nothing ? nothing : _brm_spl_draw_state(p, p.last.state)
+
+# Conditional variances on the operator's large components are estimated
+# with its fixed white probes. Squaring the covariance-root actions estimates
+# diag(H⁻¹), including when the logdet uses a signed control variate.
+function _brm_lint_variance(p, state, selection)
+    F = state.F
+    if F isa _BRMOperatorFactor
+        variances = copy(_brm_operator_logdet!(F).sensitivity[p.diagonal])
+        for (part, ids) in zip(F.parts, F.components)
+            part.factor === nothing || continue
+            v = view(variances, ids)
+            fill!(v, 0.0)
+            root = similar(v)
+            for probe in eachcol(part.probes)
+                _brm_operator_root!(root, F, part, probe)
+                v .+= abs2.(root)
+            end
+            v ./= size(part.probes, 2)
+        end
+        return variances
+    end
+    selection === nothing || return selection[p.diagonal]
+    if F isa _BRMAugmentedFactor
+        return diag(_brm_spl_selected(F))[1:length(p.integrated)]
+    end
+    variance = _brm_selinv_diag(F)
+    if state.W !== nothing
+        X = state.W.X
+        Y = state.W.G \ X'
+        for j in axes(X, 1)
+            variance[j] -= dot(view(X, j, :), view(Y, :, j))
+        end
+    end
+    variance
+end
+
+_brm_lint_conditional(p::_BRMSampledLaplaceProblem, method) = (Float64[], Float64[], copy(p.u))
+function _brm_lint_conditional(p::BRMSparseLaplaceProblem, method)
+    state = p.last.state
+    selection = method === :mean_corrected ? _brm_spl_conditional_selection(p, state) : nothing
+    mu = copy(state.z)
+    if method === :mean_corrected
+        shift = _brm_spl_mean_shift(p, state, selection, Returns(true))
+        shift.bad === nothing || _brm_nlme_error("latent mean correction failed at " * shift.bad)
+        mu .+= shift.v
+    end
+    variance = _brm_lint_variance(p, state, selection)
+    all(v -> isfinite(v) && v > 0, variance) || _brm_nlme_error(
+        "brm_laplace_integration: nonpositive or nonfinite conditional variance")
+    # The point as every reader of a fit takes it, at the conditional centre.
+    packed = copy(state.u)
+    packed[p.integrated] .= mu
+    mu, sqrt.(variance), _brm_laplace_public_point!(p, packed)
+end
+
+function _brm_lint_latent_marginals(p, points, w, summaries, method)
+    point_indices = findall(>(0), w)
+    weights = w[point_indices]
+    mixing = Categorical(weights)
+    n = length(p.integrated)
+    conditional_mean = zeros(n, length(weights))
+    conditional_sd = similar(conditional_mean)
+    packed = zeros(length(p.u), length(weights))
+    for (k, j) in enumerate(point_indices)
+        mu, sd, u = summaries[points[:, j]]
+        conditional_mean[:, k] .= mu
+        conditional_sd[:, k] .= sd
+        packed[:, k] .= u
+    end
+    names = _rk_layout_coordinate_names(p.backend)
+    if p isa BRMSparseLaplaceProblem && p.walk_frame !== nothing
+        names = copy(names)
+        for block in p.walk_frame.blocks, (j, i) in enumerate(block.ids)
+            names[i] = Symbol(block.declaration, ".phi.", j)
+        end
+    end
+    distributions = [MixtureModel(Normal.(view(conditional_mean, i, :),
+        view(conditional_sd, i, :)), mixing) for i in 1:n]
+    (; method, names=names[p.integrated], point_indices, weights, conditional_mean, conditional_sd,
+        packed, distributions, mean=mean.(distributions), sd=std.(distributions))
+end

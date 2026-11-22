@@ -85,6 +85,14 @@ end
         ve, ge = LogDensityProblems.logdensity_and_gradient(exact, x)
         @test v ≈ ve atol=3e-7
         @test g ≈ ge rtol=3e-6 atol=3e-6
+        # The same complete probes recover the physical conditional variances
+        # and the tilt derivative, even with the numerical preconditioner.
+        for method in (:gaussian, :mean_corrected)
+            mu, sd = BRM._brm_lint_conditional(p, method)
+            exact_mu, exact_sd = BRM._brm_lint_conditional(exact, method)
+            @test sd ≈ exact_sd rtol=3e-6 atol=1e-7
+            @test mu ≈ exact_mu rtol=3e-6 atol=1e-7
+        end
         default = brm_laplace_problem(rk; integrate=(:a,:b), ad_backend=NLME_AD)
         @test default.algebra === nothing
         auto = brm_laplace_problem(rk; integrate=(:a,:b), ad_backend=NLME_AD,

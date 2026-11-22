@@ -2057,24 +2057,7 @@ end
 # only inactive terms read. The value stays the whole problem's. `prior =
 # false` leaves the population prior out of both.
 #
-# The mode search accepts only finite first and second derivatives, but the
-# gradient also needs the likelihood's third derivatives and the population
-# pullbacks, which can still leave Float64's range where those do not. `bad`
-# names the first such term in evaluation order; a nonfinite gradient at a
-# finite value is then counted and reported (`_brm_spl_nonfinite_gradient!`)
-# and returned unchanged.
-function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
-        active=nothing, prior::Bool=true)
-    bad = nothing
-    n = length(p.integrated)
-    nterms = length(p.family)
-    fc = zeros(length(p.components))
-    rows = Vector{_BRMLapRow}(undef, nterms)
-    crows = (zeros(length(p.tz)), zeros(length(p.tz)))
-    rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
-        derivatives=false, third=true, rows, crows, uA=state.uA)
-    value = sum(p.constant) + sum(fc) + rest + n / 2 * log(2π) -
-        _brm_spl_logdet(p, state.F, state.W) / 2
+function _brm_spl_conditional_selection(p, state)
     S = _brm_spl_selected_precision(p, state.F)
     if state.W !== nothing
         # h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ on the pattern.
@@ -2084,9 +2067,23 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             S[k] -= dot(view(Y, prow[k], :), view(state.W.X, j, :))
         end
     end
+    S
+end
+
+# With an exact factor v = H⁻¹ (D³ℓ : H⁻¹) / 2. This is both the leading
+# conditional mean shift and the implicit-mode term of the marginal gradient.
+# For an operator factor the latter differentiates its fixed-probe logdet.
+function _brm_spl_mean_shift(p, state, S, on)
+    bad = nothing
+    n = length(p.integrated)
+    nterms = length(p.family)
+    fc = zeros(length(p.components))
+    rows = Vector{_BRMLapRow}(undef, nterms)
+    crows = (zeros(length(p.tz)), zeros(length(p.tz)))
+    rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
+        derivatives=false, third=true, rows, crows, uA=state.uA)
     s = zeros(n)
     taus = zeros(2, nterms)
-    on(t) = active === nothing || active[t]
     @inbounds for t in 1:nterms
         (p.term_component[t] == 0 || !on(t)) && continue
         r = rows[t]
@@ -2150,6 +2147,22 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     v = _brm_spl_solve(state.F, state.W, s)
     bad === nothing && !all(isfinite, v) &&
         (bad = "the solve with the conditional precision at the modes")
+    (; rows, crows, taus, gcell, u, v, bad, joint=sum(p.constant) + sum(fc) + rest)
+end
+
+# The mode search accepts only finite first and second derivatives, but the
+# gradient also needs the likelihood's third derivatives and the population
+# pullbacks, which can still leave Float64's range where those do not. `bad`
+# names the first such term in evaluation order; a nonfinite gradient at a
+# finite value is then counted and reported (`_brm_spl_nonfinite_gradient!`)
+# and returned unchanged.
+function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
+        active=nothing, prior::Bool=true)
+    on(t) = active === nothing || active[t]
+    S = _brm_spl_conditional_selection(p, state)
+    (; rows, crows, taus, gcell, u, v, bad, joint) = _brm_spl_mean_shift(p, state, S, on)
+    nterms = length(p.family)
+    value = joint + length(v) / 2 * log(2π) - _brm_spl_logdet(p, state.F, state.W) / 2
     _brm_spl_sum_implicit!(gcell, p, state, v, on)
     bad === nothing && !all(isfinite, gcell) &&
         (bad = "the curvature-vector products of the sum factors of " * _brm_spl_sum_names(p))
@@ -2316,7 +2329,7 @@ end
 # design points from the searches the design already ran
 # (`_brm_spl_draw_state`).
 function _brm_spl_draws(p::BRMSparseLaplaceProblem, m::Integer, state_at;
-        rng=Random.default_rng(), conditional::Integer=0)
+        rng=Random.default_rng(), conditional::Integer=0, mean_at=nothing)
     conditional >= 0 || throw(ArgumentError(
         "brm_laplace_draws: conditional = $conditional proposals; pass 0 for " *
         "Laplace draws or a positive count for importance resampling"))
@@ -2332,6 +2345,7 @@ function _brm_spl_draws(p::BRMSparseLaplaceProblem, m::Integer, state_at;
         newton_steps[k] = state.iterations
         draws[:, k] .= state.u
         if conditional == 0
+            mean_at === nothing || (draws[p.integrated, k] .= mean_at(k))
             draws[p.integrated, k] .+= _brm_spl_draw(p, state, rng)
             continue
         end
