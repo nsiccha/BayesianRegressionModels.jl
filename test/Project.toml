@@ -464,4 +464,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.347 / RKPPL 0.1.244: `indexed_value` reads one row of a plate over
 # selected packed coordinates, which SVI uses for a field state's conditional.
 # RKPPL 0.1.249 keeps shared data whole and identifies each joint cell latent’s packed block.
-rev = "a4d3e204b34e8c1ca800f09c8fa93e2716f55f76"
+# RKPPL 0.1.252 emits a joint cell's geometry and constrained rows in JAX.
+rev = "c22de37b46fea7c7a713d8e89229694f02687952"
