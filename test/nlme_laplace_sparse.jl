@@ -200,6 +200,15 @@ end
         @test [row.g1, row.g2] ≈ [g1, g2]
         @test [row.h11, row.h12, row.h22] ≈ [-k * ratio, g1, h22]
         @test [row.t111, row.t112, row.t122, row.t222] ≈ [k * ratio, -k * ratio, g1, t222]
+        # A mode search over effects on the mean reads the law without its
+        # terms in b alone, with the same derivatives in a; a value alone
+        # carries no derivative.
+        search = BRM._brm_lap_row(BRM._BRM_LAP_GAMMA, y, 1.0, a, b, false, false)
+        @test search.v ≈ row.v + BRM.loggamma(k) + log(y)
+        @test [search.g1, search.h11] ≈ [row.g1, row.h11]
+        @test BRM._brm_lap_row(BRM._BRM_LAP_GAMMA, y, 1.0, a, b, false, false, true).v ≈ search.v
+        alone = BRM._brm_lap_row(BRM._BRM_LAP_GAMMA, y, 1.0, a, b, true, true, true)
+        @test alone.v == row.v && alone.g1 == 0 && alone.h11 == 0
     end
     for k in (0.7, 1.0, 2.0), y in (-1.0, 0.0, Inf)
         @test BRM._brm_lap_gamma(0.0, log(k), y) == logpdf(Gamma(k, 1 / k), y)
@@ -399,12 +408,19 @@ end
         @test all(p.transpose[k] in nzrange(p.pattern, rows[k]) && rows[p.transpose[k]] == j
             for j in 1:m for k in nzrange(p.pattern, j))
 
-        # One lookup per pair of a term's effects fills both triangles exactly
-        # as a lookup per ordered pair does.
+        # One position per pair of a term's effects fills both triangles
+        # exactly as a lookup per ordered pair does, with the positions kept
+        # and with each searched for.
         z = 0.3 .* randn(rng, m)
         fc = zeros(nc); g = zeros(m); h = BRM._brm_spl_precision(p)
+        dense = spl_dense_curvature(p, pop, z)
+        @test !isempty(p.pair)
         BRM._brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
-        @test Matrix(h) == spl_dense_curvature(p, pop, z)
+        @test Matrix(h) == dense
+        empty!(p.pair); empty!(p.pairptr)
+        BRM._brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
+        @test Matrix(h) == dense
+        BRM._brm_spl_pairs!(p)
 
         # A step whose full Newton step is refused returns the accepted
         # point's own values and derivatives.

@@ -562,7 +562,7 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
                 p.moving[t] && (bb += c2[k] * zk)
             end
             total += _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, false,
-                p.moving[t]).v
+                p.moving[t], true).v
         else
             group, c = cache.cells[t]
             u[p.integrated[I]] .= z[I]

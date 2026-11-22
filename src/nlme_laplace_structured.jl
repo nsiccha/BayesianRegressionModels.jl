@@ -50,7 +50,8 @@ _brm_lap_width(f::Int8) = f in (_BRM_LAP_NB2, _BRM_LAP_NORMAL, _BRM_LAP_GAMMA) ?
 # parameter does not move with the unit's effects (`moving = false`, a scalar
 # negative-binomial shape) skips what the mode search and gradient never read:
 # its b-derivatives beyond ∂b and ∂a∂b, and, in the mode search (`third =
-# false`), the log density's terms in b alone.
+# false`), the log density's terms in b alone. `value` asks for the log
+# density alone, which spares a differentiated law its derivative passes.
 struct _BRMLapRow
     v::Float64
     g1::Float64
@@ -66,6 +67,7 @@ end
 
 # New row laws are differentiated in the RK Enzyme extension.
 function _brm_lap_ad_row end
+_brm_lap_value_row(v) = _BRMLapRow(v, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 # Gamma(shape, mean/shape), on the log scale so a large log mean does
 # not overflow a representable log density. Include the full normalization.
@@ -80,6 +82,19 @@ function _brm_lap_gamma(a, b, y)
     log_y = log(y)
     log_rate_y = (b - a) + log_y
     shape * log_rate_y - loggamma(shape) - log_y - exp(log_rate_y)
+end
+
+# The same without the terms in b alone (−log Γ(shape) − log y): what a mode
+# search over effects on the mean reads.
+function _brm_lap_gamma_mean(a, b, y)
+    shape = exp(b)
+    (shape > 0 && y >= 0 && y < Inf) || return -Inf
+    if iszero(y)
+        shape == 1 && return shape * (b - a)
+        return shape < 1 ? Inf : -Inf
+    end
+    log_rate_y = (b - a) + log(y)
+    shape * log_rate_y - exp(log_rate_y)
 end
 
 # ψ_n(y + P) − ψ_n(P) for n = 0, 1, 2 (pg is its negative for n = 2). For a
@@ -104,7 +119,7 @@ end
 end
 
 @inline function _brm_lap_row(f::Int8, y::Float64, n::Float64, a::Float64, b::Float64,
-        third::Bool, moving::Bool=true)
+        third::Bool, moving::Bool=true, value::Bool=false)
     if f === _BRM_LAP_POISSON
         μ = exp(a)
         return _BRMLapRow(y * a - μ, y - μ, 0.0, -μ, 0.0, 0.0, -μ, 0.0, 0.0, 0.0)
@@ -143,7 +158,12 @@ end
             3(2P + y) * r^2 - (7P + y) * r
         return _BRMLapRow(v, g1, g2, h11, h12, h22, t111, t112, t122, t222)
     elseif f === _BRM_LAP_GAMMA
-        return _brm_lap_ad_row(_brm_lap_gamma, a, b, y, third, moving)
+        if third || moving
+            value && return _brm_lap_value_row(_brm_lap_gamma(a, b, y))
+            return _brm_lap_ad_row(_brm_lap_gamma, a, b, y, third, moving)
+        end
+        value && return _brm_lap_value_row(_brm_lap_gamma_mean(a, b, y))
+        return _brm_lap_ad_row(_brm_lap_gamma_mean, a, b, y, third, moving)
     else
         # Normal with mean a and log standard deviation b.
         e = exp(-2b)
@@ -844,7 +864,7 @@ function _brm_slap_unit_value(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,
         two = _brm_lap_width(p.family[t]) == 2
         a = A[e] + _brm_slap_zdot(p, e, b)
         bb = two ? A[e + 1] + _brm_slap_zdot(p, e + 1, b) : 0.0
-        v += _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, true, p.moving[t]).v
+        v += _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, true, p.moving[t], true).v
     end
     v
 end

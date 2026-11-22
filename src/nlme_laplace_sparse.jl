@@ -151,6 +151,11 @@ mutable struct BRMSparseLaplaceProblem{K}
     # each nonzero's transposed position (the pattern is symmetric), so a
     # term's pair of effects is looked up once for both triangles
     transpose::Vector{Int}
+    # The row terms' pairs' positions below the diagonal, term t's from
+    # `pairptr[t]` in `_brm_spl_scatter!`'s order; empty when there are more
+    # than `_BRM_SPL_PAIRS_KEPT` of them, and each is then searched for.
+    pairptr::Vector{Int}
+    pair::Vector{Int32}
     component::Vector{Int}
     components::Vector{Vector{Int}}
     term_component::Vector{Int}
@@ -529,7 +534,8 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], fill(false, length(blocks)), Float64[],
         Int[], Int[], Int[], (;),
-        spzeros(0, 0), Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
+        spzeros(0, 0), Int[], Int[], Int[], Int32[], Int[], Vector{Int}[], Int[], Int[], Float64[],
+        Vector{Int}[],
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
@@ -1076,28 +1082,69 @@ end
     first(span) - 1 + searchsortedfirst(view(rows, span), i)
 end
 
-# One row term's curvature on h's nonzeros: −weight × (ℓ″ along its local C
-# rows) for every pair of its effects `zs` (ascending). A pair is looked up
-# once, below the diagonal, where a column's rows ascend with the term's
-# effects (each search starts after the last hit, and a run of consecutive
-# rows is indexed directly); its mirror is `p.transpose` of that position.
-@inline function _brm_spl_scatter!(nz, p::BRMSparseLaplaceProblem, zs, c1, c2, r, moving,
-        weight)
+# The position of row `zi` in column `zj`, below its diagonal `kd` and after
+# the last hit `k` there (a term's effects ascend, as a column's rows do); `hi`
+# is the column's last position. A run of consecutive rows is indexed directly.
+@inline _brm_spl_below(rows, kd, hi, k, zj, zi) = rows[hi] - zj == hi - kd ?
+    kd + (zi - zj) : k + searchsortedfirst(view(rows, (k + 1):hi), zi)
+
+# The most row-term pairs whose positions are kept (4 bytes each).
+const _BRM_SPL_PAIRS_KEPT = 2^22
+
+# Keep the positions `_brm_spl_scatter!` would search for at every assembly,
+# while they are few: a row term reads the same pairs at every Newton step.
+function _brm_spl_pairs!(p::BRMSparseLaplaceProblem)
+    p.pairptr = Int[]; p.pair = Int32[]
+    width(t) = p.tptr[t + 1] - p.tptr[t]
+    total = sum(t -> width(t) * (width(t) - 1) ÷ 2, eachindex(p.family); init=0)
+    (0 < total <= _BRM_SPL_PAIRS_KEPT && length(p.transpose) <= typemax(Int32)) || return p
+    rows = rowvals(p.pattern)
+    colptr = SparseArrays.getcolptr(p.pattern)
+    sizehint!(p.pair, total)
+    for t in eachindex(p.family)
+        push!(p.pairptr, length(p.pair) + 1)
+        zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
+        for j in eachindex(zs)
+            kd = p.diagonal[zs[j]]
+            hi = colptr[zs[j] + 1] - 1
+            k = kd
+            for i in (j + 1):length(zs)
+                k = _brm_spl_below(rows, kd, hi, k, zs[j], zs[i])
+                rows[k] == zs[i] || error("brm_laplace_problem: internal: a term's pair " *
+                    "of effects is not on h's pattern")
+                push!(p.pair, k)
+            end
+        end
+    end
+    p
+end
+
+# Row term t's curvature on h's nonzeros: −weight × (ℓ″ along its local C
+# rows) for every pair of its effects `zs` (ascending). A pair has one
+# position, below the diagonal (kept in `p.pair`, else looked up); its mirror
+# is `p.transpose` of that position.
+@inline function _brm_spl_scatter!(nz, p::BRMSparseLaplaceProblem, t, zs, c1, c2, r,
+        moving, weight)
     rows = rowvals(p.pattern)
     colptr = SparseArrays.getcolptr(p.pattern)
     pair(a, b) = (v = r.h11 * c1[a] * c1[b];
         moving ? v + (r.h12 * (c1[a] * c2[b] + c2[a] * c1[b]) + r.h22 * c2[a] * c2[b]) : v)
     m = length(zs)
+    kept = !isempty(p.pair)
+    q = kept ? p.pairptr[t] : 0
     @inbounds for j in 1:m
         zj = zs[j]
         kd = p.diagonal[zj]
         nz[kd] -= weight * pair(j, j)
         hi = colptr[zj + 1] - 1
-        run = rows[hi] - zj == hi - kd
         k = kd
         for i in (j + 1):m
-            zi = zs[i]
-            k = run ? kd + (zi - zj) : k + searchsortedfirst(view(rows, (k + 1):hi), zi)
+            if kept
+                k = Int(p.pair[q])
+                q += 1
+            else
+                k = _brm_spl_below(rows, kd, hi, k, zj, zs[i])
+            end
             nz[k] -= weight * pair(i, j)
             nz[p.transpose[k]] -= weight * pair(j, i)
         end
@@ -1168,6 +1215,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     p.wcols = [[b.z[l, 1] for l in levels] for b in p.blocks for levels in b.sums]
     p.wλ = [λ for b in p.blocks for λ in b.λ]
     p.pattern = pattern
+    _brm_spl_pairs!(p)
     # Components by union-find over the terms' effects.
     parent = collect(1:n)
     root(i) = (while parent[i] != i; parent[i] = parent[parent[i]]; i = parent[i]; end; i)
@@ -1260,7 +1308,8 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             a += c1[i] * z[zs[i]]
             moving && (bb += c2[i] * z[zs[i]])
         end
-        r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, third, moving)
+        r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, third, moving,
+            !derivatives && rows === nothing)
         rows === nothing || (rows[t] = r)
         tv === nothing || (tv[t] = r.v + p.constant[t])
         if crows !== nothing
@@ -1283,7 +1332,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         for i in 1:m
             g[zs[i]] += weight * (c1[i] * r.g1 + (moving ? c2[i] * r.g2 : 0.0))
         end
-        _brm_spl_scatter!(nz, p, zs, c1, c2, r, moving, weight)
+        _brm_spl_scatter!(nz, p, t, zs, c1, c2, r, moving, weight)
     end
     isempty(p.cells) && return rest
     # The `@plate` cells: each its value at the packed point, and with
