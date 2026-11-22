@@ -13,7 +13,7 @@ end
 # StanBlocks through the Stan tuple's label, RK through the call's per-cell
 # local (`_rk_emit_kernel_plate!`). The call itself is not a value, and an
 # unknown field names the returned ones.
-function _brm_cell_component_reads(statements, scope)
+function _brm_cell_component_reads(statements, scope, field_expr)
     named = Dict{Symbol,BRMComponent}()
     function collect!(x)
         x isa Expr || return
@@ -42,7 +42,7 @@ function _brm_cell_component_reads(statements, scope)
             haskey(fields, field) || throw(ArgumentError(
                 "a `@plate` cell reads field `$field` of `$(x.args[1])`, but " *
                 "`$(component.name)` returns only $(join(("`$f`" for f in keys(fields)), ", "))"))
-            return Expr(:., x.args[1], QuoteNode(fields[field]))
+            return field_expr(x.args[1], fields, fields[field])
         end
         # The call's own binding is not a read.
         Meta.isexpr(x, :call, 3) && x.args[1] === :~ && x.args[2] isa Symbol &&

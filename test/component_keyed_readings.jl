@@ -58,6 +58,20 @@ end
     end
 end
 
+@brm function shifted_reading(x)
+    bias ~ Normal(0, 1)
+    return (; fitted=x + bias)
+end
+const single_field = @brm begin
+    sensor ~ shifted_reading(x)
+    y ~ Normal(sensor.fitted, 1)
+end
+
+@stestset "A single named return feeds the parent likelihood" begin
+    sb = SBBRMI(single_field((; x=.75, y=-.2)); mod=@__MODULE__, total_groups=())
+    @test StanBlocks.stanc_check(stan_code(sb); warn_pedantic=false).ok
+end
+
 @brm function observed_sensor(y, picks, signal, heavy)
     offset ~ Normal(0, 0.6)
     if heavy
@@ -127,9 +141,14 @@ end
     data = (; x=[[.5, 1.], [-.3, .7]], records=[b, a])
     empty_b = (; b..., picks=[Int[], Int[]], y=[Float64[], Float64[]])
     changed = (; x=reverse.(data.x), records=[a, empty_b])
-    fit = RKBRMI(observed_collection(data))
+    trained = observed_collection(data)
+    fit = RKBRMI(trained)
+    sb = SBBRMI(trained; mod=@__MODULE__, total_groups=())
+    path = joinpath(mkpath(joinpath(tempdir(), "brm-rk-consumer")), "keyed-observed-readings.stan")
     U = [.5 -.25; .1 -.4; .25 .7] # gain, offset for a, offset for b
-    for (design, rk) in ((data, fit), (changed, reprocess(fit, changed)))
+    for (design, rk, sfit) in ((data, fit, sb),
+            (changed, reprocess(fit, changed), reprocess(sb, changed)))
+        stan = BRM.stan_instantiate(sfit; path).model
         problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
         @test LogDensityProblems.dimension(problem) == size(U, 1)
         draws = Dict(rec.id => rk_draw_values(rk, U, (:loc,); submodel=(:sensors, rec.id)).loc
@@ -145,7 +164,11 @@ end
             value
         end
         for (j, u) in enumerate(eachcol(U))
-            check_consumer_point(problem, collect(u), oracle)
+            point = collect(u)
+            value, gradient = check_consumer_point(problem, point, oracle)
+            stan_value, stan_gradient = BridgeStan.log_density_gradient(stan, point; propto=false)
+            @test stan_value ≈ value
+            @test stan_gradient ≈ gradient
             for rec in design.records
                 expected = reduce(vcat, (location(rec, s, u) for s in eachindex(rec.y)); init=Float64[])
                 @test draws[rec.id][j] ≈ expected
