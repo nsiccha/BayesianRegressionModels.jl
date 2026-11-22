@@ -2694,6 +2694,8 @@ _brm_parselocals!(x::Expr, info, val) = if Meta.isexpr(x, :->)
     x
 elseif _is_nested_brm(x)
     parselocals!(_nested_brm_payload(x); info, val)
+elseif _brm_is_broadcast_call(x)
+    parselocals!.(x.args[2].args; info, val)
 elseif Meta.isexpr(x, (:call, :kw))
     parselocals!.(x.args[2:end]; info, val)
 else
@@ -2949,16 +2951,36 @@ function _brm_formula_callee_message(name, @nospecialize(f), mod)
     "@brm: the formula calls `$shown(...)`, but $bound, which cannot be called.$remedy"
 end
 # A sampling RHS can also be a predictor formula. Resolve its callable in
-# the builder's scope before choosing how to interpret products in its arguments.
-_brm_contains_product(x) = false
-_brm_contains_product(x::Expr) = isxcall(x, :*) || isxcall(x, :.*) ||
-    any(_brm_contains_product, x.args)
+# the builder's scope before interpreting products and dotted calls in its arguments.
+_brm_needs_value_owner(x) = false
+_brm_needs_value_owner(x::Expr) = _brm_is_broadcast_call(x) ||
+    isxcall(x, :*) || isxcall(x, :.*) || any(_brm_needs_value_owner, x.args)
+
+# A value call keeps the Julia binding for evaluation and the written name
+# for printing. An alias or qualified name can differ from nameof(f).
+struct _BRMBroadcastCall{F} <: Function
+    f::F
+    head
+end
+(call::_BRMBroadcastCall)(args...; kwargs...) = call.f.(args...; kwargs...)
+
+_brm_broadcast_reads_model(x) = x isa AbstractColumn
+_brm_broadcast_reads_model(x::Union{Tuple,AbstractArray}) = any(_brm_broadcast_reads_model, x)
+_brm_broadcast_reads_model(::AbstractArray{<:Number}) = false
+
+function _brm_formula_broadcast(owner, head, f, args...; kwargs...)
+    if (owner === assign || owner === _brm_broadcast_observation || _brm_prior_constructor(owner)) &&
+            (any(_brm_broadcast_reads_model, args) || any(_brm_broadcast_reads_model, values(kwargs)))
+        return ExprColumn(_BRMBroadcastCall(f, head), args...; kwargs...)
+    end
+    f.(args...; kwargs...)
+end
 
 function _x_sampling_rhs(rhs, explicit)
     Meta.isexpr(rhs, :call) || return _x(rhs)
     explicit && return _x(rhs, _brm_broadcast_observation)
     operands = rhs.args[2:end]
-    if !any(_brm_contains_product, operands)
+    if !any(_brm_needs_value_owner, operands)
         return _x(rhs)
     end
     family = gensym(:family)
@@ -2984,6 +3006,10 @@ elseif x.head == :call
     else
         fixcall(Expr(:call, ExprColumn, callee, args...))
     end
+elseif owner !== nothing && _brm_is_broadcast_call(x)
+    callee = _brm_formula_callee_expr(x.args[1])
+    args = map(arg -> _x(arg, owner), x.args[2].args)
+    fixcall(Expr(:call, _brm_formula_broadcast, owner, QuoteNode(x.args[1]), callee, args...))
 elseif _is_nested_brm(x)
     Expr(:call, NestedPredictorFormula, _x(_nested_brm_payload(x)))
 elseif x.head ==  :||
@@ -4158,8 +4184,8 @@ function _brm_show_number(io::IO, x::Real, outer::Int, left::Bool)
     show(io, x)
     parens && print(io, ")")
 end
-# A dot call in a formula, `f.(x)`, runs while the builder binds the data and
-# would broadcast over the formula column itself, which has no elements.
+# A dot call in a predictor formula would broadcast over the formula column
+# itself while the builder binds the data.
 Base.Broadcast.broadcastable(x::Union{NamedColumn,ExprColumn}) = error(
     "@brm: `.` broadcasting over the formula column `", x isa NamedColumn ? name(x) : x,
     "` while the model is built. A formula call already applies per row: write ",
@@ -4294,6 +4320,14 @@ _show_call_head(io::IO, f) = print(io, f)
 _show_call_head(io::IO, f::Union{Function,DataType,UnionAll}) =
     print(io, _brm_exported_name(f))
 _show_call_head(io::IO, g::GlobalRef) = print(io, g.name)
+function _show_call_head(io::IO, call::_BRMBroadcastCall)
+    if call.head isa Union{Symbol,Expr,GlobalRef}
+        Base.show_unquoted(io, call.head)
+    else
+        _show_call_head(io, call.f)
+    end
+    print(io, ".")
+end
 # Julia names a value by its own name, so a family BRM exports under an alias
 # would print as a name the model never wrote and BRM does not export:
 # `LocationScale` is Distributions' `AffineDistribution`, `Categorical` its

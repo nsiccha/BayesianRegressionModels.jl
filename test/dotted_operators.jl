@@ -128,9 +128,10 @@ end
         y ~ Normal(m0 + 0.0 * x, 1.0)
     end
     @test occursin("m0", dotted_stan(con))
-    # A model-scope dotted call keeps its own refusal, naming the plain call.
+    # Predictor terms retain their per-row formula syntax (decision 1lzes1r).
     err = dotted_error(:(@brm dotted_df begin
-        y ~ Normal(abs2.(x), 1.0)
+        mu ~ 1 + abs2.(x)
+        y ~ Normal(mu, 1.0)
     end))
     @test err !== nothing &&
         occursin("A formula call already applies per row", sprint(showerror, err))

@@ -1290,6 +1290,8 @@ function _brm_broadcast_data_call(f, args::Tuple, kwargs::NamedTuple)
         f(values[1:nargs]...; NamedTuple{names}(values[nargs+1:end])...)
     end
 end
+_brm_broadcast_data_call(call::_BRMBroadcastCall, args::Tuple, kwargs::NamedTuple) =
+    call(args...; kwargs...)
 # A data formula call broadcasts over its inputs, except indexing: `x[i]` with
 # a vector of integer positions `i` reads `x` on its own axis, one value per
 # position, so a per-group field is read onto rows (`age[subject]`).

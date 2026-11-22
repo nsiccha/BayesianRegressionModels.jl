@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.378
+
+- Model-scope assignments and likelihood arguments accept explicit elementwise
+  calls such as `eta = Base.exp.(b)` and `y .~ Normal.(sin.(eta), 1)`.
+  Dotted calls resolve Julia functions in the builder's scope and retain the
+  authored name when the bound model is printed.
+
 ## 0.2.377
 
 - `RKBRMI(builder(design), state)` can open format-2 fits that stored a grouped
