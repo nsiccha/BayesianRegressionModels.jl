@@ -393,7 +393,7 @@ end
 function _brm_svi_coupling_average!(average, q, i, weight)
     a, x = _brm_svi_coupling(average), _brm_svi_coupling(q)
     (a === nothing || x === nothing) && return average
-    @. a.V[i] += weight * (x.V[i] - a.V[i])
+    a.V[i] .= _svi_weighted_average.(a.V[i], x.V[i], weight)
     average
 end
 

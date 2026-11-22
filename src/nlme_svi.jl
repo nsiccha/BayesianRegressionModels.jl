@@ -489,7 +489,7 @@ _brm_svi_unit_offset(q, i, εi) = _brm_svi_unit_offset(q.U[i], εi)
 _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
-_brm_svi_entropy(q) = _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 -
+_brm_svi_entropy(q) = _svi_global_logdet(q.ρ, q.Β) / 2 -
     sum(_brm_svi_unit_logdet_root, q.U; init=0.0)
 _brm_svi_unit_entropy(q, i) = -_brm_svi_unit_logdet_root(q.U[i])
 
@@ -1874,7 +1874,7 @@ function _brm_svi_numerical_step!(run, t, c, phase)
         run.unit_entropy[i] = entropy
     end
     push!(run.trace, value + run.entropy_sum +
-        _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 +
+        _svi_global_logdet(q.ρ, q.Β) / 2 +
         _brm_svi_sparse_entropy(run.sites, q))
     run.iteration = it
     polishing || _brm_svi_record_iterates!(run, batch.indices, c)
@@ -2128,7 +2128,7 @@ end
 
 # The running mean `a` of iterates `x`, at the k-th: an array, or one array
 # per subject.
-_brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (@. a += (x - a) / k; a)
+_brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (a .= _svi_running_average.(a, x, k); a)
 _brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
     (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
 
@@ -2152,7 +2152,7 @@ function _brm_svi_average_units!(average, q, through, indices, iteration)
         count == 0 && continue
         weight = count / iteration
         a, x = average.M[i], q.M[i]
-        @. a += weight * (x - a)
+        a .= _svi_weighted_average.(a, x, weight)
         _brm_svi_unit_average!(average.Λ[i], q.Λ[i], weight)
         _brm_svi_coupling_average!(average, q, i, weight)
         through[i] = iteration

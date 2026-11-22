@@ -28,6 +28,21 @@ lower Cholesky factor of the precision block on those rows. The control
 variate uses the unit gradient evaluated at the global and unit means.
 `coupling_row_update` returns the scale from previous visits, the updated
 mean square and the visit count. Use the factor from before the unit step.
+
+For the ELBO, `unit_entropy(root)` is the unit's entropy contribution and
+`global_logdet(log_scale, loading) / 2` is the globals' contribution, both
+up to constants. Polishing initializes a dense unit's covariance average with
+`unit_covariance(precision)`. Use `weighted_average(previous, current, weight)`
+for lazy unit means, covariances and coupling loadings, and
+`running_average(previous, current, count)` for the global factors.
+
+A stationarity slot contains the mean followed by marginal log standard
+deviations. For globals use `marginal_logsd(log_scale, loading_row)` per row.
+A dense unit starts from `dense_logsd(precision)`. For each coupled row, apply
+`marginal_logsd` to its conditional log width and the matching coupling row.
+Append the unit's `centering_control(x)` values and its coupling loadings in
+Julia column-major order. Record a unit only on its visits.
+
 `global_factors` and the unit-indexed `unit_factors` are selections on
 the model's original factor catalogue. `expected_layout` is that model's
 packed layout. Their underlying events are in `factor_buckets[1]` for global

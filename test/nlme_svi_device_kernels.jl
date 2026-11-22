@@ -13,7 +13,18 @@ const BRM = BayesianRegressionModels
         diagonal, gradient = prepare(kernels.global_entropy)(ρ, loading)
         @test diagonal ≈ exp.(2 .* ρ) .* diag(inv(covariance))
         @test gradient ≈ covariance \ loading
+        @test prepare(kernels.global_logdet)(ρ, loading) ≈ logdet(covariance)
     end
+    precision = [2.0 0.4; 0.4 1.6]
+    reference = inv(Symmetric(precision))
+    root = Matrix(cholesky(Symmetric(precision)).L)
+    @test prepare(kernels.unit_covariance)(precision) ≈ reference
+    @test prepare(kernels.dense_logsd)(precision) ≈ log.(diag(reference)) / 2
+    @test prepare(kernels.unit_entropy)(root) ≈ logdet(reference) / 2
+    @test prepare(kernels.marginal_logsd)(ρ[1], ε) ≈ log(exp(2ρ[1]) + sum(abs2, ε))/2
+    @test prepare(kernels.weighted_average)(μ, ε, 0.6) ≈ 0.4μ + 0.6ε
+    @test prepare(kernels.running_average)(μ, ε, 4) ≈ (3μ + ε)/4
+    @test prepare(kernels.centering_control)(-2.0) ≈ 1/(1+exp(2.0))
     lambda, axis = prepare(kernels.curvature_axis)([1.0, 0.0], [-1.0, 1e-8])
     @test lambda ≈ 2.5e-17
     @test norm(axis) ≈ 1.0
@@ -27,6 +38,21 @@ const BRM = BayesianRegressionModels
         :global_gradient => (μ, ε, [0.3], exp.(ρ), [0.4, 0.9], B),
         :global_entropy => (ρ, B),
         :global_entropy => (ρ, zeros(2, 0)),
+        :global_logdet => (ρ, B),
+        :global_logdet => (ρ, zeros(2, 0)),
+        :global_logdet => (Float64[], zeros(0, 0)),
+        :unit_entropy => (root,),
+        :unit_entropy => (zeros(0, 0),),
+        :unit_covariance => (precision,),
+        :unit_covariance => (zeros(0, 0),),
+        :weighted_average => (precision, reference, 0.3),
+        :running_average => (μ, ε, 4),
+        :dense_logsd => (precision,),
+        :dense_logsd => (zeros(0, 0),),
+        :marginal_logsd => (ρ[1], ε),
+        :marginal_logsd => (ρ[2], Float64[]),
+        :centering_control => (0.25,),
+        :centering_control => (-900.0,),
         :global_step_scale => (ρ, B, exp.(ρ), 0.5),
         :batch_clip => ([4.0, 9.0], 10.0),
         :clip_gradient => ([-1e4, 5.0], [4.0, 0.0], 0.9, 2.0),
@@ -89,7 +115,7 @@ const BRM = BayesianRegressionModels
                 native = getproperty(BRM, first(signature.args))
                 expected = native(args...)
                 actual = prepare(kernels[name])(args...)
-                if name === :global_entropy
+                if name in (:global_entropy, :global_logdet, :unit_covariance, :dense_logsd)
                     # Native Julia and RK may use different Cholesky implementations.
                     @test all(isapprox.(actual, expected; rtol=1e-12, atol=1e-12))
                 else

@@ -69,9 +69,9 @@ function Base.getindex(a::_BRMSVIUnitOperator, i::Int, j::Int)
     (a * e)[i]
 end
 
-_brm_svi_unit_logdet_root(U::AbstractMatrix) = sum(log, diag(U); init=0.0)
+_brm_svi_unit_logdet_root(U::AbstractMatrix) = -_svi_unit_entropy(U)
 _brm_svi_unit_logdet_root(U::_BRMSVIUnitRoot) =
-    -_brm_svi_global_logdet(_brm_svi_global_geometry(U.factor)) / 2
+    -_svi_global_logdet(U.factor.ρ, U.factor.Β) / 2
 
 function _brm_svi_unit_factors(d, scale, dense_limit, rank)
     if d <= dense_limit
@@ -131,8 +131,8 @@ function _brm_svi_unit_step!(Λ::_BRMSVIUnitPrecision, q, i, gz, gd, ε, β; ran
 end
 
 function _brm_svi_unit_average!(a::_BRMSVIUnitPrecision, x::_BRMSVIUnitPrecision, weight)
-    @. a.factor.ρ += weight * (x.factor.ρ - a.factor.ρ)
-    @. a.factor.Β += weight * (x.factor.Β - a.factor.Β)
+    a.factor.ρ .= _svi_weighted_average.(a.factor.ρ, x.factor.ρ, weight)
+    a.factor.Β .= _svi_weighted_average.(a.factor.Β, x.factor.Β, weight)
     a
 end
 
@@ -147,10 +147,9 @@ end
 # the raw iterate does. While polishing, a dense unit's `Λ` slot of the running
 # average therefore holds a covariance; `_brm_svi_unit_from_average!` turns it
 # back into a precision and its Cholesky factor.
-_brm_svi_unit_covariance(Λ::AbstractMatrix) =
-    isempty(Λ) ? copy(Λ) : inv(cholesky(Symmetric(Λ)))
+_brm_svi_unit_covariance(Λ::AbstractMatrix) = _svi_unit_covariance(Λ)
 function _brm_svi_unit_average!(a::AbstractMatrix, x::AbstractMatrix, weight)
-    a .+= weight .* (_brm_svi_unit_covariance(x) .- a)
+    a .= _svi_weighted_average.(a, _brm_svi_unit_covariance(x), weight)
     a
 end
 _brm_svi_unit_average_start!(a::_BRMSVIUnitPrecision) = a

@@ -45,6 +45,60 @@ const _BRM_SVI_KERNEL_DEFINITIONS = (
         end
         return result
     end),
+    global_logdet=:(function _svi_global_logdet(log_scale, loading)
+        scale = exp.(log_scale)
+        diagonal = 2 * sum(log.(scale))
+        result = if size(loading, 2) == 0
+            diagonal
+        else
+            V = loading ./ scale
+            gram = transpose(V) * V .+ diagm(ones(size(loading, 2)))
+            lower = _svi_lower_cholesky(gram)
+            diagonal + 2 * sum(log.(diag(lower)))
+        end
+        return result
+    end),
+    unit_entropy=:(function _svi_unit_entropy(root)
+        result = -sum(log.(diag(root)))
+        return result
+    end),
+    # Polishing stores covariances. Native precision matrices use their
+    # upper triangle as in Symmetric(precision).
+    unit_covariance=:(function _svi_unit_covariance(precision)
+        result = if size(precision, 1) == 0
+            precision
+        else
+            lower = _svi_lower_cholesky(transpose(precision))
+            inverse_root = lower \ diagm(ones(size(precision, 1)))
+            transpose(inverse_root) * inverse_root
+        end
+        return result
+    end),
+    weighted_average=:(function _svi_weighted_average(previous, current, weight)
+        result = previous .+ weight .* (current .- previous)
+        return result
+    end),
+    running_average=:(function _svi_running_average(previous, current, count)
+        result = previous .+ (current .- previous) ./ count
+        return result
+    end),
+    dense_logsd=:(function _svi_dense_logsd(precision)
+        result = log.(diag(_svi_unit_covariance(precision))) ./ 2
+        return result
+    end),
+    marginal_logsd=:(function _svi_marginal_logsd(log_scale, loading_row)
+        result = log(hypot(exp(log_scale), norm(loading_row)))
+        return result
+    end),
+    centering_control=:(function _svi_centering_control(x)
+        result = if x >= 0
+            inv(1 + exp(-x))
+        else
+            e = exp(x)
+            e / (1 + e)
+        end
+        return result
+    end),
     global_step_scale=:(function _svi_global_step_scale(log_scale, loading, mean_scale, rank_step)
         row_scale = exp.(log_scale)
         loading_scale = rank_step .* repeat(row_scale, size(loading, 2))
