@@ -753,15 +753,25 @@ _brm_svi_dense_unit(q, i) = !(q.U[i] isa _BRMSVIUnitRoot) && !isempty(q.M[i])
 # The whitened draws of unit i for one iteration: a vector for a pair, the
 # d × d design E = √d Q for an orthogonal design. Drawn in batch order from the
 # run's `rng`, before any unit is evaluated.
-_brm_svi_unit_draws(rng, q, i, curvature) =
+_brm_svi_unit_draws(rng, q, i, curvature, design=_brm_svi_unit_design) =
     curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
-        _brm_svi_unit_design(rng, length(q.M[i])) : _brm_svi_unit_noise(rng, q.U[i])
+        design(rng, length(q.M[i])) : _brm_svi_unit_noise(rng, q.U[i])
 
+_brm_svi_design_normals(rng, d) = randn(rng, d, d)
 function _brm_svi_unit_design(rng, d)
     # Q from Householder QR is Haar-distributed once each column takes the sign
     # of R's diagonal (Mezzadri 2007, "How to generate random matrices from the
     # classical compact groups").
-    _svi_unit_design(randn(rng, d, d))
+    _svi_unit_design(_brm_svi_design_normals(rng, d))
+end
+
+function _brm_svi_local_draws(rng, q, batch, curvature, reoptimize, design)
+    units = [_brm_svi_unit_draws(rng, q, i, curvature, design) for i in batch]
+    # All primary unit draws precede the re-optimization draws in the saved stream.
+    reoptimization = reoptimize == 0 ? nothing :
+        [curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
+            [design(rng, length(q.M[i])) for _ in 1:reoptimize] : nothing for i in batch]
+    (; units, reoptimization)
 end
 
 # Unit-gradient attempts per visit, including the auxiliary baseline and the
@@ -1287,7 +1297,9 @@ end
 # come from `rng` here, in batch order, before any unit is evaluated, each unit's
 # result stays in its own slot and is summed in batch order, and a unit's step
 # reads and writes only that unit's factor.
-_brm_svi_field_prepare!(rng, t, q, g, batch, ε=nothing, η=nothing) = nothing
+_brm_svi_field_draws(rng, t, q, batch) = nothing
+_brm_svi_apply_field_draws!(t, q, g, batch, draws::Nothing, ε, η) = nothing
+_brm_svi_global_noise(rng, q) = (randn(rng, length(q.μ)), randn(rng, size(q.Β, 2)))
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
@@ -1295,7 +1307,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
         coupling_scale=1.0, coupling_baseline=true, reoptimize=0, reoptimize_newton=true)
     D = length(t.globals)
-    ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
+    ε, η = _brm_svi_global_noise(rng, q)
     g = _brm_svi_draw_global(q, ε, η)
     # Under `sparse_globals = :collapsed` the sparse globals draw from their joint
     # factor, from the same ε (src/nlme_svi_collapsed.jl).
@@ -1305,10 +1317,11 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     coupling = _brm_svi_coupling(q)
     ζs = coupling === nothing ? nothing :
         [_brm_svi_coupling_noise(coupling, i, noise, η) for i in batch]
-    _brm_svi_field_prepare!(rng, t, q, g, batch, noise, η)
+    field_draws = _brm_svi_field_draws(rng, t, q, batch)
+    _brm_svi_apply_field_draws!(t, q, g, batch, field_draws, noise, η)
     sweep = hasproperty(t, :field_sweep)
     P, gP = sweep ? _brm_svi_global_term(t.prior, t, g) : _brm_svi_global_term(t, g)
-    draws = [_brm_svi_unit_draws(rng, q, i, curvature) for i in batch]
+    draws, designs = _brm_svi_local_draws(rng, q, batch, curvature, reoptimize, _brm_svi_unit_design)
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
         gd::Vector{Float64}}}(undef, length(batch))
     # The whitened curvature estimate of a unit on an orthogonal design.
@@ -1322,12 +1335,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         P += first(_brm_svi_sweep_term!(gP, Float64[], centering, frame, t, q, 0,
             g, Float64[], t.plan))
     end
-    designs = nothing
     if reoptimize > 0
-        # Drawn serially, from the run's stream, before the threaded unit loop.
-        designs = [curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
-            [_brm_svi_unit_design(rng, length(q.M[i])) for _ in 1:reoptimize] : nothing
-            for i in batch]
         # A checkpoint written before the Newton step re-optimizes the units' own
         # factors in place, with their square-root step.
         reoptimize_newton || _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling,
@@ -1796,13 +1804,47 @@ function _brm_svi_advance!(run, t, c)
     _brm_svi_finish_interval!(run, t, c, phase)
 end
 
-function _brm_svi_numerical_step!(run, t, c, phase)
-    it = run.iteration + 1
+function _brm_svi_iteration_controls(run, c, phase, it)
     polishing, settling = phase === :polishing, phase === :settling
     scale = polishing ? 1 / sqrt(1 + (it - run.polish_start) / c.window) : 1.0
     # Establish the independent factors before learning their dependence. Older
     # checkpoints lack this control and retain their immediate coupling updates.
     coupling_scale = get(c, :coupling_warmup, false) && !(polishing || settling) ? 0.0 : scale
+    (; lr=scale * (polishing || settling ? c.polish_lr : c.lr_global), β=scale * c.unit_step,
+       whiten=polishing || settling, site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
+       positive_part=_brm_svi_unit_positive_part(c), site_step=scale * _brm_svi_site_step(c),
+       structured_step=scale * _brm_svi_structured_unit_step(c),
+       structured_rank=_brm_svi_structured_rank_step(c),
+       rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
+       sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
+       coupling_baseline=_brm_svi_coupling_baseline(c), reoptimize=_brm_svi_unit_reoptimize(c),
+       reoptimize_newton=_brm_svi_reoptimize_newton(c))
+end
+
+_brm_svi_batch_calls(run, t, c, indices) =
+    sum(i -> _brm_svi_unit_calls(run.q, i, c), indices; init=0) +
+        _brm_svi_collapsed_calls(run.sites, t, indices)
+
+function _brm_svi_iteration_draws(t, run, c, phase, n; rng=run.rng)
+    n isa Integer && n >= 0 || throw(ArgumentError("iteration_draws needs a nonnegative iteration count"))
+    curvature = _brm_svi_unit_curvature_mode(c)
+    reoptimize = _brm_svi_unit_reoptimize(c)
+    map(1:n) do _
+        batch = _brm_svi_batch(rng, run.sampler, c.batch_size)
+        epsilon, eta = _brm_svi_global_noise(rng, run.q)
+        field = _brm_svi_field_draws(rng, t, run.q, batch.indices)
+        units, reoptimization = _brm_svi_local_draws(rng, run.q, batch.indices,
+            curvature, reoptimize, _brm_svi_design_normals)
+        (; batch, epsilon, eta, field, units, reoptimization,
+           unit_gradient_calls=_brm_svi_batch_calls(run, t, c, batch.indices))
+    end
+end
+
+function _brm_svi_numerical_step!(run, t, c, phase)
+    it = run.iteration + 1
+    polishing = phase === :polishing
+    steps = _brm_svi_iteration_controls(run, c, phase, it)
+    options = Base.structdiff(steps, (; steps.lr, steps.β))
     q = run.q
     batch = _brm_svi_batch(run.rng, run.sampler, c.batch_size)
     polishing && _brm_svi_average_units!(run.average, q, run.averaged_through,
@@ -1811,22 +1853,10 @@ function _brm_svi_numerical_step!(run, t, c, phase)
         run.sampling.visits[i] += 1
         run.sampling.draws[i] += batch.multiplicities[k]
     end
-    run.unit_gradient_calls += sum(i -> _brm_svi_unit_calls(q, i, c), batch.indices; init=0) +
-        _brm_svi_collapsed_calls(run.sites, t, batch.indices)
+    run.unit_gradient_calls += _brm_svi_batch_calls(run, t, c, batch.indices)
     value = try
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
-            scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
-            whiten=polishing || settling, weights=batch.weights, sites=run.sites,
-            site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
-            positive_part=_brm_svi_unit_positive_part(c),
-            site_step=scale * _brm_svi_site_step(c),
-            structured_step=scale * _brm_svi_structured_unit_step(c),
-            structured_rank=_brm_svi_structured_rank_step(c),
-            rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
-            sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
-            coupling_baseline=_brm_svi_coupling_baseline(c),
-            reoptimize=_brm_svi_unit_reoptimize(c),
-            reoptimize_newton=_brm_svi_reoptimize_newton(c))
+            steps.lr, steps.β; weights=batch.weights, sites=run.sites, options...)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))

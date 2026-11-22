@@ -12,6 +12,9 @@ include(joinpath(@__DIR__, "..", "src", "nlme_selection.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi.jl"))
 # The iteration reads the sd bound (a stopgap); a target without `sd_prior` has none.
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_sd_bound.jl"))
+include(joinpath(@__DIR__, "..", "src", "nlme_svi_fields.jl"))
+include(joinpath(@__DIR__, "..", "src", "nlme_svi_field_centering.jl"))
+include(joinpath(@__DIR__, "..", "src", "nlme_svi_unit_streaming.jl"))
 
 struct QuadraticUnits
     globals::Vector{Int}
@@ -402,5 +405,109 @@ end
     for i in 1:5
         @test lazy.Λ[i] ≈ inv(Symmetric(eager.Λ[i]))
         @test LowerTriangular(lazy.U[i]) * LowerTriangular(lazy.U[i])' ≈ lazy.Λ[i]
+    end
+end
+
+@testset "host random inputs replay native batches and leave staged checkpoints intact" begin
+    t = S.QuadraticUnits([1], [[2], [3,4], [5,6,7]],
+        (; footprints=[[1,2], [1,3,4], [1,5,6,7]]), zeros(Int,3),
+        [0.3,4.0,9.0], [-2.0,0.5,3.0])
+    for sampling in (:uniform, :work), curvature in (:pair, :orthogonal)
+        c = S._brm_svi_controls(3; batch_size=2, window=5, patience=1, min_windows=2,
+            polish_windows=3, max_iterations=50, stationarity=false, lr_global=0.001,
+            unit_step=0.1, polish_lr=0.01, unit_sampling=sampling, unit_curvature=curvature)
+        q = S._brm_svi_params(t,[0.7],S.LowRankGlobal(1); global_scale=0.2, unit_scale=1.0,
+            unit_dense_limit=2, unit_rank=1)
+        run = S._brm_svi_run(Xoshiro(9), q, c, t)
+        staged = copy(run.rng)
+        rows = S._brm_svi_iteration_draws(t,run,c,:exploring,7; rng=staged)
+        split = copy(run.rng)
+        @test vcat(S._brm_svi_iteration_draws(t,run,c,:exploring,2; rng=split),
+            S._brm_svi_iteration_draws(t,run,c,:exploring,5; rng=split)) == rows
+        @test split == staged && run.rng == Xoshiro(9)
+        counts = zeros(Int,3)
+        visits = zeros(Int,3)
+        for row in rows
+            oracle = copy(run.rng)
+            batch = S._brm_svi_batch(oracle,run.sampler,c.batch_size)
+            @test row.batch == batch && row.field === nothing
+            @test row.epsilon == randn(oracle,length(q.μ))
+            @test row.eta == randn(oracle,size(q.Β,2))
+            for (i,z) in zip(batch.indices,row.units)
+                d = length(q.M[i])
+                expected = if d > 2
+                    randn(oracle,d + 1)
+                elseif curvature === :orthogonal
+                    randn(oracle,d,d)
+                else
+                    randn(oracle,d)
+                end
+                @test z == expected
+            end
+            counts[batch.indices] .+= batch.multiplicities
+            visits[batch.indices] .+= 1
+            before = run.unit_gradient_calls
+            S._brm_svi_numerical_step!(run,t,c,:exploring)
+            @test run.rng == oracle && run.unit_gradient_calls - before == row.unit_gradient_calls
+        end
+        @test run.rng == staged && run.sampling.visits == visits && run.sampling.draws == counts
+        run.polish_start = 6
+        pol = S._brm_svi_iteration_controls(run,c,:polishing,11)
+        @test pol.whiten && pol.β ≈ c.unit_step/sqrt(2) && pol.lr ≈ c.polish_lr/sqrt(2)
+        @test S._brm_svi_iteration_controls(run,c,:settling,11).lr == c.polish_lr
+        if curvature === :orthogonal
+            probes = merge(c,(;unit_reoptimize=2))
+            row = only(S._brm_svi_iteration_draws(t,run,probes,:settling,1; rng=copy(staged)))
+            oracle = copy(staged)
+            batch = S._brm_svi_batch(oracle,run.sampler,c.batch_size)
+            randn(oracle,length(q.μ)); randn(oracle,size(q.Β,2))
+            for i in batch.indices
+                d = length(q.M[i])
+                d > 2 ? randn(oracle,d+1) : randn(oracle,d,d)
+            end
+            for (i,z) in zip(batch.indices,row.reoptimization)
+                d = length(q.M[i])
+                @test isequal(z,d > 2 ? nothing : [randn(oracle,d,d) for _ in 1:2])
+            end
+        end
+    end
+end
+
+@testset "field readers consume the native stream before local designs" begin
+    q = (; M=[[1.0], [2.0]], U=[fill(2.0,1,1), fill(4.0,1,1)])
+    fields = (; fields=(), blanket=[Int32[2], Int32[2,1], Int32[]], others=zeros(3))
+    t = (; fields, units=[[1],[2]])
+    g = [3.0]
+    oracle, rng = Xoshiro(32), Xoshiro(32)
+    draws = S._brm_svi_field_draws(rng,t,q,[1])
+    @test draws.readers == [1,2] && draws.noise == [randn(oracle,1) for _ in 1:2]
+    @test rng == oracle && fields.others == zeros(3)
+    S._brm_svi_apply_field_draws!(t,q,g,[1],draws,nothing,nothing)
+    @test fields.others == [1+only(draws.noise[1])/2, 2+only(draws.noise[2])/4, 0]
+
+    # The external neighbors are sampled first. All selected owners read
+    # the same carried unit and the current unit, each drawn only once.
+    neighbors = [(; owners=[0,2,3], sampler=S._brm_svi_alias_sampler([0.2,0.3,0.5]))]
+    saved = (; M=[0.5], family=:diagonal_lowrank, ρ=[log(0.5)], Β=fill(0.25,1,1),
+        coupling=(; rows=[1], columns=[1], center=[1.0], W=fill(2.0,1,1)))
+    sweep = (; neighbors, readers=fill([1,0,-1],4), authored=true,
+        absent=(; sources=[(; saved, entries=[(3,1)])]),
+        visits=[@NamedTuple{o::Int,weight::Float64}[]], neighbor_calls=[5],
+        others=zeros(3), fields=(), draw=Ref(()))
+    target = merge(t,(;field_sweep=sweep))
+    oracle, rng = Xoshiro(73), Xoshiro(73)
+    visits = S._brm_svi_neighbor_terms(oracle,only(neighbors),1)
+    previous = saved.M + exp.(saved.ρ) .* randn(oracle,1) + saved.Β * randn(oracle,1)
+    unit = randn(oracle,1)
+    packet = S._brm_svi_field_draws(rng,target,q,[1])
+    @test rng == oracle && packet.visits == [visits]
+    @test packet.owners == sort(unique([0; getproperty.(visits,:o)]))
+    @test packet.readers == [-1,1] && packet.noise == [previous,unit]
+    @test isempty(only(sweep.visits)) && sweep.neighbor_calls == [5] && sweep.others == zeros(3)
+    for global_value in (3.0, -1.0)
+        S._brm_svi_apply_field_draws!(target,q,[global_value],[1],packet,[0.0],Float64[])
+        @test sweep.others == [1+only(unit)/2, 0, only(previous)+2*(global_value-1)]
+        @test sweep.visits == [visits] && sweep.neighbor_calls == [0]
+        @test packet.noise == [previous,unit]
     end
 end

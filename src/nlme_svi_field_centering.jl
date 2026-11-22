@@ -254,22 +254,31 @@ function _brm_svi_sweep_reverse!(gg, gu, gc, f, rows, k, raw, focus, share, ybar
     end
 end
 
-function _brm_svi_sweep_prepare!(rng, t, q, g, batch, noise, η)
-    s = t.field_sweep
-    s.neighbor_calls[batch] .= 0
+function _brm_svi_sweep_draws(rng, s, q, batch)
+    visits = [_brm_svi_neighbor_terms(rng, s.neighbors[i], i) for i in batch]
     owners = s.authored ? [0] : Int[]
-    for i in batch
-        s.visits[i] = _brm_svi_neighbor_terms(rng,s.neighbors[i],i)
-        append!(owners,(v.o for v in s.visits[i]))
+    for terms in visits
+        append!(owners, (v.o for v in terms))
     end
     sort!(unique!(owners))
     readers = sort!(unique!(reduce(vcat, (s.readers[o+1] for o in owners); init=Int[])))
+    filter!(!iszero, readers)
+    # A negative reader belongs to a frozen prior window. Its draw at its
+    # saved mean is independent of this iteration's globals.
+    noise = [i < 0 ? _brm_svi_saved_unit_draw(rng, s.absent.sources[-i].saved) :
+        _brm_svi_unit_noise(rng, q.U[i]) for i in readers]
+    (; visits, owners, readers, noise)
+end
+
+function _brm_svi_sweep_prepare!(t, q, g, batch, draws, noise, η)
+    s = t.field_sweep
+    s.neighbor_calls[batch] .= 0
+    s.visits[batch] = draws.visits
     coupling = _brm_svi_coupling(q)
-    for i in readers
-        i == 0 && continue
+    for (i, normal) in zip(draws.readers, draws.noise)
         if i < 0
             source = s.absent.sources[-i]
-            z = _brm_svi_saved_unit_draw(rng, source.saved, g)
+            z = _brm_svi_saved_unit_at!(copy(normal), source.saved, g)
             for (position, slot) in source.entries
                 s.others[position] = z[slot]
             end
@@ -277,10 +286,10 @@ function _brm_svi_sweep_prepare!(rng, t, q, g, batch, noise, η)
         end
         ζ = coupling === nothing ? nothing : _brm_svi_coupling_noise(coupling, i, noise, η)
         s.others[t.units[i]] .= _brm_svi_coupled_mean(coupling, q, i, ζ) .+
-            _brm_svi_unit_offset(q, i, _brm_svi_unit_noise(rng, q.U[i]))
+            _brm_svi_unit_offset(q, i, normal)
     end
     focus = s.authored ? [0; batch] : batch
-    s.draw[] = map(f -> _brm_svi_sweep_draw(f, q, g, owners; focus), s.fields)
+    s.draw[] = map(f -> _brm_svi_sweep_draw(f, q, g, draws.owners; focus), s.fields)
     nothing
 end
 

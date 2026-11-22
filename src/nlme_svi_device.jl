@@ -40,6 +40,24 @@ indices with observations. Units outside this set can still own prior factors.
 The remaining fields carry the native centering, field and streaming plans
 and the prior projection. All problem fields are read-only.
 
+`problem.iteration_draws(run, controls, phase, n; rng=run.rng)` draws `n`
+iterations in native order. Each contains `batch` (indices, weights and
+multiplicities), the global `epsilon` and `eta`, `field`, `units`,
+`reoptimization` and the base `unit_gradient_calls`. A unit vector is
+the noise for a pair. A unit matrix contains the raw normals for `unit_design`.
+Extra re-optimization designs follow all ordinary unit draws.
+Field draws contain reader indices and aligned noise, plus owner visits for a
+field sweep. Negative reader indices carry a saved unit draw before its
+conditional shift. A field sweep counts its additional evaluated neighbor terms
+separately. Only the supplied RNG advances. For lookahead, pass a copy and
+commit its state with the completed iterations before publishing a checkpoint.
+Generate bounded chunks within a long window.
+
+`problem.iteration_controls(run, controls, phase, it)` returns the native
+`lr`, `β` and iteration options for the absolute one-based iteration `it`.
+It reads the saved polishing start and legacy defaults. `sd_bound` is the
+multiplier of the prior standard deviations.
+
 `step!(n, phase)` advances exactly `n` numerical iterations in the given
 `:exploring`, `:settling` or `:polishing` phase. On return it updates
 `run.iteration` and appends one ELBO per iteration to `run.trace`.
@@ -76,7 +94,9 @@ function _brm_svi_device_problem(t)
     selections = _rk_svi_device_selections(factors, factor_buckets)
     partition = t.partition.context
     bound_data = source -> _rk_jax_bound_data(partition.bound, source)
+    iteration_draws(run, c, phase, n; rng=run.rng) = _brm_svi_iteration_draws(t, run, c, phase, n; rng)
     (; backend=t.m.backend, partition, bound_data, factor_buckets, selections...,
+        iteration_draws, iteration_controls=_brm_svi_iteration_controls,
         kernels=_rk_svi_kernels(), global_clip=_BRM_SVI_GLOBAL_CLIP,
         unit_trust=_BRM_SVI_UNIT_TRUST, unit_mean_trust=_BRM_SVI_UNIT_MEAN_TRUST,
         coupling_trust=_BRM_SVI_COUPLING_TRUST,
