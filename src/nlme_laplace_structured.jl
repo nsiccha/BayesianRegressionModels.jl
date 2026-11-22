@@ -522,11 +522,14 @@ end
 # The link-scale parameters of every entry at a packed point.
 function _brm_slap_psi!(ψ, p, values)
     for e in eachindex(ψ)
-        k = p.port[e]
-        θ = k == 0 ? p.fixed[e] : p.index[e] == 0 ? values[k] : values[k][p.index[e]]
-        ψ[e] = _brm_lap_link(p.link[e], θ)
+        ψ[e] = _brm_slap_psi(p, values, e)
     end
     ψ
+end
+@inline function _brm_slap_psi(p, values, e)
+    k = p.port[e]
+    θ = k == 0 ? p.fixed[e] : p.index[e] == 0 ? values[k] : values[k][p.index[e]]
+    _brm_lap_link(p.link[e], θ)
 end
 
 # Unit l's draws vector b_l, concatenated over the effect blocks, from the

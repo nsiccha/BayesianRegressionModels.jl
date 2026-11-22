@@ -1,7 +1,10 @@
 # Sum cells share the ordinary sparse engine's mode search and row terms.
 # Only curvature storage, factorization and the sum-factor chain rule differ.
 function _brm_spl_precision(p::BRMSparseLaplaceProblem)
-    D = copy(p.pattern)
+    # h's pattern is fixed, so a precision shares its index arrays (never
+    # written) and owns its values: one is made per Newton step.
+    D = SparseMatrixCSC(size(p.pattern)..., SparseArrays.getcolptr(p.pattern),
+        rowvals(p.pattern), copy(nonzeros(p.pattern)))
     any(g -> g isa _BRMSumCellGroup, p.cells) || return D
     _brm_lu_selinv_available() || _brm_nlme_error(
         "sum-cell Laplace needs SelectedInversion's pivoted KLU API; " *
