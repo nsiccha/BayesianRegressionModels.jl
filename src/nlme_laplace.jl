@@ -116,10 +116,10 @@ A copy starts without it.
 
 When every likelihood term's parameters depend on its unit's random effects
 only through linear predictors (Poisson-log, Bernoulli/binomial-logit,
-negative-binomial with log mean and log shape, Normal; unweighted,
+negative-binomial or Gamma with log mean and log shape, Normal; unweighted,
 uncensored, flat groupings), the problem is a
 [`BRMStructuredLaplaceProblem`](@ref): each unit's mode is its own Newton
-search on its own rows from closed-form per-row derivatives, and the gradient
+search on its own rows from per-row derivatives, and the gradient
 is one reverse sweep of the likelihood parameters. Otherwise it is a
 `BRMLaplaceProblem`, which differentiates the whole model. `structured=true`
 requires the first (refusing with the reason), `false` forces the second.

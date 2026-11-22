@@ -185,6 +185,66 @@ end
     end
 end
 
+@stestset "Gamma log-mean regression, sampled and integrated shape effects" begin
+    # Independent derivatives in log mean a and log shape b. The shape-only
+    # derivatives also differentiate the Gamma normalizing constant.
+    for (a, b, y) in ((-0.3, 0.0, 0.2), (0.4, -1.2, 2.7), (1.1, 1.7, 4.3))
+        k, ratio = exp(b), y * exp(-a)
+        row = BRM._brm_lap_row(BRM._BRM_LAP_GAMMA, y, 1.0, a, b, true)
+        g1 = k * (ratio - 1)
+        g2 = k * (1 + b + log(ratio) - ratio - BRM.digamma(k))
+        h22 = g2 + k - k^2 * BRM.trigamma(k)
+        t222 = h22 + k - 2k^2 * BRM.trigamma(k) - k^3 * BRM.polygamma(2, k)
+        @test row.v ≈ logpdf(Gamma(k, exp(a) / k), y)
+        @test [row.g1, row.g2] ≈ [g1, g2]
+        @test [row.h11, row.h12, row.h22] ≈ [-k * ratio, g1, h22]
+        @test [row.t111, row.t112, row.t122, row.t222] ≈ [k * ratio, -k * ratio, g1, t222]
+    end
+    for k in (0.7, 1.0, 2.0), y in (-1.0, 0.0, Inf)
+        @test BRM._brm_lap_gamma(0.0, log(k), y) == logpdf(Gamma(k, 1 / k), y)
+    end
+    @test BRM._brm_lap_gamma(800.0, 0.0, 1.0) == -800.0
+
+    data = (; g=repeat(1:4; inner=3), y=[0.4, 1.2, 0.6, 0.9, 1.5, 0.5,
+        0.7, 1.8, 1.3, 1.2, 2.1, 1.6])
+    fixed = RKBRMI(@brm data begin
+        log(mu) ~ 1 + (1 | g)
+        y ~ Gamma(2.0, mu / 2.0)
+    end)
+    plan = brm_laplace_plan(fixed; ad_backend=NLME_AD, draws=16, ess_floor=0)
+    term = only(plan.terms)
+    @test term.admitted && term.class === :gated
+    @test occursin("Gamma", term.reason)
+
+    sampled = RKBRMI(@brm data begin
+        shape ~ Gamma(2, 1)
+        log(mu) ~ 1 + (1 | g)
+        effect(mu, :) ~ Normal(0, 2)
+        y ~ Gamma(shape, mu / shape)
+    end)
+    moving = RKBRMI(@brm data begin
+        log(mu) ~ 1 + (1 | loc | g)
+        log(shape) ~ 1 + (1 | dispersion | g)
+        y ~ Gamma(shape, mu / shape)
+    end)
+    for (rk, integrate) in ((sampled, (:g,)), (sampled, (:g, :coefficients)), (moving, (:g,)))
+        p = spl_problem(rk, integrate)
+        @test all(==(BRM._BRM_LAP_GAMMA), p.family)
+        @test BRM._brm_spl_concave(p) == (rk === sampled)
+        φ = collect(range(-0.2, 0.25; length=length(p.population)))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
+        @test isfinite(value)
+        @test gradient ≈ spl_fd(p, φ) rtol=5e-6 atol=1e-6
+        if integrate == (:g,)
+            unit = brm_laplace_problem(rk; ad_backend=NLME_AD, structured=true)
+            @test unit.names == p.names
+            uv, ug = LogDensityProblems.logdensity_and_gradient(unit, φ)
+            @test uv ≈ value atol=1e-8
+            @test ug ≈ gradient atol=1e-7
+        end
+    end
+end
+
 @stestset "a density that is not concave everywhere still finds its mode" begin
     # A random effect on a negative-binomial shape makes the density
     # non-concave away from its mode, where h need not be positive definite

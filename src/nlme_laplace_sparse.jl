@@ -498,7 +498,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     refusal = _brm_slap_response_refusal(backend; cells=true, values=true)
     refusal === nothing || _brm_nlme_error("brm_laplace_problem: integrate = " *
         "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
-        "of a closed-form family or an observation factor, but $refusal")
+        "of a supported family or an observation factor, but $refusal")
     responses = _brm_slap_responses(backend.plan)
     (; records, names, integrated, population, blocks, omega, partitioned) =
         _brm_spl_layout(backend, integrate; declarations)
@@ -1717,7 +1717,7 @@ const _BRM_LAP_STAGE_TOL = 1e-12
 _brm_lap_stages(concave::Bool) = concave ? (1.0,) :
     ntuple(k -> k / _BRM_LAP_STAGES, _BRM_LAP_STAGES)
 
-# Row terms of the closed-form families are log-concave in their first
+# Supported regression rows are log-concave in their first
 # parameter, which the effects enter linearly, and the prior is Gaussian. A
 # moving second parameter (an effect on a scale or shape) or an observation
 # factor (`@plate` cell, sum) leaves concavity unknown.

@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.384
+
+- The sparse and per-unit regression Laplace solvers accept
+  `y ~ Gamma(shape, mu / shape)` with a `log(mu)` predictor. The shape can
+  be fixed, sampled, or modeled with its own log-link predictor. Automatic
+  integration checks the importance diagnostic for effects on the mean
+  when the shape is conditionally fixed.
+
 ## 0.2.383
 
 - **Breaking:** For `rw(t; order=2, sum_to_zero=true)`, the `:structured`
