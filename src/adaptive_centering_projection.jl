@@ -153,8 +153,11 @@ _adaptive_walk_blocks(walks) =
 
 # ---- The level design and its projection -------------------------------------
 
-# A numeric summand `values * x[coordinate]` of a predictor.
+# A numeric summand `values * x[coordinate]` of a predictor, labelled by its
+# coefficient: a grouping whose design has a column of that label (the matched
+# coefficient, the cell's `coefficient`) does not project it.
 struct _AdaptiveNumericColumn
+    label::Symbol
     coordinate::Int
     values::Vector{Float64}
 end
@@ -185,8 +188,20 @@ end
 # disagree on the rows, or repeat a label, has no design.
 function _adaptive_grouping_designs(brmi, context, predictor)
     out = Dict{Symbol,Tuple{Vector{Symbol},Matrix{Float64},Vector{Int}}}()
-    plans = _brm_simple_random_effect_plans(brmi, predictor, context)
-    isnothing(plans) && return out
+    # One declaration at a time: the shared planner plans a predictor's blocks
+    # together and refuses one that repeats a grouping (`(1 | h) + (0 + x | h)`),
+    # which adaptive centring maps as two blocks whose design is joint here.
+    # Multi-membership and stratified (`gr(g, by=b)`) declarations have no
+    # per-row level codes of their own.
+    plans = Any[]
+    for declaration in context.group_declarations
+        declaration.predictor === predictor || continue
+        declaration.raw_group isa MultiMembershipTerm && continue
+        declaration.descriptor isa Tuple && continue
+        p = _brm_simple_random_effect_plans(brmi, predictor, context;
+                                            select = x -> x === declaration)
+        isnothing(p) || append!(plans, p)
+    end
     groups = Dict{Symbol,Vector{Any}}()
     for p in plans
         p isa _BRMRandomEffectPlan && p.group isa Symbol && isnothing(p.by) || continue
@@ -207,9 +222,8 @@ end
 # The numeric population columns of `predictor` its cells read: every column of
 # the shared population design whose label is a population coefficient that
 # `coordinate(label)` resolves to a sampled, unbounded coordinate (0 otherwise),
-# on `n` rows. Matched columns (a label of a random-effect design column) are
-# left to the cell's `coefficient`.
-function _adaptive_numeric_columns(brmi, context, predictor, n, matched, coordinate)
+# on `n` rows.
+function _adaptive_numeric_columns(brmi, context, predictor, n, coordinate)
     out = _AdaptiveNumericColumn[]
     op = linear_predictor_op(brmi, predictor)
     isnothing(op) && return out
@@ -221,10 +235,10 @@ function _adaptive_numeric_columns(brmi, context, predictor, n, matched, coordin
     names = popcoefnames(brmi, predictor)
     for column in design.columns
         label = column.label
-        label in names && !(label in matched) || continue
+        label in names || continue
         length(column.values) == n || continue
         j = coordinate(label)
-        j == 0 || push!(out, _AdaptiveNumericColumn(j, Float64.(column.values)))
+        j == 0 || push!(out, _AdaptiveNumericColumn(label, j, Float64.(column.values)))
     end
     out
 end
@@ -281,8 +295,8 @@ struct _AdaptiveProjectedEntries
 end
 
 function _adaptive_project_grouping(rows::_AdaptivePredictorRows, group::Symbol,
-                                    G::Int)
-    labels, Z, codes = rows.designs[group]
+                                    codes::AbstractVector{<:Integer}, G::Int)
+    labels, Z, _ = rows.designs[group]
     M = length(labels)
     factors = [Tuple{Int,Float64,Int}[] for _ in 1:M, _ in 1:G]
     walks = [Tuple{Any,Int,Float64}[] for _ in 1:M, _ in 1:G]
@@ -312,6 +326,7 @@ function _adaptive_project_grouping(rows::_AdaptivePredictorRows, group::Symbol,
             end
         end
         for col in rows.numeric
+            col.label in labels && continue   # the matched coefficient
             add!(view(col.values, I), (m, w) -> push!(factors[m, g], (col.coordinate, w, 0)))
         end
         for walk in rows.walks
@@ -338,8 +353,7 @@ function _adaptive_predictor_rows(brmi, context, predictor, walks, coordinate,
     isempty(designs) && return nothing
     n = length(last(first(values(designs))))
     all(d -> length(last(d)) == n, values(designs)) || return nothing
-    matched = Set{Symbol}(l for d in values(designs) for l in first(d))
-    numeric = _adaptive_numeric_columns(brmi, context, predictor, n, matched, coordinate)
+    numeric = _adaptive_numeric_columns(brmi, context, predictor, n, coordinate)
     cats = filter(c -> length(c.codes) == n, categorical)
     ws = filter(w -> w.predictor === predictor && length(w.time_idx) == n, walks)
     _AdaptivePredictorRows(n, designs, numeric, cats, ws)
@@ -365,11 +379,22 @@ function _adaptive_projector_context(p::_AdaptiveProjector)
     p.context[]
 end
 
+# Whether two row codings group the rows the same way: each level of one is
+# one level of the other (a relabelling, as RK's level order of SBBRMI's).
+function _adaptive_same_partition(a::AbstractVector, b::AbstractVector)
+    length(a) == length(b) || return false
+    ab, ba = Dict{Any,Any}(), Dict{Any,Any}()
+    for (x, y) in zip(a, b)
+        get!(ab, x, y) == y && get!(ba, y, x) == x || return false
+    end
+    true
+end
+
 # Cell `(term coefficient, level g)` of a block grouped by `group` on
 # `predictor` with row codes `block_rows`: the projected entries of every level,
 # as `(factors, walks)` vectors indexed by level, or `nothing` when the grouping
-# cannot be projected (its geometry is unreadable, its rows do not match the
-# block's, or the term is not one of its design columns).
+# cannot be projected (its geometry is unreadable, its rows group differently
+# from the block's, or the term is not one of its design columns).
 function _adaptive_projected_term(p::_AdaptiveProjector, predictor::Symbol, group::Symbol,
                                   coefficient::Symbol, block_rows::AbstractVector, G::Int)
     entries = get!(p.entries, (predictor, group)) do
@@ -379,9 +404,10 @@ function _adaptive_projected_term(p::_AdaptiveProjector, predictor::Symbol, grou
                                      label -> p.coordinate(predictor, label),
                                      p.categorical(predictor))
         end
-        isnothing(rows) || !haskey(rows.designs, group) ? nothing :
-            (; projected=_adaptive_project_grouping(rows, group, G),
-               codes=rows.designs[group][3])
+        isnothing(rows) || !haskey(rows.designs, group) ||
+            !_adaptive_same_partition(rows.designs[group][3], block_rows) ? nothing :
+            (; projected=_adaptive_project_grouping(rows, group, block_rows, G),
+               codes=collect(block_rows))
     end
     isnothing(entries) && return nothing
     entries.codes == block_rows || return nothing
@@ -393,4 +419,4 @@ end
 
 # The walks the wrapper maps for `model`, as `_adaptive_cell_blocks` reads them.
 _adaptive_cell_walks(model, names) = _adaptive_walk_terms(model, names)
-_adaptive_cell_walks(::RKBRMI, names) = _AdaptiveWalkTerm[]
+_adaptive_cell_walks(rk::RKBRMI, names) = _rk_adaptive_walk_terms(rk, names)

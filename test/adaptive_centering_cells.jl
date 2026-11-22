@@ -26,7 +26,8 @@
 # cdar walk (0.2.316); HSGP basis-weight cells (squared-exponential, anisotropic,
 # grouped, periodic, known hyperparameters) on both backends, beside a
 # random-effect block; grouped HSGP level cells on both backends; SBBRMI
-# least-squares-located exact totals and S2Z contrasts or group coordinates.
+# least-squares-located exact totals and S2Z contrasts or group coordinates;
+# projected locations and `rw` walk cells on both backends (0.2.386).
 #
 #     julia --project=test test/adaptive_centering_cells.jl [testset filter...]
 include(joinpath(@__DIR__, "fitting_packages.jl"))
@@ -226,7 +227,7 @@ function public_map(x, plan, controls)
             s[c.cell] = exp(log_s)
             continue
         end
-        if c.family !== :ranef   # a scalar cell with target 0
+        if c.family !== :ranef && c.family !== :rw   # a scalar cell with target 0
             L, log_s = scalar_cell(c, x)
             cc = controls[c.cell]
             y[c.effect] = (x[c.effect] - cc * L) * exp(-cc * log_s)
@@ -241,12 +242,17 @@ function public_map(x, plan, controls)
             m += C[k, l] * (y[plan.cells[q].effect] - t * loc[q]) / s[q]^t
         end
         L = m + (c.location.coefficient == 0 ? zero(T) : x[c.location.coefficient])
-        for j in c.location.factors
-            L += x[j]
+        for t in c.location.terms
+            L += t.log_scale == 0 ? t.weight * x[t.coordinate] :
+                (t.weight * exp(x[t.log_scale])) * x[t.coordinate]
         end
         for a in c.location.containers
             ya = y[plan.cells[a].effect]
             L += plan.blocks[plan.cells[a].block].target == 0 ? s[a] * ya : ya
+        end
+        # walk cells are compiled non-centred: their effect is `s * y`
+        for w in c.location.walks
+            L += w.weight * (s[w.cell] * y[plan.cells[w.cell].effect])
         end
         sp = C[k, k]
         y[c.effect] = t * L + (x[c.effect] - cc * L) * sp^(t - cc)
@@ -264,11 +270,19 @@ plain(x::NamedTuple) = all(plain, values(x))
 plain(_) = false
 
 # The cell's location as `adaptive_centering_controls` labels it.
+weighted(w, name) = w == 1 ? name : string(round(w; sigdigits=6), "*", name)
+
 function location_label(plan, c, names)
     parts = String[]
     c.location.coefficient == 0 || push!(parts, names[c.location.coefficient])
-    append!(parts, names[c.location.factors])
+    for t in c.location.terms
+        push!(parts, weighted(t.weight, t.log_scale == 0 ? names[t.coordinate] :
+            "exp($(names[t.log_scale]))*" * names[t.coordinate]))
+    end
     append!(parts, (plan.cells[a].name for a in c.location.containers))
+    for w in c.location.walks
+        push!(parts, weighted(w.weight, plan.cells[w.cell].name))
+    end
     isempty(parts) ? nothing : join(parts, " + ")
 end
 
@@ -398,7 +412,7 @@ end
                    isempty(b.correlation.free) && b.levels == levels(df.g), plan.blocks)
     @test Set(names[c.location.coefficient] for c in plan.cells) ==
           Set(["pop_mu.beta_pop.1", "pop_mu.beta_pop.2"])
-    @test all(c -> isempty(c.location.containers) && isempty(c.location.factors),
+    @test all(c -> isempty(c.location.containers) && isempty(c.location.terms),
               plan.cells)
     for b in plan.blocks
         atom = only(only(b.log_scales).linear)
@@ -573,9 +587,14 @@ end
         sd(:, g) ~ Exponential(30.0)
         y ~ Normal(mu, se)
     end)
-    @test any(c -> !isempty(c.location.factors), plan.cells)
-    @test all(c -> length(c.location.factors) <= 1 && c.location.coefficient != 0,
+    @test any(c -> !isempty(c.location.terms), plan.cells)
+    @test all(c -> length(c.location.terms) <= 1 && c.location.coefficient != 0,
               plan.cells)
+    # a factor level holding the whole level enters with weight 1 and no scale
+    @test all(c -> all(t -> t.weight == 1.0 && t.log_scale == 0, c.location.terms),
+              plan.cells)
+    # the row shape before 0.2.386 is gone: a reader of it fails on the field
+    @test !hasproperty(first(plan.cells).location, :factors)
 end
 
 @stestset "RKBRMI: a Student-t unit nested in an ordinary band (joint wrapper)" begin
@@ -708,6 +727,96 @@ end
     @test all(c -> c.family === :ranef, adaptive_centering_cells(rk; hsgp=false).cells)
 end
 
+# Projected locations and `rw` walk cells (snag adaptive-centrin-647119ba). A
+# trip-like grouping with an intercept and a slope sits in a factor level,
+# carries a covariate constant within it (`near`) and one varying around it
+# (`lprev`), and lies in one step of an `rw(year)` walk. Each backend passes the
+# public-map parity above, and the two describe the same map: the walk's
+# innovations first, as `:rw` cells, and for every trip cell the same weights on
+# its factor level, its covariates' within-trip fit and the walk cells it reads.
+@stestset "RKBRMI and SBBRMI: projected covariates and rw walk cells" begin
+    rng = Xoshiro(11)
+    NT, NR = 24, 5
+    near = repeat(Float64.(rand(rng, 0:1, NT)); inner=NR)
+    data = (; trip=repeat(["t$(lpad(i, 2, '0'))" for i in 1:NT]; inner=NR),
+              year=repeat([2021 + mod(i, 3) for i in 1:NT]; inner=NR),
+              dtype=repeat([isodd(i) ? "a" : "b" for i in 1:NT]; inner=NR),
+              near, pos=repeat(collect(1.0:NR), NT),
+              lprev=near .+ 0.1 .* randn(rng, NT * NR), y=randn(rng, NT * NR))
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 0 + factor(dtype) + near + lprev + (1 + pos || trip) + rw(year)
+        y ~ Normal(mu, sigma)
+    end
+    _, rk_plan, rk_names = rk_parity(brmi)
+    sb_plan, _ = sb_parity(SBBRMI(brmi; mod=@__MODULE__))
+    # What a trip cell reads, without the backend's coordinates: its walk cells
+    # by their place in the walk, and its weights, in the order both backends
+    # list them (factor level, `near`, `lprev`).
+    function reads(plan)
+        walk = [c.cell for c in plan.cells if c.family === :rw]
+        Dict((string(c.level), c.margin.coefficient) =>
+                 (; weights=[t.weight for t in c.location.terms],
+                    scales=[t.log_scale for t in c.location.terms],
+                    walks=[findfirst(==(w.cell), walk) for w in c.location.walks],
+                    walk_weights=[w.weight for w in c.location.walks],
+                    matched=c.location.coefficient != 0)
+             for c in plan.cells if c.family === :ranef)
+    end
+    for plan in (rk_plan, sb_plan)
+        @test plan.blocks[1].family === :rw
+        @test [c.family for c in plan.cells[1:3]] == [:rw, :rw, :ranef]
+        @test count(c -> c.family === :rw, plan.cells) == 2      # 3 years, 2 innovations
+        @test length(plan.cells) == 2 + 2 * NT
+        @test all(c -> c.location.coefficient == 0 && isempty(c.location.terms) &&
+                       isempty(c.location.containers) && isempty(c.location.walks),
+                  (c for c in plan.cells if c.family === :rw))
+    end
+    @test [rk_names[c.effect] for c in rk_plan.cells[1:2]] ==
+          ["rw_mu_year.z.1", "rw_mu_year.z.2"]
+    rk_reads, sb_reads = reads(rk_plan), reads(sb_plan)
+    @test keys(rk_reads) == keys(sb_reads) && length(rk_reads) == 2 * NT
+    for (key, sb) in sb_reads
+        rk = rk_reads[key]
+        @test rk.weights ≈ sb.weights rtol=1e-12
+        @test all(iszero, rk.scales) && all(iszero, sb.scales)
+        @test rk.walks == sb.walks && rk.walk_weights == sb.walk_weights
+        @test !rk.matched && !sb.matched    # no population intercept, no `pos` coefficient
+    end
+    # The oracle the weights answer to: a trip's intercept and slope cells read
+    # the least-squares fit of each covariate on its own rows' `(1, pos)`, the
+    # constant `near` whole (or not at all), and the walk innovations up to its
+    # year with weight 1.
+    for lev in unique(data.trip)
+        I = findall(==(lev), data.trip)
+        fit = hcat(ones(NR), data.pos[I]) \ data.lprev[I]
+        n0 = data.near[first(I)]
+        intercept, slope = sb_reads[(lev, :Intercept)], sb_reads[(lev, :pos)]
+        @test intercept.weights ≈ (n0 == 0 ? [1.0, fit[1]] : [1.0, 1.0, fit[1]]) rtol=1e-10
+        @test slope.weights ≈ [fit[2]] rtol=1e-10
+        steps = data.year[first(I)] - 2021
+        @test intercept.walks == collect(1:steps) && intercept.walk_weights == ones(steps)
+        @test isempty(slope.walks)
+    end
+    # A model whose only cells are a walk's innovations builds on both backends.
+    walk_only = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + near + rw(year)
+        y ~ Normal(mu, sigma)
+    end
+    _, rk_walk, _ = rk_parity(walk_only)
+    sb_walk, _ = sb_parity(SBBRMI(walk_only; mod=@__MODULE__))
+    @test [c.family for c in rk_walk.cells] == [c.family for c in sb_walk.cells] ==
+          [:rw, :rw]
+    # Beside S2Z contrasts the walk's cells still come first.
+    s2z_plan, _ = sb_parity(SBBRMI((@brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + near + (1 | trip) + rw(year)
+        y ~ Normal(mu, sigma)
+    end); mod=@__MODULE__, total_groups=(), s2z_groups=[:trip], s2z_rho=0.0))
+    @test [c.family for c in s2z_plan.cells] == vcat([:rw, :rw], fill(:scalar, NT - 1))
+end
+
 @stestset "SBBRMI: factor levels and crossed containing groupings" begin
     rng = Xoshiro(17)
     NP = 30
@@ -722,7 +831,7 @@ end
     plan, names = sb_parity(model)
     pairs = [c for c in plan.cells if c.group === :pair]
     @test length(pairs) == NP
-    @test all(c -> length(c.location.factors) == 1 && c.location.coefficient == 0, pairs)
+    @test all(c -> length(c.location.terms) == 1 && c.location.coefficient == 0, pairs)
     @test all(c -> length(c.location.containers) == 1 &&
                    plan.cells[only(c.location.containers)].group === :sec, pairs)
 end
@@ -750,7 +859,8 @@ end
     @test byg[:h].target == 1.0 && length(byg[:h].correlation.cpc) == 1 &&
           isempty(byg[:h].correlation.free)
     @test all(s -> isempty(s.linear) && isempty(s.unit), byg[:h].log_scales)
-    @test all(c -> c.location == (; coefficient=0, factors=Int[], containers=Int[]),
+    @test all(c -> c.location.coefficient == 0 && isempty(c.location.terms) &&
+                   isempty(c.location.containers) && isempty(c.location.walks),
               (c for c in plan.cells if c.group === :h))
     @test all(c -> c.term != 1 || plan.cells[only(c.location.containers)].group === :band,
               (c for c in plan.cells if c.group === :g))

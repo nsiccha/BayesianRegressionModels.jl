@@ -15,8 +15,13 @@
 # - under mixed controls the inverse map returns the source point and the
 #   gradient equals central finite differences, on the per-pair, joint (with an
 #   HSGP) and learned-order wrappers;
-# - walk cells come first, as `:rw` cells, and the reported locations name what
-#   each cell reads.
+# - walk cells come first, as `:rw` cells, the reported locations name what
+#   each cell reads, and `centeredness = :midpoint` leaves the walk cells at
+#   their compiled start.
+#
+# Both backends' public cell rows for this model, their agreement, and a model
+# with walk cells only are in test/adaptive_centering_cells.jl ("projected
+# covariates and rw walk cells").
 #
 # Run: julia --project=test test/adaptive_centering_projected_location.jl
 
@@ -187,6 +192,29 @@ end
     lev = D.trip[findfirst(==(2023), D.year)]
     r = only(r for r in rows if r.family === :ranef && r.level == lev)
     @test occursin("exp(rw_mu_year_sigma)*", r.location)
+    # Its plan reads no other cell, so it takes the hand-written K <= 2 reverse
+    # pass, whose pullback through the walk's SD equals WarmupHMC's generic pass.
+    enzyme_ext = Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCEnzymeExt)
+    wrapped = problem(M_C, P_C; centeredness = rand(Xoshiro(5), n_cells(M_C, P_C)))
+    state = first(WarmupHMC.reparametrizer(wrapped).pairs).second.args[1].state
+    @test any(!=(0), state.pair_factor_scales) && !enzyme_ext._small_plan_reads_cells(state)
+    @test which(LogDensityProblems.logdensity_and_gradient,
+                (typeof(wrapped), Vector{Float64})).module === enzyme_ext
+    q = 0.3 .* randn(Xoshiro(6), LogDensityProblems.dimension(wrapped))
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, q)
+    lp_generic, gradient_generic = invoke(LogDensityProblems.logdensity_and_gradient,
+        Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, wrapped, q)
+    @test lp == lp_generic
+    @test gradient ≈ gradient_generic rtol = 1e-11 atol = 1e-11
+    # the trip model's cells read walk cells: that plan takes the generic pass
+    state_a = first(WarmupHMC.reparametrizer(problem(M_A, P_A)).pairs).second.args[1].state
+    @test enzyme_ext._small_plan_reads_cells(state_a)
+end
+
+@testset "centeredness = :midpoint moves the trip cells, not the walk cells" begin
+    rows = adaptive_centering_controls(problem(M_A, P_A; centeredness = :midpoint), M_A)
+    @test any(r -> r.family === :rw, rows)
+    @test all(r -> r.c == (r.family === :rw ? 0.0 : 0.5), rows)
 end
 
 @testset "mixed controls: inverse, log-Jacobian and gradient" begin
@@ -216,9 +244,13 @@ end
     walk = [c for c in plan.cells if c.family === :rw]
     @test length(walk) == 2 && all(c -> c.cell <= 2, walk)
     @test any(c -> !isempty(c.location.walks), plan.cells)
-    @test all(c -> length(c.location.factor_weights) == length(c.location.factors) ==
-                   length(c.location.factor_scales), plan.cells)
-    @test all(c -> length(c.location.walk_weights) == length(c.location.walks) &&
-                   all(<(c.cell), c.location.walks), plan.cells)
+    @test all(c -> all(w -> w.cell < c.cell && plan.cells[w.cell].family === :rw,
+                       c.location.walks), plan.cells)
+    @test all(c -> all(t -> t.coordinate != 0 && t.log_scale == 0, c.location.terms),
+              plan.cells)      # a zero-start walk is read through its cells, unscaled
+    # a sum-to-zero walk's path values are terms scaled by the walk's log SD
+    sigma_c = findfirst(==("rw_mu_year_sigma"), U_C)
+    @test any(c -> any(t -> t.log_scale == sigma_c, c.location.terms),
+              adaptive_centering_cells(M_C, U_C).cells)
     @test all(b -> b.family === :rw, plan.blocks[1:1])
 end

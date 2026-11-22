@@ -30,6 +30,44 @@ const SmallIndexedReparametrization = WarmupHMC.IndexedReparametrization{
 # `(1 - tanh(x)^2) * seed`; the two are algebraically equal but not bit-equal.
 const ENZYME_TANH_PULLBACK_FROM_PRIMAL = pkgversion(Enzyme) >= v"0.13.200"
 
+# Whether a location of the plan reads another cell: a containing grouping's
+# cell (snag brm-zone-8-adapt-1b407672) or an `rw` walk's cells (snag
+# adaptive-centrin-647119ba). The hand-written K <= 2 pass below does not cover
+# those; it does cover a location's weighted read-only coordinates.
+_small_plan_reads_cells(state) =
+    !isempty(state.pair_containers) || !isempty(state.pair_walks)
+
+# The weighted read-only coordinates of pair `p`'s location: the factor levels,
+# numeric population columns and sum-to-zero walk levels its level's rows pin
+# (`AC_EXT._contained_location` for a pair that reads no other cell), summed in
+# the accessor's order.
+@inline function _small_plan_terms(x, state, p)
+    acc = zero(eltype(x))
+    for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
+        acc += AC_EXT._factor_term(x, state, f)
+    end
+    acc
+end
+
+# Its pullback: `seed` is the adjoint of the location. An entry `w * x[j]` sends
+# `w * seed` to `j`; a scaled entry `(w * exp(x[k])) * x[j]` also sends
+# `(w * exp(x[k]) * x[j]) * seed` to its log-scale coordinate `k`.
+@inline function _small_plan_terms_pullback!(gradient, x, state, p, seed)
+    for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
+        j = state.pair_factors[f]
+        k = state.pair_factor_scales[f]
+        w = state.pair_factor_weights[f]
+        if k == 0
+            gradient[j] += w * seed
+        else
+            scaled = w * exp(x[k])
+            gradient[j] += scaled * seed
+            gradient[k] += (scaled * x[j]) * seed
+        end
+    end
+    nothing
+end
+
 # Differentiating the generic indexed loop still leaves one Enzyme rule call per
 # accessor.  For BRM's scalar and intercept/slope blocks, run that same reverse
 # pass directly.  The pair vector's exact concrete type makes this dispatch
@@ -42,10 +80,15 @@ function LogDensityProblems.logdensity_and_gradient(
     x::AbstractVector,
 ) where {P,B}
     state = first(problem.reparametrizer.pairs).second.args[1].state
-    # A location that reads factor levels or containing cells (snag
-    # brm-zone-8-adapt-1b407672) is outside this hand-written pass.
-    state.extended && return invoke(LogDensityProblems.logdensity_and_gradient,
-        Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
+    # A location that reads another cell (a containing grouping's, a walk's) is
+    # outside this hand-written pass. One that reads only weighted coordinates
+    # stays in it: most models with a covariate have such locations, and the
+    # generic path cost 0.59 ms per gradient against 0.21 ms here on 2,000
+    # intercept cells at controls 0.5 (snag adaptive-centrin-647119ba).
+    extended = state.extended
+    extended && _small_plan_reads_cells(state) &&
+        return invoke(LogDensityProblems.logdensity_and_gradient,
+            Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
     ljac, y = problem.reparametrizer(x)
     ld, model_gradient =
         LogDensityProblems.logdensity_and_gradient(problem.problem, y)
@@ -99,6 +142,7 @@ function LogDensityProblems.logdensity_and_gradient(
             if term == 1
                 location = zero(T)
                 own_location == 0 || (location = location + x[own_location])
+                extended && (location = location + _small_plan_terms(x, state, pair_number))
                 log_scale = log_C11
             else
                 first_pair = state.pair_lookup[bi][1, group]
@@ -107,12 +151,14 @@ function LogDensityProblems.logdensity_and_gradient(
                 u = x[block.effects[1, group]]
                 m = zero(T)
                 first_location == 0 || (m = m + x[first_location])
+                extended && (m = m + _small_plan_terms(x, state, first_pair))
                 numerator = u - c * m
                 denominator = C11^c
                 innovation = numerator / denominator
                 location = zero(T)
                 location += C21 * innovation
                 own_location == 0 || (location = location + x[own_location])
+                extended && (location = location + _small_plan_terms(x, state, pair_number))
                 log_scale = log_C22
             end
 
@@ -131,6 +177,7 @@ function LogDensityProblems.logdensity_and_gradient(
             dlocation += model_seed * target
 
             own_location == 0 || (gradient[own_location] += dlocation)
+            extended && _small_plan_terms_pullback!(gradient, x, state, pair_number, dlocation)
             if term == 1
                 if exact1
                     dC11 = dlog_scale / C11
@@ -181,6 +228,8 @@ function LogDensityProblems.logdensity_and_gradient(
                 gradient[effect_index] += dnumerator
                 first_location == 0 ||
                     (gradient[first_location] += (-dnumerator) * c)
+                extended && _small_plan_terms_pullback!(gradient, x, state, first_pair,
+                                                        (-dnumerator) * c)
             end
             gradient[index] += dshifted
         end

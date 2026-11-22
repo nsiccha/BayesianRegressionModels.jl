@@ -105,7 +105,16 @@ block_of(model, unc, group) = only(b for b in BRM.adaptive_centering_blocks(mode
     rp = problem(M_W, P_W)
     rows = ranef_rows(rp, M_W)
     cov = factor_coordinates(M_W, UNC_W, :lw, :cov)
-    @test all(r -> r.location === nothing, (r for r in rows if r.group === :sec))
+    # A section holds pairs of every covariate: it reads the covariate levels
+    # by their share of its rows (snag adaptive-centrin-647119ba).
+    label(w, name) = w == 1 ? name : string(round(w; sigdigits = 6), "*", name)
+    for r in rows
+        r.group === :sec || continue
+        I = findall(==(string(r.level)), W_DATA.sec)
+        levels = unique(W_DATA.cov[I])
+        @test r.location == join([label(count(==(c), W_DATA.cov[I]) / length(I),
+                                        UNC_W[cov[c]]) for c in levels], " + ")
+    end
     for i in 1:NP
         r = level_row(rows, :pair, W_DATA.pair[i])
         sec = level_row(rows, :sec, W_DATA.sec[i])
@@ -131,7 +140,11 @@ end
         effect = Dict{String,Float64}()
         for (g, level) in enumerate(string.(sb.ranef.levels))
             i = sb.effects[1, g]
-            z = q[i] / tau_s^c(:sec, level)
+            # a section's location: its rows' covariate levels by their share
+            # (snag adaptive-centrin-647119ba)
+            I = findall(==(level), W_DATA.sec)
+            Ls = sum(q[cov[v]] for v in W_DATA.cov[I]) / length(I)
+            z = (q[i] - c(:sec, level) * Ls) / tau_s^c(:sec, level)
             @test model[i] ≈ z atol = 1e-12
             effect[level] = tau_s * z
         end
@@ -212,11 +225,17 @@ intercept_name(unc) = only(n for n in unc if startswith(n, "pop_mu_beta_pop.") &
     icpt = intercept_name(UNC_N)
     contrast = factor_coordinates(M_N, UNC_N, :mu, :cov)    # reference k1 has none
     first_row(col, level) = findfirst(==(level), N_DATA[col])
+    label(w, name) = w == 1 ? name : string(round(w; sigdigits = 6), "*", name)
     for r in rows
         i = first_row(r.group, string(r.level))
         parts = [icpt]
-        r.group === :unit && haskey(contrast, N_DATA.cov[i]) &&
-            push!(parts, UNC_N[contrast[N_DATA.cov[i]]])
+        # each covariate level by its share of the level's rows: a unit's whole,
+        # a band's or region's a third each (snag adaptive-centrin-647119ba)
+        I = findall(==(string(r.level)), N_DATA[r.group])
+        for v in unique(N_DATA.cov[I])
+            haskey(contrast, v) || continue
+            push!(parts, label(count(==(v), N_DATA.cov[I]) / length(I), UNC_N[contrast[v]]))
+        end
         r.group in (:band, :unit) && push!(parts, level_row(rows, :region, N_DATA.region[i]).name)
         r.group === :unit && push!(parts, level_row(rows, :band, N_DATA.band[i]).name)
         @test r.location == join(parts, " + ")
@@ -243,8 +262,9 @@ end
             for (g, level) in enumerate(string.(block.ranef.levels))
                 i = first_row(group, level)
                 L = q[icpt] + sum((effects[a][N_DATA[a][i]] for a in above); init = 0.0)
-                group === :unit && haskey(contrast, N_DATA.cov[i]) &&
-                    (L += q[contrast[N_DATA.cov[i]]])
+                I = findall(==(level), N_DATA[group])
+                L += sum(q[contrast[v]] for v in N_DATA.cov[I] if haskey(contrast, v);
+                         init = 0.0) / length(I)
                 c = level_row(rows, group, level).c
                 z = (q[block.effects[1, g]] - c * L) / tau^c
                 @test model[block.effects[1, g]] ≈ z atol = 1e-12
@@ -266,7 +286,9 @@ end
     rp = problem(learned, pl; ranef_order = :learned)
     @test WarmupHMC.reparametrizer(rp) isa
           Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCExt).BRMOrderedCenteringReparametrization
-    @test all(r -> count("+", r.location) == 3 || count("+", r.location) == 2,
+    # a unit: the intercept, its covariate level (none for the reference),
+    # `x`'s mean over its rows, its region and band (snag adaptive-centrin-647119ba)
+    @test all(r -> count("+", r.location) == 4 || count("+", r.location) == 3,
               (r for r in ranef_rows(rp, learned) if r.group === :unit))
     check_gradients(learned, pl; ranef_order = :learned)
 end

@@ -12,6 +12,47 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.386
+
+- `adaptive_centering_problem` (SBBRMI and RKBRMI) centres each random-effect
+  cell on everything else in its predictor that the level's own rows pin, so
+  a cell's `c = 1` coordinate is the level's total as the data see it. Every
+  categorical level, numeric population column and `rw(...)` walk level enters
+  by its least-squares fit on the level's own random-effect design (its `1`,
+  `x`, … columns, `||` blocks included): whole when constant within the level,
+  by its projection when it varies. The matched coefficient and the
+  constant-factor rule are its special cases and are unchanged. A model whose
+  levels read nothing else keeps its exact map; one with group-level or
+  within-level-varying covariates, factors or a walk gains those terms
+  (`adaptive_centering_controls` shows each weight, `0.31*pop_mu_beta_pop.2`).
+  The compiled start (`c = 0`) is unchanged, and so are the model, its priors
+  and its draws; only the sampler's coordinates at `c > 0` move. On the
+  3,940-row bus-load split that prompted it (4 chains of 250 draws, the same
+  sampler and seeds), max R-hat went from 1.60 to 1.03, the minimum bulk ESS
+  from 7 to 98, and the gradient evaluations per chain from 21,000-51,000 to
+  12,000-13,000.
+- A zero-start `rw(...)` walk's innovations are adaptive cells of their own
+  (`family = :rw` in `adaptive_centering_controls` and `adaptive_centering_cells`),
+  centred on 0 at the walk's SD and mapped before the random-effect cells, which
+  read them at their model values. A sum-to-zero walk's level is read through its
+  SD and gets no cells. `centeredness = :midpoint` leaves walk cells at their
+  compiled start, and a model whose only cells are a walk's builds its wrapper
+  (it raised before).
+- **Checkpoints.** Models with `rw(...)` have more cells and a new pair order:
+  warm-up checkpoints written by earlier versions for them do not resume. For
+  any other model whose locations gain terms, an earlier checkpoint's
+  working-frame position and metric belong to the earlier map. Finish such
+  runs on their original BRM version, or start fresh.
+- **Breaking:** `adaptive_centering_cells` rows' `location` is now
+  `(; coefficient, terms, containers, walks)`. `terms` replaces `factors`: each
+  entry is `(; coordinate, weight, log_scale)` and adds
+  `weight * x[coordinate]`, times `exp(x[log_scale])` when `log_scale` is not 0
+  (a sum-to-zero walk's level). `walks` lists the walk cells the cell reads,
+  each `(; cell, weight)`, adding `weight` times that cell's effect `s * y`.
+  A reader that rebuilt the map from `factors` with weight 1 fails on the
+  missing field instead of rebuilding a different map; it must apply the
+  weights, the scales and the walk entries (the docstring's map states them).
+
 ## 0.2.385
 
 - `brm_laplace_integration` accepts `latent_marginals=:gaussian` or

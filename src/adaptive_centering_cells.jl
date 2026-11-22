@@ -57,6 +57,11 @@ _adaptive_cell_level(x) = x isa Tuple ? map(_adaptive_cell_level, x) :
     _brm_transport_level(x)
 
 const _AdaptiveCellLinear = NamedTuple{(:weight, :coordinate),Tuple{Float64,Int}}
+# One further coordinate of a random-effect cell's location, and one walk cell
+# it reads (`location.terms`, `location.walks`).
+const _AdaptiveCellTerm = NamedTuple{(:coordinate, :weight, :log_scale),
+                                     Tuple{Int,Float64,Int}}
+const _AdaptiveCellWalk = NamedTuple{(:cell, :weight),Tuple{Int,Float64}}
 const _AdaptiveCellUnit = NamedTuple{(:log_weight, :log1m_weight, :coordinate),
                                      Tuple{Float64,Float64,Int}}
 const _AdaptiveCellSimplex = NamedTuple{(:weight, :coordinates, :entry, :transform),
@@ -159,14 +164,16 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
         for g in 1:G, k in 1:K
             q = lookup[b][k, g]
             coefficient = isnothing(locs) ? 0 : locs.coefficient[k]
-            factors = isnothing(locs) || isnothing(locs.factors) ? Int[] :
-                copy(locs.factors[k, g])
-            factor_weights = isnothing(locs) || isnothing(locs.factors) ? Float64[] :
-                copy(locs.factor_weights[k, g])
-            factor_scales = isnothing(locs) || isnothing(locs.factors) ? Int[] :
-                copy(locs.factor_scales[k, g])
-            walks = Int[]
-            walk_weights = Float64[]
+            # Each further coordinate the location reads, with its weight and
+            # the coordinate of a log scale it is multiplied by (0 for none).
+            terms = _AdaptiveCellTerm[]
+            if !isnothing(locs) && !isnothing(locs.factors)
+                for (coordinate, weight, log_scale) in zip(locs.factors[k, g],
+                        locs.factor_weights[k, g], locs.factor_scales[k, g])
+                    push!(terms, (; coordinate, weight, log_scale))
+                end
+            end
+            walks = _AdaptiveCellWalk[]
             if !isnothing(locs) && !isnothing(locs.walks)
                 for (walk, step, weight) in locs.walks[k, g]
                     wl = get(lookup, walk, nothing)
@@ -179,8 +186,7 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
                         "BRM adaptive centering cells: block `$(r.binding)` is centred " *
                         "on the walk `$(walk.ranef.binding)`, whose cells are mapped " *
                         "after it; walk cells must come first.")
-                    push!(walks, a)
-                    push!(walk_weights, weight)
+                    push!(walks, (; cell=a, weight))
                 end
             end
             containers = Int[]
@@ -199,7 +205,8 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
                     push!(containers, a)
                 end
             end
-            for j in Iterators.flatten((coefficient, factors, factor_scales))
+            for j in Iterators.flatten((coefficient,
+                    (t.coordinate for t in terms), (t.log_scale for t in terms)))
                 j == 0 || !(j in effects) || error(
                     "BRM adaptive centering cells: a random-effect cell is centred " *
                     "on coordinate $j, which another cell rewrites; refusing an " *
@@ -210,8 +217,7 @@ function _adaptive_centering_cells(model, names::Vector{String}; fields=false,
                 term=k, margin=margin[k], effect=b.effects[k, g],
                 name=names[b.effects[k, g]],
                 conditioning=[lookup[b][l, g] for l in 1:k-1],
-                location=(; coefficient, factors, factor_weights, factor_scales,
-                            containers, walks, walk_weights)))
+                location=(; coefficient, terms, containers, walks)))
         end
     end
     # HSGP basis-weight cells next (`_joint_centering_state`): term by term, a
@@ -366,7 +372,8 @@ end
     adaptive_centering_cells(model, unc_names) -> (; blocks, cells)
 
 The cells [`adaptive_centering_problem`](@ref) adapts for `model` (an
-[`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): its random-effect cells, its
+[`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): the innovation cells of its
+zero-start `rw(...)` walks, its random-effect cells, its
 HSGP basis-weight cells (an RKBRMI's unless `hsgp = false`), grouped HSGP
 level cells (an RKBRMI's under `hsgp_levels = true`), exact totals and S2Z
 cells (SBBRMI only), and its areal `car` field cells and `cdar` walk cells
@@ -380,7 +387,8 @@ so a caller outside BRM can rebuild it without BRM internals. Reading them
 needs no WarmupHMC and builds no wrapper.
 
 `cells[p]`, in the wrapper's cell order (the order of `centeredness`,
-[`adaptive_centering_controls`](@ref) and checkpoints: random-effect cells of
+[`adaptive_centering_controls`](@ref) and checkpoints: `rw` walk cells, walk by
+walk and step by step; then random-effect cells of
 ordinary blocks, then of derived-scale blocks, each containing blocks first,
 then level, then term; then HSGP basis cells; then HSGP level cells; then
 exact totals; then S2Z cells; then `car` cells; then `cdar` cells). A
@@ -393,9 +401,25 @@ random-effect cell (`family = :ranef`) has:
 - `effect`, the coordinate of the cell's compiled value, and `name`, its name;
 - `conditioning`: the cells of the same level's earlier terms, in term order;
 - `location`: `coefficient`, the coordinate of the population coefficient the
-  cell is centred on (`0` for none); `factors`, the coordinates of the
-  `factor(f)` levels holding its level; `containers`, the cells of the coarser
-  groupings holding its level, coarsest first, every one earlier than `p`.
+  cell is centred on (`0` for none); `terms`, the further coordinates it
+  reads, each `(; coordinate, weight, log_scale)` (`log_scale` the coordinate
+  of a log scale the entry is multiplied by, `0` for none): the `factor(f)`
+  levels and numeric population columns of its predictor, each by its
+  least-squares fit on the level's own random-effect design (weight 1 for a
+  factor level holding the whole level), and a sum-to-zero `rw` walk's
+  standardized path values, scaled by the walk's SD; `containers`, the cells of
+  the coarser groupings holding its level, coarsest first, every one earlier
+  than `p`; `walks`, the `rw` walk cells it reads, each `(; cell, weight)`,
+  every one earlier than `p`. (`terms` replaces the earlier `factors`, whose
+  entries all had weight 1: a reader of the old field fails on the missing
+  field instead of rebuilding a different map.)
+
+An `rw` walk cell (`family = :rw`, one per innovation of a zero-start
+`rw(...)` walk) has the fields of a random-effect cell: `binding` (the term,
+`rw_<predictor>_<time>`), `group` (the time column), `level` (the step the
+innovation leads to) and `level_index`, `term = 1`, `margin = nothing`,
+`effect` and `name` (the standardized innovation), an empty `conditioning`
+and an empty `location` (`coefficient = 0`, no `terms`, `containers` or `walks`).
 
 An HSGP cell (`family = :hsgp`, one per basis weight: term by term, a grouped
 `by = g` term level by level, then basis by basis) has `cell`, `family`,
@@ -428,7 +452,9 @@ fastest) has `cell`, `family`, `block`, `binding`, `margin`, `level` (`nothing`)
 `level_index` (the group), `term` (the innovation's position), `effect`,
 `name`, `scale = (; sigma, rho, cdiag, step)` and `location = (;)`.
 
-`blocks[b]` of a random-effect block: `block`, `family` (`:ranef`), `binding`,
+`blocks[b]` of a random-effect block, or of an `rw` walk's cells (`family =
+:rw`, one term, its levels the steps after the first, its one log scale the
+walk's SD coordinate, `target = 0`): `block`, `family` (`:ranef`), `binding`,
 `group`, `id`, `by`, `levels`, `n_terms`,
 `n_levels`, `margins` (per term), `target` (the compiled frame's control: 0 for
 a block emitted non-centred, every RKBRMI block; 1 for an SBBRMI block in
@@ -499,8 +525,11 @@ term `k`, level `g`, control `c`, target `t`):
 - the earlier terms' innovations `ζ_l = (y_l - t * loc_l) / s_l^t` over
   `conditioning` (`y_l` their compiled values; `ζ_l = y_l` when `t = 0`), and
   `m = Σ_l C[k, l] * ζ_l`;
-- `loc = m + x[coefficient] + Σ x[factors] + Σ_a e_a`, a containing cell `a`'s
-  effect `e_a = s_a * y_a` in a block with `target = 0` and `y_a` otherwise;
+- `loc = m + x[coefficient] + Σ_f weight_f * σ_f * x[coordinate_f] + Σ_a e_a
+  + Σ_r weight_r * e_r`: over `terms`, `σ_f = exp(x[log_scale_f])` (1 where
+  `log_scale_f == 0`); over `containers`, a containing cell `a`'s effect
+  `e_a = s_a * y_a` in a block with `target = 0` and `y_a` otherwise; over
+  `walks`, the walk cell `r`'s effect `e_r = s_r * y_r`;
 - the compiled value `y = t * loc + (x[effect] - c * loc) * s^(t - c)`, and the
   log-Jacobian adds `(t - c) * log s`.
 

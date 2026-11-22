@@ -25,6 +25,12 @@ end
 # Student-t block. `location_of[i]` is the coordinate of the population
 # coefficient effect coordinate `i` is centred on (hierarchical centring);
 # absent means centred on 0.
+# A cell's location in `location_of`: a population coefficient's coordinate, or
+# `(coordinate, weight)` pairs (a projected location, snag
+# adaptive-centrin-647119ba).
+location_value(x, j::Integer) = j == 0 ? zero(eltype(x)) : x[j]
+location_value(x, entries) = sum(w * x[j] for (j, w) in entries; init=zero(eltype(x)))
+
 function manual_adaptive_map(x, block, controls, location_of=Dict{Int,Int}())
     y = copy(x)
     ljac = zero(eltype(x))
@@ -37,8 +43,7 @@ function manual_adaptive_map(x, block, controls, location_of=Dict{Int,Int}())
             m = sum(C[k, l] * z[l] for l in 1:k-1; init=zero(eltype(x)))
             s = C[k, k]
             u = x[block.effects[k, g]]
-            j = get(location_of, block.effects[k, g], 0)
-            beta = j == 0 ? zero(eltype(x)) : x[j]
+            beta = location_value(x, get(location_of, block.effects[k, g], 0))
             z[k] = (u - c * (m + beta)) / s^c
             y[block.effects[k, g]] =
                 block.target_c * m + s^block.target_c * z[k]

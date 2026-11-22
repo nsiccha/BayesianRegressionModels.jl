@@ -3056,9 +3056,10 @@ One row per adaptive cell of `adaptive`, the wrapper
 pair order (the order `centeredness` and checkpoints use). Every row has
 
 - `cell`, the pair number; `index` and `name`, its unconstrained coordinate;
-- `family`: `:ranef` (ordinary or R2D2 random-effect cell), `:hsgp` (basis
-  weight), `:scalar` (exact total or S2Z contrast), `:car` (areal field cell)
-  or `:cdar` (walk cell);
+- `family`: `:rw` (innovation of a zero-start `rw(...)` walk), `:ranef`
+  (ordinary or R2D2 random-effect cell), `:hsgp` (basis weight), `:scalar`
+  (exact total or S2Z contrast), `:car` (areal field cell) or `:cdar` (walk
+  cell);
 - `c`, the current source control, and `target`, the compiled frame's.
 
 Random-effect rows also carry `binding`, `group`, `margin` (its
@@ -3066,9 +3067,15 @@ Random-effect rows also carry `binding`, `group`, `margin` (its
 `level`, `term` (the margin's declared position in its block), `rank`, its
 position in the group's current triangular order (`term` itself under
 `ranef_order=:declared`, the learned position under `ranef_order=:learned`),
-and `location`, the unconstrained name of the population coefficient the cell
-is centred on (so its `c=1` coordinate is the level's total), or `nothing` for
-a cell centred on 0 (see [`adaptive_centering_problem`](@ref)).
+and `location`, what the cell is centred on (so its `c=1` coordinate is the
+level's total), or `nothing` for a cell centred on 0 (see
+[`adaptive_centering_problem`](@ref)): the unconstrained names of the
+coordinates and the names of the cells it reads, joined by ` + `, each with its
+weight when that is not 1 (`0.31*pop_mu_beta_pop.2`, to 6 significant digits)
+and with `exp(<SD name>)*` before a sum-to-zero walk's path value. `rw` rows
+carry the same fields (`binding` the walk's term, `group` its time column,
+`level` the step the innovation leads to, `margin = nothing`, `location =
+nothing`).
 HSGP and cdar rows carry `binding`, `margin = (; predictor, coefficient=term)`
 and `term` (the basis or walk cell); a grouped HSGP mapped across its levels
 also carries `group`, `level` (the level's label) and `rank` (its position in

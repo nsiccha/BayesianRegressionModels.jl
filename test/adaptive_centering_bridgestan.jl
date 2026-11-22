@@ -620,6 +620,32 @@ const R2D2_VARIANTS = [
     end),
 ]
 
+# The `include=` fixture's `log_Vc ~ 1 + x + (1 | p | subject) + (1 | site)`:
+# `x` varies within each subject and site, whose designs are `1`, so each of
+# their cells also reads `x`'s mean over the level's rows (snag
+# adaptive-centrin-647119ba); `log_k10` has no `x`.
+@testset "BridgeStan: a level reads its rows' mean of a covariate it has no column for" begin
+    sb = SBBRMI(Dict(R2D2_VARIANTS)["joint include= budget beside an ordinary block"](R2D2_DF);
+                mod=@__MODULE__, total_groups=())
+    problem = StanBlocks.stan_instantiate(sb.model)
+    names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    beta_x = only(brm_population_effect_coordinates(brm_descriptor(sb), :log_Vc, names;
+                                                    coefficient=:x).coordinates)
+    plan = adaptive_centering_cells(sb, names)
+    for c in plan.cells
+        c.family === :ranef || continue
+        if c.margin.predictor === :log_k10
+            @test isempty(c.location.terms)
+            continue
+        end
+        column = c.group === :subject ? R2D2_DF.subject : R2D2_DF.site
+        I = findall(==(string(c.level)), string.(column))
+        term = only(c.location.terms)
+        @test term.coordinate == beta_x && term.log_scale == 0
+        @test term.weight ≈ sum(R2D2_DF.x[I]) / length(I) atol=1e-14
+    end
+end
+
 # Stan's own value of a block's derived scale, from the emitted transformed
 # parameter (`<binding>_r2d2_tau` vector or `<binding>_r2d2_scale` scalar).
 function r2d2_stan_tau(problem, x, block)
@@ -687,13 +713,31 @@ function check_ranef_wrapper(sb, problem, x, ordered)
     # descriptor; the reference map then uses that location.
     # (`test/adaptive_centering_location.jl` pins which cells take one.)
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
-    location_of = Dict{Int,Int}()
+    # A cell is also centred on the projection of its predictor's other
+    # population columns on its level's design (snag adaptive-centrin-647119ba):
+    # those entries are read from the public cells description, whose agreement
+    # with the wrapper `test/adaptive_centering_cells.jl` pins; each must be a
+    # population coefficient of the margin's predictor.
+    cells = Dict(c.effect => c for c in adaptive_centering_cells(sb, unc_names).cells)
+    location_of = Dict{Int,Any}()
     for row in adaptive_centering_controls(wrapped, sb)
         (row.family === :ranef && row.location !== nothing) || continue
         resolved = brm_population_effect_coordinates(brm_descriptor(sb),
             row.margin.predictor, unc_names; coefficient=row.margin.coefficient)
-        @test row.location == unc_names[only(resolved.coordinates)]
-        location_of[row.index] = only(resolved.coordinates)
+        cell = cells[row.index]
+        matched = isempty(resolved.coordinates) ? 0 : only(resolved.coordinates)
+        @test cell.location.coefficient in (0, matched)
+        @test isempty(cell.location.containers) && isempty(cell.location.walks)
+        @test all(t -> t.log_scale == 0, cell.location.terms)
+        population = Set(i for name in BayesianRegressionModels.popcoefnames(
+            parent(sb), row.margin.predictor) for i in brm_population_effect_coordinates(
+                brm_descriptor(sb), row.margin.predictor, unc_names;
+                coefficient=name).coordinates)
+        @test all(t -> t.coordinate in population, cell.location.terms)
+        location_of[row.index] = vcat(
+            cell.location.coefficient == 0 ? Tuple{Int,Float64}[] :
+                [(cell.location.coefficient, 1.0)],
+            [(t.coordinate, t.weight) for t in cell.location.terms])
     end
 
     state = ir.pairs[1][2].args[1].state
@@ -1005,7 +1049,15 @@ end
         # level's total `beta + b` and the centred twin reads `x - beta` there.
         # The centred emission keeps location 0.
         names = sb === ncp_sb ? ncp_names : cp_names
-        location_of = Dict(r.index => only(findall(==(r.location), names))
+        # A level's location is its coefficient plus the projection of the
+        # predictor's other columns on its design (snag adaptive-centrin-647119ba:
+        # in "one margin" `x`'s subject mean), linear in read-only coordinates:
+        # `(coordinate, weight)` pairs from the public cells description.
+        cells = Dict(c.effect => c for c in adaptive_centering_cells(sb, names).cells)
+        location_of = Dict(r.index => vcat(
+                cells[r.index].location.coefficient == 0 ? Tuple{Int,Float64}[] :
+                    [(cells[r.index].location.coefficient, 1.0)],
+                [(t.coordinate, t.weight) for t in cells[r.index].location.terms])
             for r in adaptive_centering_controls(wrapped, sb)
             if r.family === :ranef && r.location !== nothing)
         @test isempty(location_of) == (sb === cp_sb)
@@ -1014,14 +1066,14 @@ end
             lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
             twin_x = similar(x)
             twin_x[map] = x
-            for (i, j) in location_of
-                twin_x[map[i]] -= x[j]
+            for (i, entries) in location_of, (j, w) in entries
+                twin_x[map[i]] -= w * x[j]
             end
             twin_lp, twin_gradient = LogDensityProblems.logdensity_and_gradient(twin, twin_x)
             push!(offsets, lp - twin_lp)
             expected = twin_gradient[map]
-            for (i, j) in location_of
-                expected[j] -= twin_gradient[map[i]]
+            for (i, entries) in location_of, (j, w) in entries
+                expected[j] -= w * twin_gradient[map[i]]
             end
             @test gradient ≈ expected atol=1e-9 rtol=1e-9
         end
