@@ -18,8 +18,9 @@ The `kernels` named tuple contains RK graphs for the global draw, entropy
 gradient, variance bound, antithetic pair, work weights, Adam, clipping,
 dense-factor triangular solves, curvature, trust bounds and linear coupling.
 For JAX fitting, use ReactiveKernels 0.1.365 or later with ReactiveKernelsPPL
-0.1.253 or later. This supports the optimizer graphs and differentiating a
-selected station's density through bounded and positive local parameters.
+0.1.255 or later. These versions support categorical station labels and
+differentiate a selected station's density through bounded and positive
+local parameters.
 `unit_design` takes the square matrix of normal draws. `design_curvature`
 takes the whitened gradient differences and the design, both in columns.
 `orthogonal_gap` returns the curvature difference from identity and its

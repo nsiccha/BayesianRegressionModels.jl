@@ -4,6 +4,7 @@
 # here as an independent oracle beside production structural ownership.
 # Run: julia --startup-file=no --project=test test/nlme_svi_authored_factors.jl
 using Test, Random, LinearAlgebra, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+using CategoricalArrays: categorical
 include(joinpath(@__DIR__, "jax_module_driver.jl"))
 using ADTypes: AutoEnzyme
 import Enzyme
@@ -358,6 +359,19 @@ end
         rk = RKBRMI(standard_vector_model(authored_factor_data()))
         check_authored_factor_split(rk)
         check_svi_authored_prior(rk)
+    end
+    @testset "categorical groups in the station density export" begin
+        g = categorical(repeat(["a", "b", "c", "d", "e"]; inner=6))
+        data = (; g, y=repeat([-0.5, 0.4, 0.7, 1.6, 2.0]; inner=6) + 0.2randn(Xoshiro(17), 30))
+        rk = RKBRMI(@brm data begin
+            mu ~ 1 + (1 | g)
+            effect(mu, Intercept) ~ Normal(0, 2)
+            sd(:, g) ~ Exponential(1)
+            y ~ Normal(mu, 0.3)
+        end)
+        m = brm_nlme_model(rk; subject_group=:g, ad_backend=FACTOR_AD)
+        target = BRM._brm_svi_target(m)
+        check_device_partition(target, BRM._brm_svi_device_problem(target))
     end
     @testset "non-unit dependent and constrained priors" begin
         rk = RKBRMI(dependent_constrained_model(authored_factor_data()))
