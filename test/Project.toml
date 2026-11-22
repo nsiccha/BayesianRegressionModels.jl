@@ -467,4 +467,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RKPPL 0.1.252 emits a joint cell's geometry and constrained rows in JAX.
 # RKPPL 0.1.255 binds indexed station densities with categorical labels.
 # RK 0.1.365 differentiates their constrained factors and exports the dense SVI updates.
-rev = "a1d534d4e00e1817f0621e871785c65a0e1630d1"
+# RK 0.1.369 and RKPPL 0.1.256 read ragged matrix rows, runtime checks and loops per station.
+rev = "7f387b534a1ada37b879569a9c6675eb6be39ce6"

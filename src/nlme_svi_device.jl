@@ -17,10 +17,12 @@ inputs of the partition module's `prepare_data` in its declared order.
 The `kernels` named tuple contains RK graphs for the global draw, entropy
 gradient, variance bound, antithetic pair, work weights, Adam, clipping,
 dense-factor triangular solves, curvature, trust bounds and linear coupling.
-For JAX fitting, use ReactiveKernels 0.1.365 or later with ReactiveKernelsPPL
-0.1.255 or later. These versions support categorical station labels and
+For JAX fitting, use ReactiveKernels 0.1.369 or later with ReactiveKernelsPPL
+0.1.256 or later. These versions support categorical station labels,
 differentiate a selected station's density through bounded and positive
-local parameters.
+local parameters, select a station's rows of a shared matrix when stations
+differ in length, and evaluate station densities that hold runtime checks
+or loops, such as a Cholesky factor's.
 `unit_design` takes the square matrix of normal draws. `design_curvature`
 takes the whitened gradient differences and the design, both in columns.
 `orthogonal_gap` returns the curvature difference from identity and its

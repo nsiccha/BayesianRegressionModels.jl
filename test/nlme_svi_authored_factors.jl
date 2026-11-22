@@ -373,6 +373,37 @@ end
         target = BRM._brm_svi_target(m)
         check_device_partition(target, BRM._brm_svi_device_problem(target))
     end
+    @testset "a station simplex mixing its rows of a shared matrix" begin
+        # Stations of different lengths. Each mixes its own rows of the
+        # cluster curves by a Dirichlet simplex it owns.
+        series = [1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4]
+        N, n = length(series), 2
+        t = collect(range(0.0, 1.0; length=N))
+        data = (; series, N, n, alpha=0.5, tg=repeat(t, n), cg=repeat(["c1", "c2"]; inner=N),
+            y=0.3 .* sin.(4 .* t) .+ 0.1 .* randn(Xoshiro(29), N))
+        clustered = @brm begin
+            Omega ~ LKJCholesky(n, 2.0)
+            tau ~ LogNormal(0.0, 1.0)
+            g ~ 0 + hsgp(tg; k=4, domain=(-0.3, 1.3), by=cg, cor=multigroup(Omega, tau),
+                orthogonal_to=:intercept)
+            length_scale(g, hsgp(tg)) ~ LogNormal(0.0, 1.0)
+            sd(g, hsgp(tg)) ~ restricted(Normal(0.0, 0.3); lower=0.0)
+            G = reshape(g, N, n)
+            mu ~ 1 + (1 | series)
+            effect(mu, Intercept) ~ Normal(0.0, 1.0)
+            sd(mu, series) ~ restricted(Normal(0.0, 0.5); lower=0.0)
+            @plate for p in groups(series)
+                theta ~ Dirichlet(n, alpha)
+                y[p] ~ Normal(mu[p] .+ G[p, :] * theta, 0.2)
+            end
+        end
+        rk = RKBRMI(clustered(data))
+        m = brm_nlme_model(rk; subject_group=:series, ad_backend=FACTOR_AD)
+        target = BRM._brm_svi_target(m)
+        # A station owns its level and the free coordinate of its simplex.
+        @test length.(target.units) == fill(2, 4)
+        check_device_partition(target, BRM._brm_svi_device_problem(target))
+    end
     @testset "non-unit dependent and constrained priors" begin
         rk = RKBRMI(dependent_constrained_model(authored_factor_data()))
         check_authored_factor_split(rk; constrained=true)
