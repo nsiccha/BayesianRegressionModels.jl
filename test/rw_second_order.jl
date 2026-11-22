@@ -432,6 +432,30 @@ end
             reader = BRM._rk_value_reader(rk, (:rw_mu_t,))
             @test reader(u).rw_mu_t ≈ 0.4 .* (A * field) atol=1e-10
             @test u[p.population] == φ
+            # The draw-free summaries use the standardized fitted field.
+            # Validate its physical marginals at every retained design point.
+            d = length(φ)
+            result = brm_laplace_integration(p; point=φ, design=:ccd, draws=0,
+                curvature=(; hessian=-Matrix(1.0I, d, d), positive_definite=true),
+                latent_marginals=:mean_corrected)
+            latent = result.latent_marginals
+            @test latent.names == [Symbol("rw_mu_t.phi.", j) for j in 1:n]
+            for (k, j) in enumerate(latent.point_indices)
+                v = result.points[:, j]
+                packed = spl_point(p, v)
+                tau = only(BRM._rk_constrained_values(rk, packed).rw_mu_t.sigma)
+                psi = BRM._brm_slap_psi!(zeros(length(p.port)), p, BRM._rk_slap_values(p.kernels, packed))
+                base = psi[p.entry]
+                noise = exp.(psi[p.entry .+ 1])
+                precision = Diagonal(1 ./ noise.^2)
+                covariance = inv(Symmetric(P + tau^2 .* (A' * precision * A)))
+                loc = covariance * (tau .* (A' * precision * (data.y .- base)))
+                @test tau .* latent.conditional_mean[:, k] ≈ tau .* loc atol=1e-7
+                @test tau .* latent.conditional_sd[:, k] ≈ tau .* sqrt.(diag(covariance)) rtol=1e-6
+                # The packed column is the public point at that centre.
+                @test latent.packed[p.population, k] == v
+                @test reader(latent.packed[:, k]).rw_mu_t ≈ tau .* (A * latent.conditional_mean[:, k]) atol=1e-8
+            end
         end
     end
     # A fixed scale has no sampling coordinate. Its public draw must still

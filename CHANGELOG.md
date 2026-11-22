@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.385
+## 0.2.386
 
 - `brm_svi_fit` and `brm_svi_resume` accept `device=:gpu` with a loaded
   minibatch SVI runtime. BRM supplies its observation partition and authored
@@ -24,6 +24,15 @@ instead of failing at run time.
 - `brm_fixed_hyper_fit(...; device=:gpu)` dispatches to the supplied
   sampler's GPU method with the same free coordinates and fixed values used
   by the CPU fit. The result includes the accelerator name in `execution`.
+
+## 0.2.385
+
+- `brm_laplace_integration` accepts `latent_marginals=:gaussian` or
+  `:mean_corrected` to return a weighted Normal mixture for each integrated
+  coordinate. Use `draws=0` for deterministic summaries without joint draws.
+  The result includes each design point’s conditional means and standard
+  deviations, and its packed coordinates for `rk_restore_draws` and
+  `rk_draw_values`, for transformations to physical units.
 
 ## 0.2.384
 
