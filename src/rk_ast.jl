@@ -2226,7 +2226,8 @@ end
 
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
-        lone_intercepts=Dict{Symbol,Any}(), documentation=(), collection_cell=false)
+        lone_intercepts=Dict{Symbol,Any}(), documentation=(), collection_cell=false,
+        literal_hsgp_levels=(;))
     taken = union(Set(keys(plan.columns)), Set(keys(_rk_input_bindings(plan))),
         Set(keys(_rk_generated_inputs(plan))),
         Set(p.name for p in plan.parameters),
@@ -2307,7 +2308,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _RKLevelInput(term.options.collection_levels) :
                 get(term.options, :group_fit_source, term.options.group_levels)
             index_sources[term.options.group_index] =
-                (term.options.group_source, levels)
+                (term.options.group_source, get(literal_hsgp_levels, term.options.group_index, levels))
         end
     end
     # Data-only assignments, their fit-role twins and the constants they read
@@ -2658,7 +2659,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
-            term = _rk_hsgp_with_level_set(term, level_sets)
+            term = _rk_hsgp_with_level_set(term, level_sets, literal_hsgp_levels)
             hsgp_stmts, locals, fit = _rk_ast_value_hsgp(defs, term, taken, bindings; collection_cell)
             append!(stmts, hsgp_stmts)
             # An HSGP component owns its hyperparameters and basis weights

@@ -24,7 +24,9 @@ what [`brm_fitted_state`](@ref) returns. It holds
   (`center`/`zscale`/`standardize` means and SDs, group level sets, HSGP
   intervals, …), by the name the program reads them under, as RKPPL's
   `frozen_values` record (`fitted.values`). The record also holds the element
-  type and size of each fit-role input, never its values;
+  type and size of each fit-role input, never its values. When reading a
+  grouped HSGP that embedded its labels, the newly introduced grouping input
+  is absent and its size is the number of saved labels;
 - `fitted_reads` and `fit_twins`: the fit-role inputs each fitted value is
   fitted from, and the data column each fit-role input copies, so a replay that
   resamples a grouping refits that grouping's values from its own data;
@@ -37,11 +39,9 @@ what [`brm_fitted_state`](@ref) returns. It holds
   argument must equal its fitted value, literal or read by name in the program;
 - `declaration`: the authored model (`show(brm_source(rk))`), which a replay's
   model must repeat;
-- `program`: the fit's emitted program, which a replay must reproduce. A
-  statement an earlier BRM wrote in another form of the same program (macro
-  calls with their places, a ragged join's columns as trailing arguments) is
-  read in this BRM's form (`_rk_stored_statement`), so the state replays
-  unless its program changed otherwise;
+- `program`: the fit's emitted program, which a replay must reproduce. Older
+  spellings of macro locations, ragged joins, undotted cell addition and
+  subtraction, and grouped HSGP levels are recognized when the program matches;
 - `coordinates`: the names of the fit's unconstrained coordinates;
 - `columns`: the element type of each data column of the fit (a scalar's type);
 - `responses`: the responses the fit conditions on;
@@ -253,13 +253,87 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
         _brm_rk_plan(rebound; held_out,
             fitted_constants=(name, _source) -> get(state.constants, name, nothing))
     end
-    emitted = _rk_emit_ast(plan; documentation=brm_documentation(template))
-    _rk_check_replay_program(map(_rk_stored_statement, state.program),
-        _rk_replay_statements(emitted, plan); prefix, exported=true)
+    documentation = brm_documentation(template)
+    emitted = _rk_emit_ast(plan; documentation)
+    state = _rk_checked_fitted_state(state, plan, emitted, documentation; prefix)
     _rk_check_replay_priors(emitted, plan, state.scalars, new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
-    plan, emitted
+    plan, emitted, state
+end
+
+# Before 0.2.363 a grouped HSGP's index embedded its ordered labels and its
+# block embedded their count. Re-emit that spelling only for comparison with
+# the entire saved program. Bind the current program, so subsequent binders,
+# resampling and exports all use the in-graph level set.
+function _rk_checked_fitted_state(state, plan, emitted, documentation; prefix)
+    stored = map(_rk_stored_statement, state.program)
+    current = _rk_replay_statements(emitted, plan)
+    stored == current && return state
+    literals = Dict{Symbol,Any}()
+    by_input = Dict{Symbol,Symbol}()
+    for predictor in _rk_replay_predictors(plan), term in predictor.terms
+        opts = term.options
+        term.kind === :hsgp && haskey(opts, :group_fit_source) &&
+            !haskey(opts, :collection_levels) || continue
+        levels = get(state.fits, (:levels, opts.group_column), nothing)
+        levels === nothing && continue
+        literals[opts.group_index] = levels
+        by_input[opts.group_fit_source] = opts.group_column
+    end
+    options = isempty(literals) ? (;) : (; literal_hsgp_levels=literals)
+    # Before 0.2.359 a cell bound these helpers for undotted + and -.
+    # Re-emit the very same calls, including operand order and arity.
+    # A splatted call still binds its helper today, so try the intervening
+    # HSGP spelling as well when the helper alone doesn't identify the era.
+    if any(s -> startswith(s, "binding: _rk_kernel_stan_add") ||
+            startswith(s, "binding: _rk_kernel_stan_sub"), stored)
+        legacy = task_local_storage(_RK_LEGACY_CELL_ARITHMETIC, true) do
+            _rk_emit_ast(plan; documentation, options...)
+        end
+        if stored == _rk_replay_statements(legacy, plan)
+            return _rk_restore_hsgp_levels(state, emitted, current, by_input; prefix)
+        end
+    end
+    if !isempty(literals)
+        legacy = _rk_emit_ast(plan; documentation, options...)
+        if stored == _rk_replay_statements(legacy, plan)
+            return _rk_restore_hsgp_levels(state, emitted, current, by_input; prefix)
+        end
+    end
+    _rk_check_replay_program(stored, current; prefix, exported=true)
+end
+
+function _rk_restore_hsgp_levels(state, emitted, program, by_input; prefix)
+    values, inputs = state.fitted.values, state.fitted.inputs
+    reads, twins = copy(state.fitted_reads), copy(state.fit_twins)
+    for statement in emitted.main.args
+        s = _brm_undoc(statement)
+        Meta.isexpr(s, :(=), 2) || continue
+        name, rhs = s.args
+        Meta.isexpr(rhs, :call, 2) && rhs.args[1] === :brm_fit_levels || continue
+        input = rhs.args[2]
+        haskey(by_input, input) || continue
+        column = by_input[input]
+        levels = state.fits[(:levels, column)]
+        # A grouping also used by a random effect may already be frozen.
+        if haskey(values, name)
+            isequal(values[name], levels) || error(
+                "$prefix: the fitted state holds conflicting levels for `$column`")
+            continue
+        end
+        # For a new input, the saved label vector alone suffices to compute
+        # this level set. Its absent input needs no training-row count.
+        values = merge(values, (; name => levels))
+        haskey(inputs, input) || (inputs = merge(inputs, (; input =>
+            (type=Vector{state.columns[column]}, size=size(levels)))))
+        reads[name] = [input]
+        twins[input] = column
+    end
+    frozen = typeof(state.fitted)(values, inputs)
+    BRMFittedState(state.format, frozen, sort!(collect(keys(twins))), reads, twins,
+        state.fits, state.constants, state.scalars, state.declaration, program,
+        state.coordinates, state.columns, state.responses, state.held_out)
 end
 
 # A builder declares a scalar a `@plate` cell reads only when its data holds it,
@@ -324,7 +398,7 @@ function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
     coordinates === :growing && !isempty(resample_groups) && throw(ArgumentError(
         "$prefix: growing windows retain the fitted group levels"))
     groups = _rk_resample_group_set(resample_groups; prefix)
-    plan, emitted = _rk_fitted_replay_plan(template, new_data, state;
+    plan, emitted, state = _rk_fitted_replay_plan(template, new_data, state;
         resample_groups=groups, held_out, prefix)
     groups = Tuple(sort!(collect(groups)))
     frozen = _rk_frozen_subset(state, _rk_resampled_fit_inputs(state, groups))
