@@ -130,6 +130,55 @@ end
     @test popcoefnames(predictor, :eta) == [:Intercept, :X_col_1, :X_col_2]
 end
 
+@testset "matrix products with derived coefficients" begin
+    training = (; X=[1. 2.; 3. 4.; 5. 6.], K=2, y=[-1., 0.5, 2.], tau=1.3)
+    square = merge(training, (; X=[2. -1.; 0.5 3.], y=[0.2, -0.7]))
+    model = @brm training begin
+        b[1:K] .~ Normal.(0, 1)
+        scale = sqrt(1 .+ b .^ 2)
+        coef = tau .* b ./ scale
+        eta = X * coef
+        y ~ Normal(eta, 1)
+    end
+    b = [0.25, -0.4]
+    sb, rk = SBBRMI(model; mod=@__MODULE__), RKBRMI(model)
+    @test occursin("X * coef", stan_code(sb))
+    @test occursin("X * coef", string(BayesianRegressionModels._rk_emit_ast(rk.plan).main))
+    mktempdir() do dir
+        for (s, r, rows) in ((sb, rk, training),
+                (reprocess(sb, square), reprocess(rk, square), square))
+            scale = sqrt.(1 .+ b.^2)
+            residual = rows.y - rows.X * (rows.tau .* b ./ scale)
+            lp = sum(logpdf.(Normal(), residual)) + sum(logpdf.(Normal(), b))
+            gradient = (rows.X' * residual) .* rows.tau ./ scale.^3 - b
+            check_product(s, r, b, lp, gradient, joinpath(dir, "derived.stan"))
+        end
+    end
+
+    # A forward read inside a derived expression is resolved after its
+    # declaration. A fresh square design still uses the legacy row broadcast.
+    source = """
+        coef = b .* tau
+        b[1:K] .~ Normal.(0, 1)
+        y ~ Normal(sum(X * coef), 1)
+    """
+    builder = brm(source; mod=@__MODULE__)
+    @test occursin("X * coef", stan_code(SBBRMI(builder(training); mod=@__MODULE__)))
+    explicit_rows = brm(square, replace(source, "X * coef" => "X .* coef"); mod=@__MODULE__)
+    @test stan_code(SBBRMI(builder(square); mod=@__MODULE__)) ==
+        stan_code(SBBRMI(explicit_rows; mod=@__MODULE__))
+
+    # A matrix-valued broadcast is not a coefficient vector, even when one
+    # of its inputs is exactly as long as the number of design columns.
+    data = merge(training, (; M=[1. 3.; 2. -4.]))
+    matrices = @brm data begin
+        b[1:K] .~ Normal.(0, 1)
+        c = M .* b
+        value = X * c
+    end
+    @test getf(last(getargs(parent(matrices.operations.value)))) === (*)
+end
+
 const inline_matvec = @brm begin
     b[1:K] .~ Normal.(0, 1)
     y ~ Normal(X * b, 1)

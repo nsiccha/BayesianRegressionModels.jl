@@ -48,13 +48,14 @@ function _brm_value_product(owner, f, dotted, x, b)
     if x isa NamedColumn && parent(x) isa DataColumn &&
             parent(parent(x)) isa AbstractMatrix{<:Real} &&
             (explicit || owner === assign || _brm_prior_constructor(owner))
-        if b isa NamedColumn && parent(b) isa MissingColumn
-            # A vector declaration can follow the assignment or come from
-            # another model fragment. Keep the spelling until it is bound.
+        shape = _brm_operand_shape(b)
+        if ismissing(shape)
+            # An operand's declaration can follow the assignment or come
+            # from another model fragment. Keep the spelling until it is bound.
             return ExprColumn(dotted ? _brm_broadcast_matvec : _brm_matvec, x, b)
         end
-        width = _brm_operand_vector_length(b)
-        if width !== nothing
+        if shape isa Tuple{Int}
+            width = only(shape)
             dotted && return ExprColumn(_brm_broadcast_matvec, x, b)
             rows, cols = size(parent(parent(x)))
             broadcasts = rows == width || rows == 1 || width == 1
@@ -67,14 +68,43 @@ function _brm_value_product(owner, f, dotted, x, b)
     ExprColumn(explicit && dotted ? _brm_dotted_product : f, x, b)
 end
 
-_brm_operand_vector_length(x) = nothing
-_brm_operand_vector_length(x::AbstractVector{<:Real}) = length(x)
-function _brm_operand_vector_length(x::NamedColumn)
+# Shape evidence only: () is scalar, nothing is unknown, and missing means
+# a forward read can still supply a shape when the model fragments are bound.
+_brm_operand_shape(x) = nothing
+_brm_operand_shape(x::Real) = ()
+_brm_operand_shape(x::AbstractArray{<:Real}) = size(x)
+function _brm_operand_shape(x::NamedColumn)
     backing = parent(x)
-    backing isa DataColumn && return _brm_operand_vector_length(parent(backing))
-    backing isa _BRMComponentInput && return _brm_operand_vector_length(backing.value)
-    backing isa ExprColumn{typeof(assign)} && return _brm_operand_vector_length(last(getargs(backing)))
-    _brm_parameter_length(x)
+    backing isa MissingColumn && return missing
+    backing isa DataColumn && return _brm_operand_shape(parent(backing))
+    backing isa _BRMComponentInput && return _brm_operand_shape(backing.value)
+    backing isa ExprColumn{typeof(assign)} && return _brm_operand_shape(last(getargs(backing)))
+    backing isa ExprColumn{typeof(~)} || return nothing
+    lhs, prior = getargs(backing, 2)
+    lhs isa NamedColumn && parent(lhs) isa MissingColumn && prior isa ExprColumn ||
+        return nothing
+    n = _brm_parameter_length(name(x), getf(prior), prior)
+    isnothing(n) || return (n,)
+    law = _brm_distribution_shape(prior)
+    !isnothing(law) && first(law) === Distributions.Univariate ? () : nothing
+end
+function _brm_operand_shape(x::ExprColumn)
+    f = getf(x)
+    isempty(getkwargs(x)) || return nothing
+    if f isa _BRMMatrixProduct
+        matrix, vector = map(_brm_operand_shape, getargs(x))
+        ismissing(vector) && return missing
+        if matrix isa Tuple{Int,Int} && vector == (last(matrix),)
+            return (first(matrix),)
+        end
+        return nothing
+    end
+    (_brm_is_elementwise_builtin(f) || f isa _BRMRowScale || f === _brm_dotted_product) ||
+        return nothing
+    shapes = map(_brm_operand_shape, getargs(x))
+    any(isnothing, shapes) && return nothing
+    any(ismissing, shapes) && return missing
+    isempty(shapes) ? () : Base.Broadcast.broadcast_shape(shapes...)
 end
 
 function _brm_rebind_value(x::ExprColumn{F}, reads::_BRMForwardReads) where
