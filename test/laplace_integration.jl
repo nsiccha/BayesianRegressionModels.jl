@@ -13,6 +13,11 @@
 #     named plans and never by `:auto`, refused for non-Normal priors, with
 #     priors read from data fields, `constant`s and per-level data vectors
 #     integrating exactly as their literal twins;
+#   - the draw-free latent marginals (`latent_marginals`) are the exact
+#     conditional Gaussians of a Gaussian field at every retained point, mixed
+#     by the design weights; the mean correction is zero there and the
+#     closed-form third-derivative shift on a Poisson model; the packed
+#     columns carry each point's centre to the public readers;
 #   - the refusals name their reason;
 #   - its speed-ups change no result (snag `brm-laplace-inte-e0991a0f`): fixed
 #     coefficient C maps equal probed ones, design values started from the
@@ -153,6 +158,10 @@ end
     @test latent.names == BRM._rk_layout_coordinate_names(m.rk)[p.integrated]
     @test latent.conditional_mean ≈ exact_mean atol=1e-8
     @test latent.conditional_sd ≈ exact_sd atol=1e-10
+    # Each retained point as a packed column, its field at the conditional centre.
+    @test size(latent.packed) == (length(p.u), length(latent.weights))
+    @test latent.packed[p.population, :] == gaussian.points[:, latent.point_indices]
+    @test latent.packed[p.integrated, :] == latent.conditional_mean
     mu = exact_mean * latent.weights
     @test latent.mean ≈ mu atol=1e-8
     @test latent.sd ≈ sqrt.((exact_sd.^2 .+ (exact_mean .- mu).^2) * latent.weights)
@@ -189,6 +198,10 @@ end
     @test a.conditional_sd ≈ sqrt.(variance)
     shift = -0.5 .* scale.^3 .* lambda .* variance.^2
     @test b.conditional_mean ≈ a.conditional_mean .+ shift atol=1e-8
+    @test b.packed[p.integrated, :] == b.conditional_mean
+    @test a.packed[p.population, :] == b.packed[p.population, :] == gauss.points[:, a.point_indices]
+    # The public reader gives each retained point's scale from its packed column.
+    @test vec(rk_restore_draws(rk, a.packed).b_group.tau) ≈ vec(scale[:, a.point_indices])
     @test all(b.mean .< a.mean)
     for k in axes(gauss.draws, 2)
         j = only(findall(==(gauss.draws[only(p.population), k]), vec(gauss.points)))

@@ -18,7 +18,8 @@ instead of failing at run time.
   `:mean_corrected` to return a weighted Normal mixture for each integrated
   coordinate. Use `draws=0` for deterministic summaries without joint draws.
   The result includes each design point’s conditional means and standard
-  deviations for transformations to physical units.
+  deviations, and its packed coordinates for `rk_restore_draws` and
+  `rk_draw_values`, for transformations to physical units.
 
 ## 0.2.384
 

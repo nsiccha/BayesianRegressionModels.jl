@@ -82,10 +82,14 @@ sd, marginals, log_evidence, standardization, diagnostics, latent_marginals)`:
 - `latent_marginals`: `nothing` by default. With `:gaussian` or
   `:mean_corrected`, `names`, `mean`, `sd` and `distributions` each have one
   entry per integrated coordinate. Each distribution is a Normal mixture and
-  supports `pdf`, `cdf` and `quantile`. Column `k` of `conditional_mean` and
-  `conditional_sd` goes with `points[:, point_indices[k]]` and `weights[k]`
-  in the latent result. Transform both conditional parameters at each point
-  before mixing when the physical effect depends on a population scale.
+  supports `pdf`, `cdf` and `quantile`. Column `k` of `conditional_mean`,
+  `conditional_sd` and `packed` goes with `points[:, point_indices[k]]` and
+  `weights[k]` in the latent result. `packed` holds the model's packed
+  coordinates at that point, with the integrated coordinates at their
+  conditional centres, in the shape of `draws`: `rk_restore_draws` and
+  `rk_draw_values` read each point's scales and formula values from it.
+  Transform both conditional parameters at each point before mixing when the
+  physical effect depends on a population scale.
   Integrated sum-to-zero second-order walks report the standardized field
   `<declaration>.phi.<step index>` in fitted step order.
 - `:mean_corrected` shifts the conditional centre by the derivative of the
@@ -150,7 +154,7 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
     calls = Ref(1)
     # Record each retained point while its conditional factor is still live.
     states = Dict{Vector{Float64},Any}()
-    summaries = Dict{Vector{Float64},Tuple{Vector{Float64},Vector{Float64}}}()
+    summaries = Dict{Vector{Float64},NTuple{3,Vector{Float64}}}()
     function record(φ)
         draws > 0 && (states[φ] = _brm_lint_draw_state(p))
         latent_marginals === :none || (summaries[φ] = _brm_lint_conditional(p, latent_marginals))
@@ -460,7 +464,7 @@ function _brm_lint_variance(p, state, selection)
     variance
 end
 
-_brm_lint_conditional(p::_BRMSampledLaplaceProblem, method) = (Float64[], Float64[])
+_brm_lint_conditional(p::_BRMSampledLaplaceProblem, method) = (Float64[], Float64[], copy(p.u))
 function _brm_lint_conditional(p::BRMSparseLaplaceProblem, method)
     state = p.last.state
     selection = method === :mean_corrected ? _brm_spl_conditional_selection(p, state) : nothing
@@ -473,7 +477,10 @@ function _brm_lint_conditional(p::BRMSparseLaplaceProblem, method)
     variance = _brm_lint_variance(p, state, selection)
     all(v -> isfinite(v) && v > 0, variance) || _brm_nlme_error(
         "brm_laplace_integration: nonpositive or nonfinite conditional variance")
-    mu, sqrt.(variance)
+    # The point as every reader of a fit takes it, at the conditional centre.
+    packed = copy(state.u)
+    packed[p.integrated] .= mu
+    mu, sqrt.(variance), _brm_laplace_public_point!(p, packed)
 end
 
 function _brm_lint_latent_marginals(p, points, w, summaries, method)
@@ -483,10 +490,12 @@ function _brm_lint_latent_marginals(p, points, w, summaries, method)
     n = length(p.integrated)
     conditional_mean = zeros(n, length(weights))
     conditional_sd = similar(conditional_mean)
+    packed = zeros(length(p.u), length(weights))
     for (k, j) in enumerate(point_indices)
-        mu, sd = summaries[points[:, j]]
+        mu, sd, u = summaries[points[:, j]]
         conditional_mean[:, k] .= mu
         conditional_sd[:, k] .= sd
+        packed[:, k] .= u
     end
     names = _rk_layout_coordinate_names(p.backend)
     if p isa BRMSparseLaplaceProblem && p.walk_frame !== nothing
@@ -498,5 +507,5 @@ function _brm_lint_latent_marginals(p, points, w, summaries, method)
     distributions = [MixtureModel(Normal.(view(conditional_mean, i, :),
         view(conditional_sd, i, :)), mixing) for i in 1:n]
     (; method, names=names[p.integrated], point_indices, weights, conditional_mean, conditional_sd,
-        distributions, mean=mean.(distributions), sd=std.(distributions))
+        packed, distributions, mean=mean.(distributions), sd=std.(distributions))
 end

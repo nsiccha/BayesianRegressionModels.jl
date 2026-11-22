@@ -452,6 +452,9 @@ end
                 loc = covariance * (tau .* (A' * precision * (data.y .- base)))
                 @test tau .* latent.conditional_mean[:, k] ≈ tau .* loc atol=1e-7
                 @test tau .* latent.conditional_sd[:, k] ≈ tau .* sqrt.(diag(covariance)) rtol=1e-6
+                # The packed column is the public point at that centre.
+                @test latent.packed[p.population, k] == v
+                @test reader(latent.packed[:, k]).rw_mu_t ≈ tau .* (A * latent.conditional_mean[:, k]) atol=1e-8
             end
         end
     end
