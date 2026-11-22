@@ -40,8 +40,8 @@ what [`brm_fitted_state`](@ref) returns. It holds
 - `declaration`: the authored model (`show(brm_source(rk))`), which a replay's
   model must repeat;
 - `program`: the fit's emitted program, which a replay must reproduce. Older
-  spellings of macro locations, ragged joins and the fitted levels of a
-  grouped HSGP are recognized when the rest of the program matches;
+  spellings of macro locations, ragged joins, undotted cell addition and
+  subtraction, and grouped HSGP levels are recognized when the program matches;
 - `coordinates`: the names of the fit's unconstrained coordinates;
 - `columns`: the element type of each data column of the fit (a scalar's type);
 - `responses`: the responses the fit conditions on;
@@ -281,8 +281,22 @@ function _rk_checked_fitted_state(state, plan, emitted, documentation; prefix)
         literals[opts.group_index] = levels
         by_input[opts.group_fit_source] = opts.group_column
     end
+    options = isempty(literals) ? (;) : (; literal_hsgp_levels=literals)
+    # Before 0.2.359 a cell bound these helpers for undotted + and -.
+    # Re-emit the very same calls, including operand order and arity.
+    # A splatted call still binds its helper today, so try the intervening
+    # HSGP spelling as well when the helper alone doesn't identify the era.
+    if any(s -> startswith(s, "binding: _rk_kernel_stan_add") ||
+            startswith(s, "binding: _rk_kernel_stan_sub"), stored)
+        legacy = task_local_storage(_RK_LEGACY_CELL_ARITHMETIC, true) do
+            _rk_emit_ast(plan; documentation, options...)
+        end
+        if stored == _rk_replay_statements(legacy, plan)
+            return _rk_restore_hsgp_levels(state, emitted, current, by_input; prefix)
+        end
+    end
     if !isempty(literals)
-        legacy = _rk_emit_ast(plan; documentation, literal_hsgp_levels=literals)
+        legacy = _rk_emit_ast(plan; documentation, options...)
         if stored == _rk_replay_statements(legacy, plan)
             return _rk_restore_hsgp_levels(state, emitted, current, by_input; prefix)
         end

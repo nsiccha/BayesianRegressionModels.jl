@@ -18,7 +18,9 @@ instead of failing at run time.
   `hsgp(x; by=g)` with literal group labels and a literal weight-row count
   before 0.2.363. Frozen replay retains the labels in fitted order, including
   when the design contains only some groups. The same state supports new
-  groups through `resample_groups` and `rk_design_binder`.
+  groups through `resample_groups` and `rk_design_binder`. Replay also
+  recognizes the equivalent pre-0.2.359 spelling of undotted `+` and `-` in
+  `@plate` cells, including fits that used both older spellings.
 
 ## 0.2.375
 

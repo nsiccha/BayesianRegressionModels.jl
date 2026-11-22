@@ -1448,8 +1448,12 @@ const _RK_STAN_BINARY_DOCS = Dict{Symbol,Any}(
 # it: the program's kernel for each operand pair, folded left
 # (`a + b + c` is `stan_add(stan_add(a, b), c)`). A splatted operand list,
 # or a call emitted without the program's definitions, binds the helper.
+# A saved-program comparison can request the pre-0.2.359 spelling, when
+# every such call bound the same helper. The executable program stays current.
+const _RK_LEGACY_CELL_ARITHMETIC = gensym(:legacy_cell_arithmetic)
 function _rk_kernel_stan_arithmetic(defs, bindings, taken, head, operands)
-    if defs === nothing || any(operand -> Meta.isexpr(operand, :...), operands)
+    if defs === nothing || any(operand -> Meta.isexpr(operand, :...), operands) ||
+            get(task_local_storage(), _RK_LEGACY_CELL_ARITHMETIC, false)
         helper = head === :+ ? _rk_kernel_stan_add : _rk_kernel_stan_sub
         return Expr(:call, _rk_value_callee!(bindings, helper, taken), operands...)
     end

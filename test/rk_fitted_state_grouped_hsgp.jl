@@ -1,9 +1,10 @@
-# The fixture is a complete format-2 export from BRM 0.2.351 (8f1add0e).
-# Regenerate it by running this file against that revision with --write-fixture.
+# The fixtures are complete format-2 exports from BRM 0.2.351 (8f1add0e).
+# Regenerate them by running this file against that revision with --write-fixture.
 using Test, Serialization, Distributions, BayesianRegressionModels
 using ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 const fixture = joinpath(@__DIR__, "fitted_state_programs", "grouped_hsgp_0.2.351.jls")
+const cell_fixture = joinpath(@__DIR__, "fitted_state_programs", "cell_arithmetic_0.2.351.jls")
 
 curves(d) = @brm d begin
     sigma ~ Exponential(1)
@@ -13,16 +14,28 @@ end
 const training = (; site=repeat(["west", "east"], 6), batch=repeat([7, 2, 5], 4),
     x=collect(range(-1, 1; length=12)), w=sin.(1.0:12.0), y=cos.(1.0:12.0))
 
+offsets(d) = @brm d begin
+    a ~ Normal(0, 1)
+    b ~ Normal(0, 1)
+    sigma ~ Exponential(1)
+    @plate for i in eachindex(x)
+        loc[i] = (a + x[i] + 0.5) - b
+        y[i] ~ normal(loc[i], sigma)
+    end
+end
+const cell_data = (; x=[[0.1, 0.2], [1.0]], y=[[0.3, 0.4], [0.8]])
+
 if ARGS == ["--write-fixture"]
     @assert pkgversion(BRM) == v"0.2.351"
     serialize(fixture, brm_fitted_state(RKBRMI(curves(training))))
+    serialize(cell_fixture, brm_fitted_state(RKBRMI(offsets(cell_data))))
     exit()
 end
 
-function mean_at(rk, draw)
+function value_at(rk, draw, name)
     inputs = rk_bound_data(rk)
     query = ReactiveKernels.prepare(rk.model.spec; bound=inputs,
-        have=(:unconstrained, keys(inputs)...), want=(:mu,))
+        have=(:unconstrained, keys(inputs)...), want=(name,))
     Base.invokelatest(query, draw)
 end
 
@@ -52,7 +65,7 @@ end
     @test size(bound.site_fit) == (2,)
     @test size(expected_bound.site_fit) == (12,)
     @test all(k -> isequal(bound[k], expected_bound[k]), setdiff(keys(bound), (:site_fit,)))
-    @test mean_at(replay, draw) == mean_at(oracle, draw)
+    @test value_at(replay, draw, :mu) == value_at(oracle, draw, :mu)
     exported = brm_fitted_state(replay)
     @test exported.program == current.program
     @test isequal(exported.fitted.values, current.fitted.values)
@@ -89,4 +102,27 @@ end
         changed.program[i] = replace(changed.program[i], before => after; count=1)
         @test_throws "changes the fitted RK program" RKBRMI(curves(design), changed; resample_groups=groups)
     end
+end
+
+@testset "format-2 cell arithmetic from BRM 0.2.351" begin
+    old = deserialize(cell_fixture)
+    current = brm_fitted_state(RKBRMI(offsets(cell_data)))
+    @test old.program != current.program
+    @test "binding: _rk_kernel_stan_add" in old.program
+    @test "binding: _rk_kernel_stan_sub" in old.program
+    design = (; x=[[2.0], [-1.0, 0.0, 1.0]], y=[[0.1], [0.2, 0.3, 0.4]])
+    replay = RKBRMI(offsets(design), old)
+    oracle = RKBRMI(offsets(design), current)
+    @test BRM._rk_layout_coordinate_names(replay) == old.coordinates
+    @test isequal(rk_bound_data(replay), rk_bound_data(oracle))
+    draw = collect(range(-0.6, 0.9; length=length(old.coordinates)))
+    @test value_at(replay, draw, :loc) == value_at(oracle, draw, :loc)
+    @test brm_fitted_state(replay).program == current.program
+    # Both bindings still exist after swapping this operation. The whole
+    # cell must match, including the operator used at each call site.
+    changed = deepcopy(old)
+    i = findfirst(contains("_rk_kernel_stan_sub("), changed.program)
+    changed.program[i] = replace(changed.program[i], "_rk_kernel_stan_sub(" =>
+        "_rk_kernel_stan_add("; count=1)
+    @test_throws "changes the fitted RK program" RKBRMI(offsets(design), changed)
 end
