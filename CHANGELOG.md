@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.382
+
+- `brm_svi_fit` with `LowRankGlobal` can continue when a global's diagonal
+  scale becomes small compared with its rank loadings. In this regime the
+  fit uses QR to compute the Gaussian entropy and its gradients for the
+  same covariance.
+
 ## 0.2.381
 
 - In model-scope assignments and likelihoods, `X * b` can contract a data

@@ -31,12 +31,10 @@ function _brm_svi_unit_mul(a::_BRMSVIUnitPrecision, x)
     _brm_svi_global_precision(_brm_svi_global_geometry(a.factor), x)
 end
 
-# Inverse square root of I + V V', with only an r × r eigendecomposition.
+# Inverse square root of I + V V' from the same axes as the covariance root.
 function _brm_svi_unit_inverse_root(f)
     h = _brm_svi_global_geometry(f)
-    E = eigen(Symmetric(h.V' * h.V))
-    W = h.V * E.vectors
-    root = sqrt.(1 .+ max.(E.values, 0))
+    W, root = _brm_svi_sqrt_axes(h)
     (; h.s, W, b=-1 ./ (root .* (root .+ 1)))
 end
 function _brm_svi_unit_mul(a::_BRMSVIUnitRoot, x)
@@ -59,7 +57,7 @@ Base.:*(a::Adjoint{Float64,_BRMSVIUnitPrecision}, x::AbstractMatrix) = parent(a)
 
 function LinearAlgebra.diag(a::_BRMSVIUnitPrecision)
     h = _brm_svi_global_geometry(a.factor)
-    (1 .- vec(sum(abs2, h.V / h.K.U; dims=2))) ./ h.s.^2
+    _brm_svi_entropy_diagonal(h) ./ h.s.^2
 end
 function LinearAlgebra.diag(a::_BRMSVIUnitRoot)
     h = _brm_svi_unit_inverse_root(a.factor)

@@ -438,12 +438,17 @@ end
 
 _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
 
-# Work with the diagonal plus low-rank representation throughout optimization.
-# Only the r × r Gram matrix is dense; D may include thousands of field weights.
+include("nlme_svi_geometry_qr.jl")
+
+# For ordinary scales the determinant lemma needs only an r × r Cholesky.
+# Switch before the roundoff in V'V costs half the precision of the identity
+# term. tr(V'V) bounds its largest eigenvalue.
 function _brm_svi_global_geometry(q)
     s = exp.(q.ρ)
     V = q.Β ./ s
-    K = cholesky(Symmetric(Matrix{Float64}(I, size(V, 2), size(V, 2)) + V' * V))
+    gram = V' * V
+    tr(gram) >= inv(sqrt(eps(Float64))) && return _brm_svi_qr_geometry(s, V)
+    K = cholesky(Symmetric(I + gram))
     (; s, V, K)
 end
 
@@ -454,13 +459,18 @@ end
 
 _brm_svi_global_logdet(h) = 2sum(log, h.s; init=0.0) + logdet(h.K)
 
+_brm_svi_entropy_diagonal(h) = 1 .- vec(sum(abs2, h.V / h.K.U; dims=2))
+_brm_svi_entropy_gradients(h, Β) = _brm_svi_entropy_diagonal(h), _brm_svi_global_precision(h, Β)
+
 # C = diag(s) (I + V A V'), C C' = diag(s²) + ΒΒ'. The stable divided
 # difference 1/(sqrt(1+λ)+1) also works when a rank column is initially zero.
-function _brm_svi_global_sqrt(h)
+function _brm_svi_sqrt_axes(h)
     E = eigen(Symmetric(h.V' * h.V))
-    W = h.V * E.vectors
-    a = 1 ./ (sqrt.(1 .+ max.(E.values, 0)) .+ 1)
-    (; s=h.s, W, a)
+    h.V * E.vectors, sqrt.(1 .+ max.(E.values, 0))
+end
+function _brm_svi_global_sqrt(h)
+    W, root = _brm_svi_sqrt_axes(h)
+    (; s=h.s, W, a=1 ./ (root .+ 1))
 end
 _brm_svi_global_sqrt_mul(c, x) = c.s .* (x + c.W * (c.a .* (c.W' * x)))
 _brm_svi_global_sqrt_tmul(c, x) = begin
@@ -555,10 +565,9 @@ end
 # coordinates, the draw's (ε, η), and the entropy's own gradient.
 function _brm_svi_global_gradient(q, w, ε, η)
     h = _brm_svi_global_geometry(q)
-    # diag(I - V (I + V'V)^-1 V') without a D × D intermediate.
-    diagonal = 1 .- vec(sum(abs2, h.V / h.K.U; dims=2))
+    diagonal, loading = _brm_svi_entropy_gradients(h, q.Β)
     gρ = w .* ε .* h.s .+ diagonal
-    gΒ = w * η' .+ _brm_svi_global_precision(h, q.Β)
+    gΒ = w * η' .+ loading
     vcat(w, gρ, vec(gΒ))
 end
 
