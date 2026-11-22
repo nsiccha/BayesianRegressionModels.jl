@@ -3,8 +3,8 @@
 # it (`_BRMSVIAuthoredPrior`, src/nlme_svi.jl). Unit membership is supplied
 # here as an independent oracle beside production structural ownership.
 # Run: julia --startup-file=no --project=test test/nlme_svi_authored_factors.jl
-include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+include(joinpath(@__DIR__, "jax_module_driver.jl"))
 using ADTypes: AutoEnzyme
 import Enzyme
 
@@ -158,6 +158,66 @@ function check_authored_factor_split(rk; constrained=false)
         " unit_sizes=", length.(units), " events=", length(events))
 end
 
+# Check the labelled densities on the exact packed points a device runner passes.
+function check_device_partition(target, problem)
+    c = problem.partition
+    out = jax_source(c.built, c.bound, c.observations; c.by, c.partitioned,
+        problem.global_factors, problem.unit_factors, problem.expected_layout)
+    @test collect(out.partition_data.labels) == collect(eachindex(target.units))
+    brm_jax_require_python() || return
+    raw = problem.bound_data(out.source)
+    mktempdir() do dir
+        write(joinpath(dir, "station_model.py"), out.source)
+        script = joinpath(dir, "partition.py")
+        open(script, "w") do io
+            println(io, "import numpy as np, json, jax\nimport station_model as m")
+            println(io, "jax.config.update('jax_enable_x64', True)")
+            println(io, "raw = {", join((repr(String(k)) * ": " * _py(v) for (k,v) in pairs(raw)), ", "), "}")
+            println(io, "p = m.prepare_data(**raw)")
+            println(io, "q = m.prepare_partition(p, json.loads(", _py(JSON.json(out.partition_data)), "))")
+            println(io, "batch = jax.jit(jax.vmap(jax.value_and_grad(lambda x,i: m.unit_log_density(x,i,**q))))")
+            println(io, "shared = jax.jit(jax.value_and_grad(lambda x: m.global_log_density(x,**q)))")
+            # Repeated labels at distinct points distinguish one unit's contribution
+            # from slicing or rescaling the total density.
+            rows = map(enumerate((4, 1, 4))) do (lane, i)
+                x = [0.17sin(k) + 0.1lane * cos(k) for k in eachindex(problem.point)]
+                g = x[target.globals]
+                gg, gz = zeros(length(g)), zeros(length(target.units[i]))
+                value = BRM._brm_svi_unit_term!(gg, gz, target, i, g, x[target.units[i]])
+                grad = zeros(length(x))
+                grad[target.globals] = gg
+                grad[target.units[i]] = gz
+                shared_value, shared_grad = BRM._brm_svi_global_term(target, g)
+                packed = zeros(length(x))
+                packed[target.globals] = shared_grad
+                (x, i, value, grad, shared_value, packed)
+            end
+            println(io, "rows = [", join(_py.(rows), ", "), "]")
+            println(io, """
+                xs, labels, values, gradients, shared_values, shared_gradients = zip(*rows)
+                actual, grad = batch(np.stack(xs), np.asarray(labels))
+                np.testing.assert_allclose(actual, values, rtol=1e-10, atol=1e-8)
+                np.testing.assert_allclose(grad, gradients, rtol=1e-10, atol=1e-8)
+                for x, v, g in zip(xs, shared_values, shared_gradients):
+                    actual, grad = shared(x)
+                    np.testing.assert_allclose(actual, v, rtol=1e-10, atol=1e-8)
+                    np.testing.assert_allclose(grad, g, rtol=1e-10, atol=1e-8)
+
+                all_labels = np.asarray(q["labels"])
+                full = jax.jit(jax.value_and_grad(lambda x: m.log_density(x, **p)))
+                for x in (np.zeros_like(xs[0]), xs[0]):
+                    points = np.broadcast_to(x, (len(all_labels), len(x)))
+                    unit_values, unit_gradients = batch(points, all_labels)
+                    global_value, global_gradient = shared(x)
+                    full_value, full_gradient = full(x)
+                    np.testing.assert_allclose(global_value + unit_values.sum(), full_value, rtol=1e-10, atol=1e-8)
+                    np.testing.assert_allclose(global_gradient + unit_gradients.sum(axis=0), full_gradient, rtol=1e-10, atol=1e-8)
+                """)
+        end
+        @test success(pipeline(`$BRM_JAX_PYTHON $script`; stdout, stderr))
+    end
+end
+
 # The same split as SVI's prior term evaluates it (`_BRMSVIAuthoredPrior`,
 # src/nlme_svi.jl). On the strict subject units it equals the standard-normal
 # split term by term; with each subject also owning its coefficients, the
@@ -167,6 +227,7 @@ function check_svi_authored_prior(rk; constrained=false)
     m = brm_nlme_model(rk; ad_backend=FACTOR_AD)
     target = BRM._brm_svi_target(m)
     device_problem = BRM._brm_svi_device_problem(target)
+    constrained && check_device_partition(target, device_problem)
     @test device_problem.expected_layout === rk.model.layout
     @test device_problem.owner == target.ownership.owner
     @test device_problem.observation_units == target.plan.labels
