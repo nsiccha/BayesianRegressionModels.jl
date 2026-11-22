@@ -1625,12 +1625,23 @@ function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h; shift=0.0)
     else
         H = Hermitian(h, :L)
     end
-    if p.factor[] === nothing
+    # A Normal conditional has the same curvature at every Newton iterate.
+    # The final determinant also uses the last iterate's curvature for other
+    # families. Compare the actual entries (including soft-sum anchors and
+    # component shifts) before doing another numeric factorization.
+    cached = p.factor[]
+    values = nonzeros(parent(H))
+    if cached === nothing || cached.pattern !== p.pattern
         F = cholesky(H; shift, check=false)
-        p.factor[] = F
+        p.factor[] = (; F, pattern=p.pattern, values=copy(values), shift)
         return F
     end
-    cholesky!(p.factor[], H; shift, check=false)
+    cached.shift == shift && cached.values == values && return cached.F
+    p.factor[] = nothing
+    F = cholesky!(cached.F, H; shift, check=false)
+    copyto!(cached.values, values)
+    p.factor[] = (; F, pattern=p.pattern, cached.values, shift)
+    F
 end
 
 # The shifts the Newton direction tries where a component's h is not positive
@@ -2026,7 +2037,7 @@ function _brm_spl_value(p::BRMSparseLaplaceProblem, state)
     rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
         derivatives=false, third=true, uA=state.uA)
     sum(p.constant) + sum(fc) + rest + length(p.integrated) / 2 * log(2π) -
-        _brm_spl_logdet(p, state.F, state.W) / 2 + _rk_slap_prior(p.kernels, state.uA)
+        _brm_spl_logdet(p, state.F, state.W) / 2 + _brm_spl_zero_prior(p, state.uA)
 end
 
 # Value and gradient over the population coordinates: the structured path's
@@ -2239,7 +2250,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         _brm_spl_nonfinite_gradient!(p, state, value, gradient, bad)
         return value, gradient
     end
-    lp, prior_gradient = _rk_slap_prior_gradient(p.kernels, state.uA)
+    lp, prior_gradient = _brm_spl_zero_prior_gradient(p, state.uA)
     bad === nothing && !all(isfinite, prior_gradient) &&
         (bad = "the population prior's gradient")
     gradient .+= gcell .+ prior_gradient[p.population]

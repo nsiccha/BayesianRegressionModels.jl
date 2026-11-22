@@ -912,6 +912,45 @@ function BRM._rk_nlme_population_prior_value_gradient(state, u::Vector{Float64})
     value + jacobian, gradient + jacobian_gradient
 end
 
+function BRM._rk_spl_remaining_prior(state, fields)
+    backend = state.backend
+    catalogue = try
+        _rk_density_catalogue(backend)
+    catch err
+        # Some plans, including finite integer marginalization, only expose
+        # the complete prior. Keep using that prior when it cannot be split.
+        err isa ReactiveKernelsPPL.ContractValidationError || rethrow()
+        return false
+    end
+    expected = Dict(first(indices) => indices for indices in fields)
+    events = collect(catalogue)
+    selected = empty(events)
+    removed = Set{Int}()
+    for event in events
+        if event.kind === :prior
+            owned = factor_coordinates(catalogue, event)
+            if !isempty(owned) && get(expected, first(owned), nothing) == owned
+                first(owned) in removed && return false
+                push!(removed, first(owned))
+                continue
+            end
+        end
+        push!(selected, event)
+    end
+    length(removed) == length(fields) || return false
+    rest = select_factors(catalogue, selected)
+    model, plan = backend.model, _rk_translated(backend)
+    query = prepare_query(model, plan, rest; u0=state.unit)
+    ad = Ref{Any}(nothing)
+    function gradient(point)
+        if ad[] === nothing
+            ad[] = prepare_query_ad(prepare_ad, model, plan, rest, state.ad_backend, state.unit)
+        end
+        Base.invokelatest(ad_value_and_gradient, ad[], point)
+    end
+    (; value=point -> Base.invokelatest(query, point), gradient)
+end
+
 # SVI's authored prior split (`_BRMSVIAuthoredPrior`, src/nlme_svi.jl): every
 # authored prior and coordinate-Jacobian event of the catalogue goes to the
 # bucket of the one unit whose coordinates it owns or structurally reads

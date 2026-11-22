@@ -3,9 +3,8 @@
 # coordinates (vertex, channel, time). Their prior precision
 #   Q(θ) = Q_t(ℓ_t) ⊗ Λ ⊗ Q_s(ℓ_s),   Λ = (L Lᵀ)⁻¹,
 # moves with the field's spatial and temporal lengths and its channel factor,
-# which are population values read through RK value ports. RK's prior at
-# z = 0 keeps the normalizer, as for declared Gaussian vectors
-# (`nlme_laplace_gaussian.jl`); the engine adds −½ zᵀQz, writes Q on h's
+# which are population values read through RK value ports. At z = 0 only
+# the field's normalizer remains. The engine adds −½ zᵀQz, writes Q on h's
 # pattern, and differentiates
 #   −½ ẑᵀ∂Qẑ − ½ tr(H⁻¹ ∂Q) − vᵀ∂Q ẑ
 # through the separable factors, never forming a Kronecker matrix. The SD
@@ -105,9 +104,10 @@ struct _BRMSPLGMRF
     backend::Any
     read::Base.RefValue{Any}
     pullback::Base.RefValue{Any}
+    remaining_prior::Base.RefValue{Any}
 end
 _BRMSPLGMRF(fields, ports, backend) =
-    _BRMSPLGMRF(fields, ports, backend, Ref{Any}(nothing), Ref{Any}(nothing))
+    _BRMSPLGMRF(fields, ports, backend, Ref{Any}(nothing), Ref{Any}(nothing), Ref{Any}(nothing))
 
 function Base.deepcopy_internal(g::_BRMSPLGMRF, stack::IdDict)
     haskey(stack, g) && return stack[g]
@@ -123,6 +123,62 @@ end
 function _brm_gmrf_pullback(g::_BRMSPLGMRF, u, seeds)
     g.pullback[] === nothing && (g.pullback[] = _rk_value_pullback(g.backend, g.ports, u))
     g.pullback[](u, seeds)
+end
+
+function _rk_spl_remaining_prior end
+function _rk_spl_normalizer_gradient end
+
+# At zero integrated coordinates the field prior contains no state quadratic.
+# Evaluate its separable normalizer directly and leave every other prior and
+# Jacobian in RK. Only split out a field whose complete joint prior event the
+# catalogue identifies. A restricted plan or a chain copy builds its own query.
+function _brm_spl_remaining_prior(p)
+    g = p.gmrf
+    if g.remaining_prior[] === nothing
+        fields = [p.integrated[f.z] for f in g.fields]
+        g.remaining_prior[] = _rk_spl_remaining_prior(p.kernels.prior, fields)
+    end
+    g.remaining_prior[]
+end
+
+function _brm_spl_zero_prior(p, u)
+    p.gmrf === nothing && return _rk_slap_prior(p.kernels, u)
+    other = _brm_spl_remaining_prior(p)
+    other === false && return _rk_slap_prior(p.kernels, u)
+    value = other.value(u)
+    try
+        for f in p.gmrf.fields
+            value += _brm_gmrf_log_normalizer(f.mesh, f.times, f.θ..., f.L)
+        end
+    catch err
+        # A spatial LDL pivot can round out of support at extreme lengths.
+        # Let the authored density score that point with its own pivot test.
+        err isa DomainError || rethrow()
+        return _rk_slap_prior(p.kernels, u)
+    end
+    value
+end
+
+function _brm_spl_zero_prior_gradient(p, u)
+    g = p.gmrf
+    g === nothing && return _rk_slap_prior_gradient(p.kernels, u)
+    other = _brm_spl_remaining_prior(p)
+    other === false && return _rk_slap_prior_gradient(p.kernels, u)
+    value, gradient = other.gradient(u)
+    seeds = Any[x isa Number ? 0.0 : zeros(size(x)) for x in _brm_gmrf_read(g, u)]
+    try
+        for f in g.fields
+            lp, ds, dt, dL = _rk_spl_normalizer_gradient(f)
+            value += lp
+            _brm_gmrf_seed!(seeds, f.spatial_port, ds)
+            _brm_gmrf_seed!(seeds, f.temporal_port, dt)
+            _brm_gmrf_seed!(seeds, f.factor_port, dL)
+        end
+    catch err
+        err isa DomainError || rethrow()
+        return _rk_slap_prior_gradient(p.kernels, u)
+    end
+    value, gradient .+ _brm_gmrf_pullback(g, u, Tuple(seeds))
 end
 
 # Each field's Q nonzeros in a fixed order: time pair, channel pair, then the

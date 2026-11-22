@@ -61,6 +61,14 @@ using Random
             @test LDP.logdensity(target, point) ≈ oracle(point) atol=1e-7 rtol=1e-9
         end
         gmrf_laplace_gradient_check(target, oracle, φ)
+        # The zero-field split must retain the authored prior's normalization
+        # and Jacobians, including a sampled channel factor's derivative.
+        state = BRM._brm_spl_mode!(target, φ)
+        @test target.gmrf.remaining_prior[] isa NamedTuple
+        split = BRM._brm_spl_zero_prior_gradient(target, state.uA)
+        authored = BRM._rk_slap_prior_gradient(target.kernels, state.uA)
+        @test split[1] ≈ authored[1] atol=1e-10
+        @test split[2][target.population] ≈ authored[2][target.population] atol=1e-9
     end
 end
 

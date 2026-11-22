@@ -213,6 +213,18 @@ function _brm_gmrf_times(times)
     grid
 end
 
+# Log density at a zero field, including the Jacobian of every OU innovation.
+function _brm_gmrf_log_normalizer(mesh, times, spatial_length, temporal_length, L)
+    n, nc, nt = length(mesh.mass), size(L, 1), length(times)
+    value = nt * nc * _brm_gmrf_spatial_logdet(mesh, spatial_length) / 2 -
+        n * nt * sum(log, diag(L)) - (n * nc * nt / 2) * log(2pi)
+    for t in 2:nt
+        v = -expm1(-2 * (times[t] - times[t - 1]) / temporal_length)
+        value -= n * nc * log(v) / 2
+    end
+    value
+end
+
 # Prior state order is vertex, channel, time. The first time is stationary;
 # every later transition uses its actual elapsed time, including long gaps.
 # L is the channel correlation's lower Cholesky factor, never a spatial factor.
@@ -226,9 +238,7 @@ function _brm_gmrf_logpdf(state::AbstractArray{<:Real,3}, mesh::_BRMGMRFMesh,
     all(>(0), diag(L)) || throw(ArgumentError("gmrf channel factor needs a positive diagonal"))
     all(i -> isfinite(times[i]) && (i == 1 || times[i] > times[i - 1]), eachindex(times)) ||
         throw(ArgumentError("gmrf times must be finite and strictly increasing"))
-    spatial_logdet = _brm_gmrf_spatial_logdet(mesh, spatial_length)
-    value = nt * channels * spatial_logdet / 2 - n * nt * sum(log, diag(L)) -
-        (n * channels * nt / 2) * log(2pi)
+    value = _brm_gmrf_log_normalizer(mesh, times, spatial_length, temporal_length, L)
     residual = Matrix{eltype(state)}(undef, n, channels)
     work = zeros(eltype(state), n)
     for t in 1:nt
@@ -254,7 +264,7 @@ function _brm_gmrf_logpdf(state::AbstractArray{<:Real,3}, mesh::_BRMGMRFMesh,
                 q += abs2(z / (sqrt(4pi * mesh.mass[i]) * sqrt(v)))
             end
         end
-        value -= q + n * channels * log(v) / 2
+        value -= q
     end
     value
 end

@@ -241,6 +241,15 @@ BRM._rk_slap_prior(k, u::Vector{Float64}) =
 BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
     BRM._rk_nlme_population_prior_value_gradient(k.prior, u)
 
+function BRM._rk_spl_normalizer_gradient(field)
+    dL = zero(field.L)
+    derivatives, value = Enzyme.autodiff(Enzyme.ReverseWithPrimal,
+        BRM._brm_gmrf_log_normalizer, Enzyme.Active, Enzyme.Const(field.mesh),
+        Enzyme.Const(field.times), Enzyme.Active(field.θ[1]), Enzyme.Active(field.θ[2]),
+        Enzyme.Duplicated(field.L, dL))
+    value, derivatives[3], derivatives[4], dL
+end
+
 # The sparse Laplace's `@plate` cells (src/nlme_laplace_sparse.jl): one cell of
 # `observations` differentiated over a compact selection of partitioned
 # coordinates, conditional on the shared ones. RK gives every compact operator
