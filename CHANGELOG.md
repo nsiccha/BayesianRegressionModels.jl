@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.379
+
+- `jax_source` can emit a grouped `hsgp(...; by=g, cor=multigroup(Omega, tau))`
+  and differentiate its log density through the level correlations, length
+  scales and basis weights. **Breaking:** This term's RK program identity
+  changes. Finish checkpointed runs using it on their original BRM version.
+
 ## 0.2.378
 
 - Model-scope assignments and likelihood arguments accept explicit elementwise

@@ -591,11 +591,15 @@ function _rk_ast_hsgp_weight_cell(::Val{:periodic}, options, D, bindings, taken)
     :(exp(log(sigma) + (log(2) + log($bessel(omega2[b], inv(rho^2)))) / 2))
 end
 
-function _rk_ast_hsgp_weight_cell(::Val{:exp_quad}, options, D, bindings, taken)
+function _rk_ast_hsgp_frequency_exponent(options, D)
     frequency(j) = D == 1 ? :(omega2[b]) : :(omega2[b, $j])
     exponent_parts = options.iso ? [:(rho^2 * $(frequency(j))) for j in 1:D] :
         [:(rho[$j]^2 * $(frequency(j))) for j in 1:D]
-    exponent = D == 1 ? only(exponent_parts) : Expr(:call, :+, exponent_parts...)
+    D == 1 ? only(exponent_parts) : Expr(:call, :+, exponent_parts...)
+end
+
+function _rk_ast_hsgp_weight_cell(::Val{:exp_quad}, options, D, bindings, taken)
+    exponent = _rk_ast_hsgp_frequency_exponent(options, D)
     scale = options.iso ? :(sigma * (rho * sqrt(2pi))^($D / 2)) :
         Expr(:call, :*, :sigma, [:(sqrt(rho[$j] * sqrt(2pi))) for j in 1:D]...)
     :($scale * exp(-0.25 * $exponent))

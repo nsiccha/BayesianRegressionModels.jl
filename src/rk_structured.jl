@@ -227,11 +227,28 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMLevelCorrelation, _option
     push!(block.statements, Expr(:(=), weights, Expr(:call, :*, L, z)))
     (weights, nothing)
 end
-function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCorrelation, _options)
+function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCorrelation, options)
     L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(lc.base))
     tau = _rk_block_argument!(block, :tau_level, something(lc.tau_source, lc.tau))
-    (z, (; weights=:(brm_hsgp_multigroup_weights(z, omega2, rho, L_level, tau_level)),
-           formals=[:L_level, :tau_level], values=Any[L, tau]))
+    exponent = _rk_ast_hsgp_frequency_exponent(options, length(_rk_hsgp_modes(options)))
+    # One independent Cholesky-times-vector product per frequency. Set the
+    # diagonal explicitly, as in brm_hsgp_multigroup_weights, so it has no
+    # derivative with respect to the sampled level factor.
+    columns = _rk_ast_graph_plate([:(axes(z, 2))], [:b], quote
+        exponent = $exponent
+        coherence = ifelse.(same_level, 1.0 + 1e-6, exp.((-exponent * tau_level) .* distance))
+        factor = ReactiveKernels.rk_cholesky_lower(coherence)
+        factor * z[:, b]
+    end)
+    weights = quote
+        omega = L_level * transpose(L_level)
+        distance = 1 .- omega
+        levels_axis = 1:size(L_level, 1)
+        same_level = levels_axis .== transpose(levels_axis)
+        weight_columns = $columns
+        stack(weight_columns; dims=2)
+    end
+    (z, (; weights, formals=[:L_level, :tau_level], values=Any[L, tau]))
 end
 # The coordinates are current locations; the grid is a fitted graph value.
 function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, options)
