@@ -4,7 +4,7 @@
 # walks, `car` fields and declared Gaussian vectors) by how its rows read them:
 #
 # - integrated: every row reading it is Normal, so the Laplace is exact there;
-# - gated: affine in the first parameter of other closed-form families
+# - gated: affine in the first parameter of other supported row families
 #   (counts, binomial); integrated only where a per-block diagnostic admits it;
 # - never: the term moves a shape or dispersion, is Student-t, stratified, or
 #   a `car_units` field, which the sparse Laplace does not integrate;
@@ -135,8 +135,8 @@ the effects as INLA does. A coefficient with another prior is `:never`.
 - **integrated:** every row reading the term is recognized as affine Normal,
   with scale fixed conditional on the sampled coordinates. Its Laplace is exact
   with exact determinant algebra;
-- **gated:** recognized affine log-Poisson, logit-binomial/Bernoulli, or
-  log-NegativeBinomial2 rows with shape fixed conditional on the sampled
+- **gated:** recognized affine log-Poisson, logit-binomial/Bernoulli,
+  log-NegativeBinomial2 or log-Gamma rows with shape fixed conditional on the sampled
   coordinates. These have log-concave conditionals. The term is integrated
   where its per-block importance diagnostic admits it. That
   diagnostic proposes each block (one level of the term, one area of a field)
@@ -379,7 +379,7 @@ end
 
 const _BRM_PLAN_FAMILY_NAMES = Dict(_BRM_LAP_POISSON => "Poisson",
     _BRM_LAP_BINOMIAL => "binomial", _BRM_LAP_NB2 => "NegativeBinomial2",
-    _BRM_LAP_NORMAL => "Normal")
+    _BRM_LAP_NORMAL => "Normal", _BRM_LAP_GAMMA => "Gamma")
 _brm_plan_family_names(r) = vcat(sort!([_BRM_PLAN_FAMILY_NAMES[f] for f in r.families]),
     r.cells ? ["`@plate` cells"] : String[],
     r.values ? ["model-value observations"] : String[])

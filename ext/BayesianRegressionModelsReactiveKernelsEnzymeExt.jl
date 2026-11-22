@@ -8,6 +8,25 @@ import Enzyme
 
 const BRM = BayesianRegressionModels
 
+# A row law takes its two link-scale parameters and one fixed observation.
+# Nest scalar forward passes to obtain just the symmetric entries used by
+# Newton's step and by the derivative of its log determinant.
+_row_da(f) = (a, b, y) -> only(Enzyme.autodiff(Enzyme.Forward, f, Enzyme.Duplicated,
+    Enzyme.Duplicated(a, 1.0), Enzyme.Const(b), Enzyme.Const(y)))
+_row_db(f) = (a, b, y) -> only(Enzyme.autodiff(Enzyme.Forward, f, Enzyme.Duplicated,
+    Enzyme.Const(a), Enzyme.Duplicated(b, 1.0), Enzyme.Const(y)))
+
+function BRM._brm_lap_ad_row(f::F, a, b, y, third, moving) where {F}
+    da, db = _row_da(f), _row_db(f)
+    daa, dab, dbb = _row_da(da), _row_db(da), _row_db(db)
+    BRM._BRMLapRow(f(a, b, y), da(a, b, y),
+        moving || third ? db(a, b, y) : 0.0, daa(a, b, y),
+        moving || third ? dab(a, b, y) : 0.0, moving ? dbb(a, b, y) : 0.0,
+        third ? _row_da(daa)(a, b, y) : 0.0, third ? _row_db(daa)(a, b, y) : 0.0,
+        third && moving ? _row_db(dab)(a, b, y) : 0.0,
+        third && moving ? _row_db(dbb)(a, b, y) : 0.0)
+end
+
 # A program whose reverse gradient needs runtime activity needs it in BRM's
 # other Enzyme modes of the same program too (the η Hessian's
 # reverse-over-forward, Gaussian moment pushforwards), so those modes take the

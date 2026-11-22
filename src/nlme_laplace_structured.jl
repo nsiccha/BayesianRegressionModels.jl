@@ -13,9 +13,9 @@
 # with A_t(φ) the parameters at z = 0, Z_t the row's random-effect design
 # (constant data) and M = diag(scales) L each random-effect block's draws map.
 # The term's log density ℓ_t(ψ_t) and its first three ψ-derivatives have
-# closed forms (`_brm_lap_row`), so each unit's mode is its own Newton search
-# over d numbers on its own rows: no AD at all, and nothing shared with other
-# units (its own iterations, line search, stop and restart).
+# a row-local implementation (`_brm_lap_row`), so each unit's mode is its own
+# Newton search over d numbers on its own rows (its own iterations, line
+# search, stop and restart).
 #
 # With C_t = Z_t M, h_i = I + Σ_t C_tᵀ W_t C_t (W_t = −∂²ℓ_t) at the mode,
 #
@@ -24,9 +24,8 @@
 # and the gradient is (∂A/∂φ)ᵀ w plus a d × d contraction. For a regression
 # A is affine in φ (design-matrix products, factor effects, log of a sampled
 # shape), so ∂A/∂φ is constant data recovered once (`J`, verified at other
-# points like Z) and no AD runs per evaluation beyond the prior's gradient and
-# the d-dimensional draws maps; otherwise the RK parameters are evaluated and
-# pulled back per evaluation:
+# points like Z). Otherwise the RK parameters are evaluated and pulled back
+# at each population point:
 #
 #     ∇L = (∂A/∂φ)ᵀ w + ⟨Γ, ∂M/∂φ⟩ + ∇prior,
 #     w_t = ℓ′_t + ½ τ_t + ℓ″_t C_t v_i,   τ_t,s = Σ_pq (C_t h_i⁻¹ C_tᵀ)_pq ℓ‴_t,pqs,
@@ -41,8 +40,9 @@ const _BRM_LAP_POISSON = Int8(1)   # ψ = (log μ,)
 const _BRM_LAP_BINOMIAL = Int8(2)  # ψ = (logit p,), n trials (1 for Bernoulli)
 const _BRM_LAP_NB2 = Int8(3)       # ψ = (log μ, log φ)
 const _BRM_LAP_NORMAL = Int8(4)    # ψ = (μ, log σ)
+const _BRM_LAP_GAMMA = Int8(5)     # ψ = (log μ, log shape)
 
-_brm_lap_width(f::Int8) = f === _BRM_LAP_NB2 || f === _BRM_LAP_NORMAL ? 2 : 1
+_brm_lap_width(f::Int8) = f in (_BRM_LAP_NB2, _BRM_LAP_NORMAL, _BRM_LAP_GAMMA) ? 2 : 1
 
 # One term's log density (without its constant, `_brm_lap_constant`) and its
 # derivatives in its link-scale parameters (a, b), symmetric entries once.
@@ -62,6 +62,24 @@ struct _BRMLapRow
     t112::Float64
     t122::Float64
     t222::Float64
+end
+
+# New row laws are differentiated in the RK Enzyme extension.
+function _brm_lap_ad_row end
+
+# Gamma(shape, mean/shape), on the log scale so a large log mean does
+# not overflow a representable log density. Include the full normalization.
+function _brm_lap_gamma(a, b, y)
+    shape = exp(b)
+    (shape > 0 && y >= 0 && y < Inf) || return -Inf
+    if iszero(y)
+        # RK drops the singular (shape - 1) * log(0) at unit shape.
+        shape == 1 && return shape * (b - a) - loggamma(shape)
+        return shape < 1 ? Inf : -Inf
+    end
+    log_y = log(y)
+    log_rate_y = (b - a) + log_y
+    shape * log_rate_y - loggamma(shape) - log_y - exp(log_rate_y)
 end
 
 # ψ_n(y + P) − ψ_n(P) for n = 0, 1, 2 (pg is its negative for n = 2). For a
@@ -124,6 +142,8 @@ end
         t222 = -P * (P^2 * pg - 3P * tg - l1q - dg - 3) - 2yP * r^3 +
             3(2P + y) * r^2 - (7P + y) * r
         return _BRMLapRow(v, g1, g2, h11, h12, h22, t111, t112, t122, t222)
+    elseif f === _BRM_LAP_GAMMA
+        return _brm_lap_ad_row(_brm_lap_gamma, a, b, y, third, moving)
     else
         # Normal with mean a and log standard deviation b.
         e = exp(-2b)
@@ -138,6 +158,7 @@ function _brm_lap_constant(f::Int8, y::Float64, n::Float64)
     f === _BRM_LAP_POISSON && return -loggamma(y + 1)
     f === _BRM_LAP_BINOMIAL && return loggamma(n + 1) - loggamma(y + 1) - loggamma(n - y + 1)
     f === _BRM_LAP_NB2 && return -loggamma(y + 1)
+    f === _BRM_LAP_GAMMA && return 0.0
     -0.5 * log(2π)
 end
 
@@ -234,12 +255,13 @@ function _brm_slap_family(spec)
         return _BRM_LAP_POISSON, :log, ((spec.predictor, :identity),)
     spec.family in (:bernoulli_logit, :binomial_logit) &&
         return _BRM_LAP_BINOMIAL, :logit, ((spec.predictor, :identity),)
-    if spec.family === :nb2_log || spec.family === :gaussian
+    if spec.family in (:nb2_log, :gamma_log, :gaussian)
         scale = spec.scale_predictor === nothing ? (spec.scale, :log) :
             (spec.scale_predictor, :identity)
         first(scale) === nothing && return nothing
-        f = spec.family === :nb2_log ? _BRM_LAP_NB2 : _BRM_LAP_NORMAL
-        return f, spec.family === :nb2_log ? :log : :identity,
+        f = spec.family === :gaussian ? _BRM_LAP_NORMAL :
+            spec.family === :gamma_log ? _BRM_LAP_GAMMA : _BRM_LAP_NB2
+        return f, spec.family === :gaussian ? :identity : :log,
             ((spec.predictor, :identity), scale)
     end
     nothing
@@ -265,7 +287,7 @@ function _brm_slap_refusal(backend::RKBRMI, view::BRMNLMEView)
 end
 
 # Why the model's observations are not all regression responses of a family
-# with closed-form rows, or `nothing` (shared with the sparse Laplace).
+# with supported rows, or `nothing` (shared with the sparse Laplace).
 function _brm_slap_response_refusal(backend::RKBRMI; cells::Bool=false,
         values::Bool=false)
     responses = _brm_slap_responses(backend.plan)
