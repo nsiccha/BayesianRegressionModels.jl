@@ -13,7 +13,8 @@ end
         scale = hypot.(sigma, extra)
         y ~ Normal(0, scale)
     end
-    @test_throws "A formula call already applies per row" dotted((; y=[0.1], extra=[0.2]))
+    model = dotted((; y=[0.1], extra=[0.2]))
+    @test occursin("hypot.(sigma, extra)", string(model))
 end
 
 @stestset "hypot assignment scalar and vector inputs" begin
@@ -27,7 +28,7 @@ end
             builder = @brm begin
                 log_sigma ~ Normal(0, 1)
                 sigma = exp(log_sigma) * gain
-                scale = hypot(sigma, extra)
+                scale = hypot.(sigma, extra)
                 y ~ Normal(0, scale)
             end
             model = builder(data)

@@ -77,6 +77,11 @@ function _rk_ast_data_expr!(defs, statements, bindings, taken, value; fitted=not
         recipe = first(value.args)
         inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg;
             fitted), value.args[2:end])
+        if recipe.callable isa _BRMBroadcastCall
+            kwargs = NamedTuple{recipe.keywords}(Tuple(inputs[recipe.npos+1:end]))
+            return _rk_broadcast_expr!(bindings, recipe.callable, inputs[1:recipe.npos],
+                kwargs, taken)
+        end
         callee = _rk_value_callee!(bindings, recipe.callable, taken)
         params = [Symbol("input", i) for i in eachindex(inputs)]
         scalar_inputs = params

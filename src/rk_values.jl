@@ -1348,6 +1348,19 @@ _rk_value_expr!(bindings, value::Function, taken) =
 _rk_value_expr!(bindings, value::_BRMPreparedRef, taken) = value.name
 _rk_value_expr!(bindings, values::Tuple, taken) =
     Expr(:tuple, (_rk_value_expr!(bindings, value, taken) for value in values)...)
+function _rk_broadcast_expr!(bindings, call::_BRMBroadcastCall, args, kwargs, taken)
+    callee = haskey(_RK_DERIVED_MATH, call.f) ? _RK_DERIVED_MATH[call.f] :
+        _rk_value_callee!(bindings, call.f, taken)
+    expression = _rk_ast_dotted(callee, args...)
+    isempty(kwargs) || pushfirst!(expression.args[2].args, Expr(:parameters,
+        (Expr(:kw, key, value) for (key, value) in pairs(kwargs))...))
+    expression
+end
+function _rk_value_expr!(bindings, expression::_BRMPreparedExpr{<:_BRMBroadcastCall}, taken)
+    lower(arg) = _rk_value_expr!(bindings, arg, taken)
+    _rk_broadcast_expr!(bindings, expression.callable, map(lower, expression.args),
+        map(lower, expression.kwargs), taken)
+end
 function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     statistic = _rk_distribution_statistic!(
         x -> _rk_value_expr!(bindings, x, taken), bindings, expression.callable,

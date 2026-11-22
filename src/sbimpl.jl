@@ -5380,6 +5380,14 @@ function _sb_prior_call(f, args, kwargs)
     call
 end
 
+function _sb_prior_call(call::_BRMBroadcastCall, args, kwargs)
+    name, operands = _sb_julia_stan_builtin(call.f, args)
+    inputs = Expr(:tuple, operands...)
+    isempty(kwargs) || pushfirst!(inputs.args, Expr(:parameters,
+        (Expr(:kw, key, value) for (key, value) in pairs(kwargs))...))
+    Expr(:., something(name, call.f), inputs)
+end
+
 # StanBlocks' data phase (`forward!(::SlicModel)`) types EVERY key in the data
 # dict via `stan_type`, so every value handed to the `SlicModel` must be Stan
 # data. The shared `_brm_collect_data!` (backend_plan.jl) records the raw of
@@ -19476,6 +19484,9 @@ _sb_scalar_expr(x::NamedColumn, data) = begin
 end
 _record_scalar_data!(data, sym, d::DataColumn) = (data[sym] = parent(d); nothing)
 _record_scalar_data!(args...) = nothing
+_sb_scalar_expr(x::ExprColumn{<:_BRMBroadcastCall}, data) =
+    _sb_prior_call(getf(x), map(a -> _sb_scalar_expr(a, data), getargs(x)),
+        map(a -> _sb_scalar_expr(a, data), getkwargs(x)))
 function _sb_scalar_expr(x::ExprColumn{F}, data) where {F<:Union{_BRMMatrixProduct,_BRMRowScale}}
     matrix, vector = getargs(x)
     left = _sb_scalar_expr(matrix, data)
