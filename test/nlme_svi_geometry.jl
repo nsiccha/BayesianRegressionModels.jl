@@ -25,8 +25,36 @@ const BRM = BayesianRegressionModels
     end
 end
 
-function geometry_bytes(D, r)
+@testset "a narrow diagonal with finite rank loadings" begin
+    rng = Xoshiro(17)
+    for (D, r) in ((19, 4), (3, 8))
+        s = ones(D)
+        s[end] = 1e-10
+        Β = 0.2randn(rng, D, r)
+        Β[end, :] .= 0.15
+        q = (; ρ=log.(s), Β)
+        # Σ is well conditioned. The unit contribution disappears if I + V'V
+        # is formed first, since the last row of V is about 1e9.
+        Σ = cholesky(Symmetric(Diagonal(s.^2) + Β * Β'))
+        P = inv(Σ)
+        h = BRM._brm_svi_global_geometry(q)
+        x = randn(rng, D, 3)
+        @test BRM._brm_svi_global_precision(h, x) ≈ Σ \ x
+        @test BRM._brm_svi_global_precision(h, x[:, 1]) ≈ Σ \ x[:, 1]
+        @test BRM._brm_svi_global_logdet(h) ≈ logdet(Σ)
+        gradient = BRM._brm_svi_global_gradient(q, zeros(D), zeros(D), zeros(r))
+        @test gradient[D+1:2D] ./ s.^2 ≈ diag(P)
+        @test reshape(gradient[2D+1:end], D, r) ≈ Σ \ Β
+        c = BRM._brm_svi_global_sqrt(h)
+        C = BRM._brm_svi_global_sqrt_mul(c, Matrix{Float64}(I, D, D))
+        @test C * C' ≈ Matrix(Σ)
+        @test BRM._brm_svi_global_sqrt_tmul(c, x) ≈ C' * x
+    end
+end
+
+function geometry_bytes(D, r; narrow=false)
     q = (; ρ=zeros(D), Β=fill(0.01, D, r))
+    narrow && (q.ρ[end] = log(1e-10))
     x = ones(D)
     h = BRM._brm_svi_global_geometry(q)
     BRM._brm_svi_global_precision(h, x)
@@ -40,10 +68,10 @@ function geometry_bytes(D, r)
 end
 
 @testset "SVI global geometry allocates linearly in field size" begin
-    for r in (0, 3)
-        geometry_bytes(100, r)
-        small = geometry_bytes(10_000, r)
-        large = geometry_bytes(20_000, r)
+    for (r, narrow) in ((0, false), (3, false), (3, true))
+        geometry_bytes(100, r; narrow)
+        small = geometry_bytes(10_000, r; narrow)
+        large = geometry_bytes(20_000, r; narrow)
         @test large < 2.2small
         @test large < 20_000_000
     end
