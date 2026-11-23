@@ -40,13 +40,25 @@ const PUBLIC_CENTERING_BUILDERS = (
 # population coefficient. Each block term's coefficient, read through the public
 # descriptor (`t` has no population coefficient); 0 = centred on 0, as is every
 # cell of a block compiled centred.
+# Each cell's location: its matched coefficient, and for the intercept-only
+# fixtures (`(1 | group)`, whose level design is the constant `1`) also `x`'s
+# mean over the group's rows times `x`'s coefficient, the projection of the
+# predictor's other column on the level's design (snag
+# adaptive-centrin-647119ba). The `K = 3` design `(1 + x + t)` holds `x` itself.
 function public_centering_betas(sb, names, block)
-    block.target_c == 0.0 || return zeros(Int, block.ranef.n_terms)
-    terms = block.ranef.n_terms == 1 ? [:Intercept] : [:Intercept, :x, :t]
-    [term === :t ? 0 : only(brm_population_effect_coordinates(brm_descriptor(sb), :mu,
-        names; coefficient=term).coordinates) for term in terms]
+    K = block.ranef.n_terms
+    xbar = [sum(PUBLIC_CENTERING_DATA.x[PUBLIC_CENTERING_DATA.group .== l]) / 2
+            for l in ("a", "b", "c")]
+    block.target_c == 0.0 || return (; coords=zeros(Int, K), x=0, xbar)
+    coord(term) = only(brm_population_effect_coordinates(brm_descriptor(sb), :mu,
+        names; coefficient=term).coordinates)
+    terms = K == 1 ? [:Intercept] : [:Intercept, :x, :t]
+    (; coords=[term === :t ? 0 : coord(term) for term in terms],
+       x=K == 1 ? coord(:x) : 0, xbar)
 end
-public_centering_beta(v, betas, k) = betas[k] == 0 ? 0.0 : v[betas[k]]
+public_centering_beta(v, betas, k, g) =
+    (betas.coords[k] == 0 ? 0.0 : v[betas.coords[k]]) +
+    (betas.x == 0 || k != 1 ? 0.0 : betas.xbar[g] * v[betas.x])
 
 # Read the physical covariance factor from BridgeStan, independently of BRM's
 # transform/accessors. At K=1 there is no sampled correlation factor.
@@ -76,7 +88,7 @@ function public_centering_reference(q, block, controls, C, betas)
             c = controls[(g - 1) * K + k]
             location = sum(C[k, j] * z[j] for j in 1:k-1; init=0.0)
             scale = C[k, k]
-            beta = public_centering_beta(q, betas, k)
+            beta = public_centering_beta(q, betas, k, g)
             z[k] = (q[block.effects[k, g]] - c * (location + beta)) / scale^c
             mapped[block.effects[k, g]] =
                 block.target_c * location + scale^block.target_c * z[k]
@@ -123,7 +135,7 @@ function public_centering_scores(sb, problem, block, q, backend, betas)
             C, z = factors[i], innovations[i]
             m = sum(C[k, j] * z[j, g] for j in 1:k-1; init=0.0)
             s = C[k, k]
-            beta = public_centering_beta(model_positions[i], betas, k)
+            beta = public_centering_beta(model_positions[i], betas, k, g)
             positions[i] = t * (m + beta) + s^t * z[k, g]
             gradients[i] = hs[i][k, g] / s^t
         end
@@ -137,7 +149,7 @@ function public_centering_scores(sb, problem, block, q, backend, betas)
             for g in 1:G, k in 1:K
                 c = controls[(g - 1) * K + k]
                 m = sum(C[k, j] * z[j, g] for j in 1:k-1; init=0.0)
-                beta = public_centering_beta(v, betas, k)
+                beta = public_centering_beta(v, betas, k, g)
                 source[block.effects[k, g]] = c * (m + beta) + C[k, k]^c * z[k, g]
             end
             source
@@ -180,7 +192,7 @@ end
             @test sqrt.(diag(C * C')) ≈ exp.(q[block.log_scales])
             backend = AutoEnzyme()
             betas = public_centering_betas(sb, names, block)
-            @test count(!=(0), betas) == (centered ? 0 : min(2, block.ranef.n_terms))
+            @test count(!=(0), betas.coords) == (centered ? 0 : min(2, block.ranef.n_terms))
             public_centering_scores(sb, problem, block, q, backend, betas)
 
             default = adaptive_centering_problem(sb, problem, backend)
@@ -215,7 +227,8 @@ end
                 @test gradient ≈ public_centering_fd(wrapped, q) atol=2e-5 rtol=2e-5
                 if !centered && block.ranef.n_terms == 1
                     sd = only(C)
-                    beta = public_centering_beta(q, betas, 1)
+                    beta = [public_centering_beta(q, betas, 1, g)
+                            for g in 1:block.ranef.n_groups]
                     @test mapped[selected] ≈ (q[selected] .- c .* beta) ./ sd .^ c atol=1e-12
                     @test ljac ≈ -sum(c) * log(sd) atol=1e-12
                 end

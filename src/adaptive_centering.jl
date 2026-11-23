@@ -2688,7 +2688,13 @@ end
 #   1wxltaq): `beta[f(j)] + b[j]`;
 # - the effect, for the same term, of every coarser grouping of the same
 #   predictor the level sits in, nested or crossed (same snag): a `pair` level
-#   inside a `section` level is centred on `beta[f(pair)] + b_section[section]`.
+#   inside a `section` level is centred on `beta[f(pair)] + b_section[section]`;
+# - for any cell, the within-level least-squares projection of the predictor's
+#   other summands on the level's random-effect design (snag
+#   adaptive-centrin-647119ba, decision 10krhre; `src/adaptive_centering_projection.jl`):
+#   categorical levels (the factor rule above is its constant case), numeric
+#   population columns, and `rw(...)` walk levels, a zero-start walk read through
+#   its own `:rw_walk` cells (`walks`), mapped first.
 #
 # Centring on less leaves the direction `(total + d, b .- d)` to the prior
 # alone: with strongly identified levels that ridge has width about
@@ -2716,58 +2722,99 @@ struct _AdaptiveRanefLocations <: AbstractVector{Int}
     # and its containing cells `(block, term, group)`, coarsest grouping first.
     factors::Union{Nothing,Matrix{Vector{Int}}}
     containers::Union{Nothing,Matrix{Vector{Tuple{Any,Int,Int}}}}
+    # Aligned with `factors`: each entry's weight, and the coordinate of a log
+    # scale it is multiplied by (`exp(x[scale])`, a sum-to-zero walk's SD), 0
+    # for none. A factor level constant within the level has weight 1.
+    factor_weights::Union{Nothing,Matrix{Vector{Float64}}}
+    factor_scales::Union{Nothing,Matrix{Vector{Int}}}
+    # The zero-start walk cells each level reads, `(walk block, step, weight)`,
+    # at their model values (the cells' effect `sigma * z`).
+    walks::Union{Nothing,Matrix{Vector{Tuple{Any,Int,Float64}}}}
 end
+_AdaptiveRanefLocations(coefficient, factors, containers) = _AdaptiveRanefLocations(
+    coefficient, factors, containers,
+    isnothing(factors) ? nothing : map(f -> ones(length(f)), factors),
+    isnothing(factors) ? nothing : map(f -> zeros(Int, length(f)), factors),
+    isnothing(factors) ? nothing : map(_ -> Tuple{Any,Int,Float64}[], factors))
 Base.size(locations::_AdaptiveRanefLocations) = size(locations.coefficient)
 Base.getindex(locations::_AdaptiveRanefLocations, k::Int) = locations.coefficient[k]
 
-function _adaptive_ranef_locations(model, blocks, unc_names)
+# `walks` are `_adaptive_walk_terms(model, unc_names)`: a walk's cells are only
+# read when the caller maps the same blocks (`_adaptive_walk_blocks(walks)`)
+# before these. The default reads none.
+function _adaptive_ranef_locations(model, blocks, unc_names;
+                                   walks=_AdaptiveWalkTerm[])
     out = IdDict{Any,_AdaptiveRanefLocations}()
     isempty(blocks) && return out
     d = model isa BRMDescriptor ? model : brm_descriptor(model)
     margins = _adaptive_block_margins(d)
     rows = _adaptive_group_rows(d.plan, blocks)
     nested = _adaptive_nested_bindings(d.plan, blocks, margins)
+    projector = _AdaptiveProjector(d.plan.parent, walks,
+        (predictor, label) -> _adaptive_population_coordinate(d, predictor, label,
+                                                              unc_names),
+        predictor -> _adaptive_categorical_columns(d, predictor, unc_names))
     for block in blocks
-        K = block.ranef.n_terms
-        G = block.ranef.n_groups
-        binding = block.ranef.binding
-        labels = get(margins, binding, ())
-        locs = zeros(Int, K)
-        factors = nothing
-        containers = nothing
-        if block.target_c == 0.0 && block.ranef.group isa Symbol && length(labels) == K
-            for k in 1:K
-                predictor, coefficient = labels[k].predictor, labels[k].coefficient
-                outer = _adaptive_containers(block, predictor, coefficient, blocks,
-                                             margins, rows)
-                if isnothing(outer) && (binding, predictor) in nested
-                    continue
-                end
-                locs[k] = _adaptive_population_coordinate(d, predictor, coefficient,
-                                                          unc_names)
-                isnothing(outer) && continue
-                levels = coefficient === :Intercept ?
-                    _adaptive_factor_levels(d, predictor, rows[binding], G, unc_names) :
-                    Tuple{Vector{Int},Vector{Int}}[]
-                isempty(outer) && isempty(levels) && continue
-                if isnothing(factors)
-                    factors = [Int[] for _ in 1:K, _ in 1:G]
-                    containers = [Tuple{Any,Int,Int}[] for _ in 1:K, _ in 1:G]
-                end
-                for g in 1:G
-                    for (coordinates, level) in levels
-                        j = coordinates[level[g]]
-                        j == 0 || push!(factors[k, g], j)
+        out[block] = _adaptive_block_locations(block, blocks, margins, rows, nested,
+            projector, (predictor, coefficient) ->
+                _adaptive_population_coordinate(d, predictor, coefficient, unc_names))
+    end
+    out
+end
+
+# One block's locations (both backends): per term, its matched coefficient
+# (`coefficient(predictor, label)`), its projected entries and its containing
+# cells; see the comment above `_AdaptiveRanefLocations`.
+function _adaptive_block_locations(block, blocks, margins, rows, nested, projector,
+                                   coefficient_of)
+    K = block.ranef.n_terms
+    G = block.ranef.n_groups
+    binding = block.ranef.binding
+    labels = get(margins, binding, ())
+    locs = zeros(Int, K)
+    factors = nothing
+    containers = nothing
+    weights = nothing
+    scales = nothing
+    walks = nothing
+    if block.target_c == 0.0 && block.ranef.group isa Symbol && length(labels) == K
+        for k in 1:K
+            predictor, coefficient = labels[k].predictor, labels[k].coefficient
+            outer = _adaptive_containers(block, predictor, coefficient, blocks,
+                                         margins, rows)
+            if isnothing(outer) && (binding, predictor) in nested
+                continue
+            end
+            locs[k] = coefficient_of(predictor, coefficient)
+            isnothing(outer) && continue
+            projected = _adaptive_projected_term(projector, predictor,
+                block.ranef.group, coefficient, rows[binding], G)
+            has_projected = !isnothing(projected) &&
+                (any(!isempty, projected[1]) || any(!isempty, projected[2]))
+            isempty(outer) && !has_projected && continue
+            if isnothing(factors)
+                factors = [Int[] for _ in 1:K, _ in 1:G]
+                containers = [Tuple{Any,Int,Int}[] for _ in 1:K, _ in 1:G]
+                weights = [Float64[] for _ in 1:K, _ in 1:G]
+                scales = [Int[] for _ in 1:K, _ in 1:G]
+                walks = [Tuple{Any,Int,Float64}[] for _ in 1:K, _ in 1:G]
+            end
+            for g in 1:G
+                if has_projected
+                    for (j, w, s) in projected[1][g]
+                        push!(factors[k, g], j)
+                        push!(weights[k, g], w)
+                        push!(scales[k, g], s)
                     end
-                    for (container, term, parent) in outer
-                        push!(containers[k, g], (container, term, parent[g]))
-                    end
+                    append!(walks[k, g], projected[2][g])
+                end
+                for (container, term, parent) in outer
+                    push!(containers[k, g], (container, term, parent[g]))
                 end
             end
         end
-        out[block] = _AdaptiveRanefLocations(locs, factors, containers)
     end
-    out
+    _AdaptiveRanefLocations(locs, factors, containers, weights, scales, walks)
 end
 
 # Margin labels by block binding, for the adaptive-centring readers. The sampled
@@ -2853,31 +2900,20 @@ function _adaptive_containers(block, predictor, coefficient, blocks, margins, ro
     sort!(out; by=container -> first(container).ranef.n_groups)
 end
 
-# Every categorical population term of `predictor` whose level is constant
-# within each level of a grouping with row codes `group_rows` (`G` levels): per
-# term, the coordinate of each level code (0 for a treatment-coded reference)
-# and each grouping level's code. The codes are the emitted ones, so code `c`
-# reads element `c` of a cell-mean carrier and element `c - 1` of a contrast
-# carrier, whatever `ref=` relevelled.
-function _adaptive_factor_levels(d, predictor, group_rows, G, unc_names)
-    out = Tuple{Vector{Int},Vector{Int}}[]
+# Every categorical population term of `predictor`, as the projected locations
+# read it (`_AdaptiveCategoricalColumns`): each row's emitted level code and the
+# coordinate of each code (0 for a treatment-coded reference). The codes are the
+# emitted ones, so code `c` reads element `c` of a cell-mean carrier and element
+# `c - 1` of a contrast carrier, whatever `ref=` relevelled. A level constant
+# within a grouping level enters that level's intercept cell with weight 1 (the
+# rule of decision 1wxltaq); any other enters by its within-level projection.
+function _adaptive_categorical_columns(d, predictor, unc_names)
+    out = _AdaptiveCategoricalColumns[]
     entries = _sb_cat_entries(d.plan.parent, predictor)
     isnothing(entries) && return out
     for e in entries
         codes = get(d.plan.data, Symbol(e.address, :_idx), nothing)
-        codes isa AbstractVector{<:Integer} && length(codes) == length(group_rows) ||
-            continue
-        level = zeros(Int, G)
-        constant = true
-        for (g, c) in zip(group_rows, codes)
-            if level[g] == 0
-                level[g] = c
-            elseif level[g] != c
-                constant = false
-                break
-            end
-        end
-        constant || continue
+        codes isa AbstractVector{<:Integer} || continue
         resolved = brm_population_effect_coordinates(d, predictor, unc_names;
                                                      coefficient=e.address)
         n = e.cellmeans ? e.n_levels : e.n_levels - 1
@@ -2885,8 +2921,9 @@ function _adaptive_factor_levels(d, predictor, group_rows, G, unc_names)
             "BRM adaptive centering: categorical term `$(e.address)` of " *
             "`$predictor` has $(e.n_levels) levels but resolves to " *
             "$(length(resolved.coordinates)) coordinates.")
-        push!(out, (e.cellmeans ? collect(Int, resolved.coordinates) :
-                    vcat(0, collect(Int, resolved.coordinates)), level))
+        push!(out, _AdaptiveCategoricalColumns(collect(Int, codes),
+            e.cellmeans ? collect(Int, resolved.coordinates) :
+                vcat(0, collect(Int, resolved.coordinates))))
     end
     out
 end
@@ -3019,9 +3056,10 @@ One row per adaptive cell of `adaptive`, the wrapper
 pair order (the order `centeredness` and checkpoints use). Every row has
 
 - `cell`, the pair number; `index` and `name`, its unconstrained coordinate;
-- `family`: `:ranef` (ordinary or R2D2 random-effect cell), `:hsgp` (basis
-  weight), `:scalar` (exact total or S2Z contrast), `:car` (areal field cell)
-  or `:cdar` (walk cell);
+- `family`: `:rw` (innovation of a zero-start `rw(...)` walk), `:ranef`
+  (ordinary or R2D2 random-effect cell), `:hsgp` (basis weight), `:scalar`
+  (exact total or S2Z contrast), `:car` (areal field cell) or `:cdar` (walk
+  cell);
 - `c`, the current source control, and `target`, the compiled frame's.
 
 Random-effect rows also carry `binding`, `group`, `margin` (its
@@ -3029,9 +3067,15 @@ Random-effect rows also carry `binding`, `group`, `margin` (its
 `level`, `term` (the margin's declared position in its block), `rank`, its
 position in the group's current triangular order (`term` itself under
 `ranef_order=:declared`, the learned position under `ranef_order=:learned`),
-and `location`, the unconstrained name of the population coefficient the cell
-is centred on (so its `c=1` coordinate is the level's total), or `nothing` for
-a cell centred on 0 (see [`adaptive_centering_problem`](@ref)).
+and `location`, what the cell is centred on (so its `c=1` coordinate is the
+level's total), or `nothing` for a cell centred on 0 (see
+[`adaptive_centering_problem`](@ref)): the unconstrained names of the
+coordinates and the names of the cells it reads, joined by ` + `, each with its
+weight when that is not 1 (`0.31*pop_mu_beta_pop.2`, to 6 significant digits)
+and with `exp(<SD name>)*` before a sum-to-zero walk's path value. `rw` rows
+carry the same fields (`binding` the walk's term, `group` its time column,
+`level` the step the innovation leads to, `margin = nothing`, `location =
+nothing`).
 HSGP and cdar rows carry `binding`, `margin = (; predictor, coefficient=term)`
 and `term` (the basis or walk cell); a grouped HSGP mapped across its levels
 also carries `group`, `level` (the level's label) and `rank` (its position in

@@ -262,6 +262,41 @@ function _joint_level_problem(; learned=false)
     _with_controls(build(blocks, [hsgp]; level_blocks=level)..., d)
 end
 
+# Located cells (snag adaptive-centrin-647119ba): the units of a correlated
+# `2 x 9` block read a matched coefficient, weighted factor coordinates (one of
+# them scaled by a log-scale coordinate, as a sum-to-zero walk's level), a
+# containing band cell and the cells of an `rw` walk, which come first. Its
+# accessors read the state's flat weight, scale and walk vectors inside the
+# differentiated row loop. `joint=true` puts the same cells in the joint
+# wrapper beside an HSGP, `learned=true` in the learned-order wrapper.
+function _located_problem(; joint=false, learned=false)
+    population = 5                       # coordinates 1:5, read by locations only
+    sigma, path = population + 1, collect(population + 1 .+ (1:4))
+    walk = BRM._adaptive_walk_block(:rw_t, :t, collect(1:5), path, sigma)
+    band, o = _synthetic_block(:r_band, 1, 3, last(path))
+    unit, o = _synthetic_block(:r_unit, 2, 9, o)
+    K, G = 2, 9
+    factors = [k == 1 ? [3, 4] : [3] for k in 1:K, g in 1:G]
+    weights = [k == 1 ? [1.0, 0.3 + 0.1g] : [-0.2] for k in 1:K, g in 1:G]
+    scales = [k == 1 ? [0, 5] : [0] for k in 1:K, g in 1:G]
+    containers = [k == 1 ? Tuple{Any,Int,Int}[(band, 1, mod1(g, 3))] :
+                  Tuple{Any,Int,Int}[] for k in 1:K, g in 1:G]
+    walks = [k == 1 ? Tuple{Any,Int,Float64}[(walk, t, 1.0) for t in 1:mod(g, 5)] :
+             Tuple{Any,Int,Float64}[(walk, 1, 0.5)] for k in 1:K, g in 1:G]
+    locations = IdDict{Any,BRM._AdaptiveRanefLocations}(unit =>
+        BRM._AdaptiveRanefLocations([1, 2], factors, containers, weights, scales, walks))
+    blocks = [walk, band, unit]
+    joint || learned || return _with_controls(
+        AC_EXT._adaptive_centering_reparametrizer(blocks, locations)..., o)
+    M = 12
+    hsgp = BRM._HSGPAdaptiveCenteringBlock(:hsgp, :gp_x, zeros(M), collect(o .+ (1:M)),
+        [o + M + 1], [0.0], [Inf], o + M + 2, 0.0, Inf,
+        reshape([(pi * j / 8)^2 for j in 1:M], M, 1), Float64[])
+    build = learned ? AC_EXT._adaptive_ordered_centering_reparametrizer :
+        AC_EXT._adaptive_joint_centering_reparametrizer
+    _with_controls(build(blocks, [hsgp]; locations)..., o + M + 2)
+end
+
 # Scalar total / S2Z cells: twelve cells sharing three log-scale coordinates.
 function _scalar_problem()
     n = 12
@@ -283,6 +318,9 @@ const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
                 "joint_cdar" => _joint_cdar_problem,
                 "learned_order_cdar" => () -> _joint_cdar_problem(; learned=true),
                 "joint_hsgp_levels" => _joint_level_problem,
-                "learned_order_hsgp_levels" => () -> _joint_level_problem(; learned=true))
+                "learned_order_hsgp_levels" => () -> _joint_level_problem(; learned=true),
+                "located" => _located_problem,
+                "joint_located" => () -> _located_problem(; joint=true),
+                "learned_order_located" => () -> _located_problem(; learned=true))
 
 run_threaded_gradient_gate(@__FILE__, _CASES, _GRADIENTS_PER_WORKER)

@@ -412,54 +412,24 @@ function _rk_adaptive_population(rk::RKBRMI, pos)
     out
 end
 
-# The categorical population terms of `predictor` whose level is constant
-# within each level of a grouping with row codes `group_rows` (`G` levels), as
-# SBBRMI's `_adaptive_factor_levels` reads them: per term, the layout position
-# of each grouping level's coefficient, 0 for a level without one (a
-# treatment-coded reference). Read from RK's `:population_block` records, whose
-# coefficient `<declaration>.<i>` belongs to level `level_values[i]` of the
-# term's column; a coefficient the layout does not sample unbounded is skipped.
-function _rk_adaptive_factor_levels(rk::RKBRMI, predictor, group_rows, G, pos,
-                                    transforms)
-    out = Vector{Int}[]
-    for r in _rk_coordinate_records(rk)
-        r.kind === :population_block && r.predictor === predictor || continue
-        level = _rk_adaptive_factor_level(rk, r, group_rows, G, pos, transforms)
-        isnothing(level) || push!(out, level)
-    end
-    out
-end
-
-# One `:population_block` record's coefficient position per grouping level, or
-# `nothing` when its column does not align with the grouping's rows, a level
-# holds rows of two of its levels, or a coefficient is not sampled unbounded.
-function _rk_adaptive_factor_level(rk::RKBRMI, r, group_rows, G, pos, transforms)
-    column = get(rk.plan.columns, get(r, :column, nothing), nothing)
-    column isa AbstractVector && length(column) == length(group_rows) || return nothing
-    coefficient = Dict{Any,Int}()
-    for (i, level) in enumerate(r.level_values)
-        j = get(pos, string(r.declaration, ".", i), 0)
-        j != 0 && transforms[j] === :identity || return nothing
-        coefficient[_brm_transport_level(level)] = j
-    end
-    level = fill(-1, G)
-    for (g, v) in zip(group_rows, column)
-        j = get(coefficient, _brm_transport_level(v), 0)
-        level[g] == -1 && (level[g] = j)
-        level[g] == j || return nothing
-    end
-    any(==(-1), level) ? nothing : level
-end
-
 # Hierarchical locations of an RKBRMI's blocks: the rule of the SBBRMI method
 # (`_adaptive_ranef_locations(model, blocks, unc_names)`), read from RK records.
 # A cell of term `k` is centred on its predictor's sampled, unbounded population
-# coefficient for that term, plus, for an intercept cell, the coefficient of
-# each categorical population term's level holding its level, plus the effect,
-# for the same term, of every coarser scalar grouping of the same predictor
-# holding its level; a grouping nested in a coarser one that cannot be read as a
-# container stays centred on 0.
-function _adaptive_ranef_locations(rk::RKBRMI, blocks, unc_names)
+# coefficient for that term, plus the projection of the predictor's other
+# summands on its level's design (categorical levels, numeric population
+# columns, `rw` walk levels), plus the effect, for the same term, of every
+# coarser scalar grouping of the same predictor holding its level; a grouping
+# nested in a coarser one that cannot be read as a container stays centred on 0.
+#
+# The projection of the predictor's other summands on each level's design
+# (`src/adaptive_centering_projection.jl`, snag adaptive-centrin-647119ba) reads
+# the same shared geometry as on SBBRMI, from `rk.parent`; RK supplies the
+# coordinates: population coefficients from `:population` records, categorical
+# levels from `:population_block` records, walk cells from `:rw` records
+# (`_rk_adaptive_walk_terms`). As on SBBRMI, a multi-membership block (its group
+# a tuple of member columns) stays centred on 0: its rows average several levels.
+function _adaptive_ranef_locations(rk::RKBRMI, blocks, unc_names;
+                                   walks=_AdaptiveWalkTerm[])
     out = IdDict{Any,_AdaptiveRanefLocations}()
     isempty(blocks) && return out
     names = String.(unc_names)
@@ -469,43 +439,91 @@ function _adaptive_ranef_locations(rk::RKBRMI, blocks, unc_names)
     margins = _rk_adaptive_margins(rk)
     rows = _rk_adaptive_group_rows(rk, blocks)
     nested = _rk_adaptive_nested_bindings(rows, margins)
+    coefficient(predictor, label) = get(population, (predictor, label), 0)
+    projector = _AdaptiveProjector(rk.parent, walks, coefficient,
+        predictor -> _rk_adaptive_categorical_columns(rk, predictor, pos, transforms))
     for block in blocks
-        K = block.ranef.n_terms
-        G = block.ranef.n_groups
-        binding = block.ranef.binding
-        labels = get(margins, binding, ())
-        locs = zeros(Int, K)
-        factors = nothing
-        containers = nothing
-        # As on SBBRMI, a multi-membership block (its group a tuple of member
-        # columns) stays centred on 0: its rows average several levels.
-        if block.ranef.group isa Symbol && length(labels) == K
-            for k in 1:K
-                predictor, coefficient = labels[k].predictor, labels[k].coefficient
-                outer = _adaptive_containers(block, predictor, coefficient, blocks,
-                                             margins, rows)
-                isnothing(outer) && (binding, predictor) in nested && continue
-                locs[k] = get(population, (predictor, coefficient), 0)
-                isnothing(outer) && continue
-                levels = coefficient === :Intercept ?
-                    _rk_adaptive_factor_levels(rk, predictor, rows[binding], G, pos,
-                                               transforms) : Vector{Int}[]
-                isempty(outer) && isempty(levels) && continue
-                if isnothing(containers)
-                    factors = [Int[] for _ in 1:K, _ in 1:G]
-                    containers = [Tuple{Any,Int,Int}[] for _ in 1:K, _ in 1:G]
-                end
-                for g in 1:G
-                    for level in levels
-                        level[g] == 0 || push!(factors[k, g], level[g])
-                    end
-                    for (container, term, parent) in outer
-                        push!(containers[k, g], (container, term, parent[g]))
-                    end
-                end
-            end
+        out[block] = _adaptive_block_locations(block, blocks, margins, rows, nested,
+                                               projector, coefficient)
+    end
+    out
+end
+
+# Every categorical population term of `predictor` as the projected locations
+# read it (`_adaptive_categorical_columns` on SBBRMI): each row's level code
+# into the `:population_block` record's `level_values`, and each level's
+# coefficient position (0 for a level without one, a treatment-coded reference,
+# or one the layout does not sample unbounded).
+function _rk_adaptive_categorical_columns(rk::RKBRMI, predictor, pos, transforms)
+    out = _AdaptiveCategoricalColumns[]
+    for r in _rk_coordinate_records(rk)
+        r.kind === :population_block && r.predictor === predictor || continue
+        column = get(rk.plan.columns, get(r, :column, nothing), nothing)
+        column isa AbstractVector || continue
+        lookup = Dict{Any,Int}()
+        coordinates = Int[]
+        for (i, level) in enumerate(r.level_values)
+            j = get(pos, string(r.declaration, ".", i), 0)
+            push!(coordinates, j != 0 && transforms[j] === :identity ? j : 0)
+            lookup[_brm_transport_level(level)] = i
         end
-        out[block] = _AdaptiveRanefLocations(locs, factors, containers)
+        codes = Int[get(lookup, _brm_transport_level(v), 0) for v in column]
+        push!(out, _AdaptiveCategoricalColumns(codes, coordinates))
+    end
+    out
+end
+
+"""
+    _rk_adaptive_walk_terms(rk::RKBRMI, unc_names) -> Vector{_AdaptiveWalkTerm}
+
+The `rw(...)` walks of an RKBRMI that adaptive centring reads, as
+[`_adaptive_walk_terms`](@ref) reads an SBBRMI's: a zero-start walk of order 1
+or 2 (its standardized innovations `<declaration>.z.<t>` become `:rw_walk`
+cells) and a sum-to-zero walk of order 1 (its standardized path
+`<declaration>.phi.<t>`, read in locations only). The walk's SD must be sampled
+as the log of a positive value (`:exp`, or `:floored` at 0). A sum-to-zero walk of order 2 samples
+its level, slope and roughness in a basis, not a path, and is not read.
+"""
+function _rk_adaptive_walk_terms(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
+    names = String.(unc_names)
+    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
+    transforms = _rk_layout_coordinate_transforms(rk)
+    bounds = _rk_adaptive_scale_bounds(rk, transforms)
+    out = _AdaptiveWalkTerm[]
+    context = nothing
+    for r in _rk_coordinate_records(rk)
+        r.kind === :rw || continue
+        r.sum_to_zero && r.order == 2 && continue
+        # `log sigma`: sampled as `exp`, or `floored` at 0 (`0 + exp(x)`).
+        sigma = get(pos, string(r.declaration, ".", r.locals.sigma), 0)
+        sigma != 0 && transforms[sigma] in (:exp, :floored) &&
+            bounds[sigma] == (0.0, Inf) || continue
+        local_path = r.sum_to_zero ? r.locals.phi : r.locals.z
+        n_path = r.sum_to_zero ? length(r.steps) : length(r.steps) - 1
+        path = [get(pos, string(r.declaration, ".", local_path, ".", t), 0)
+                for t in 1:n_path]
+        all(iszero, path) && continue
+        any(iszero, path) && error(
+            "BRM adaptive centering on RKBRMI: walk `$(r.declaration)` lacks path ",
+            "coordinates in the RK layout.")
+        isnothing(context) && (context = _brm_backend_context(rk.parent))
+        prepared = nothing
+        for entry in _brm_term_coordinate_entries(rk.parent, r.predictor)
+            getf(entry.value) === rw || continue
+            candidate = _brm_prepare_term(entry.value, r.predictor, context)
+            candidate.source === r.time && (prepared = candidate; break)
+        end
+        isnothing(prepared) && error(
+            "BRM adaptive centering on RKBRMI: internal: no `rw` term of ",
+            "`$(r.predictor)` reads `$(r.time)`.")
+        st = prepared.state
+        st.n_steps == length(r.steps) || error(
+            "BRM adaptive centering on RKBRMI: walk `$(r.declaration)` has ",
+            "$(length(r.steps)) steps, its prepared term $(st.n_steps).")
+        block = r.sum_to_zero || n_path == 0 ? nothing :
+            _adaptive_walk_block(r.declaration, r.time, st.steps, path, sigma)
+        push!(out, _AdaptiveWalkTerm(r.predictor, r.declaration, r.order, r.sum_to_zero,
+            sigma, path, collect(Int, st.time_idx), block))
     end
     out
 end

@@ -57,6 +57,20 @@ function per_level_frame(state, position, gradient)
             s = C[j, j]
             beta = state.pair_location[p]
             loc = beta == 0 ? m : m + position[beta]
+            # The projection of the predictor's other columns on the level's
+            # design (snag adaptive-centrin-647119ba), summed first as the
+            # extension does; these models have no walk or containing cells.
+            @test state.pair_walk_start[p] == state.pair_walk_start[p + 1]
+            @test state.pair_container_start[p] == state.pair_container_start[p + 1]
+            if state.pair_factor_start[p] < state.pair_factor_start[p + 1]
+                acc = zero(T)
+                for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
+                    jf, w = state.pair_factors[f], state.pair_factor_weights[f]
+                    kf = state.pair_factor_scales[f]
+                    acc += kf == 0 ? w * position[jf] : (w * exp(position[kf])) * position[jf]
+                end
+                loc += acc
+            end
             z[j] = (position[block.effects[j, g]] - c * loc) / s^c
             A[j, j] = s^c
             location[p] = loc

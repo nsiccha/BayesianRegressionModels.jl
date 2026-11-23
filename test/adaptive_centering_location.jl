@@ -63,10 +63,11 @@ const UNC_MAIN = BS.param_unc_names(P_MAIN.model)
 coordinate(name) = only(findall(==(name), UNC_MAIN))
 intercept_name(unc) = only(n for n in unc if startswith(n, "pop_mu_beta_pop.") && endswith(n, ".1"))
 
-function cell_locations(adaptive, model)
+function cell_locations(adaptive, model; groups = nothing)
     out = Dict{Any,Any}()
     for r in adaptive_centering_controls(adaptive, model)
         r.family === :ranef || continue
+        isnothing(groups) || r.group in groups || continue
         key = (r.group, r.margin.coefficient)
         haskey(out, key) && @test out[key] == r.location   # one location per (group, term)
         out[key] = r.location
@@ -99,13 +100,26 @@ end
 
 @testset "each cell is centred on its matching population coefficient" begin
     rp = adaptive_centering_problem(M_MAIN, P_MAIN, AutoEnzyme())
-    locs = cell_locations(rp, M_MAIN)
+    locs = cell_locations(rp, M_MAIN; groups = (:g,))
     beta = BRM.brm_population_effect_coordinates(brm_descriptor(M_MAIN), :mu, UNC_MAIN;
                                                  coefficient = :x)
+    xname = UNC_MAIN[only(beta.coordinates)]
     @test locs[(:g, :Intercept)] == intercept_name(UNC_MAIN)
-    @test locs[(:g, :x)] == UNC_MAIN[only(beta.coordinates)]
-    @test locs[(:h, :Intercept)] == intercept_name(UNC_MAIN)
-    @test locs[(:h, :t)] === nothing                     # no population `t`
+    @test locs[(:g, :x)] == xname
+    # `x` varies within each `h` level, whose own design is `(1, t)`: an `h`
+    # cell also reads `x`'s within-level least-squares fit on that design
+    # (snag adaptive-centrin-647119ba); `t` has no population coefficient.
+    label(w, name) = w == 1 ? name : string(round(w; sigdigits = 6), "*", name)
+    for r in adaptive_centering_controls(rp, M_MAIN)
+        r.family === :ranef && r.group === :h || continue
+        I = findall(==(string(r.level)), data.h)
+        w = hcat(ones(length(I)), data.t[I]) \ data.x[I]
+        if r.margin.coefficient === :Intercept
+            @test r.location == intercept_name(UNC_MAIN) * " + " * label(w[1], xname)
+        else
+            @test r.location == label(w[2], xname)
+        end
+    end
 end
 
 @testset "nested cells take their enclosing total; centred-compiled and S2Z-absorbed cells 0" begin
@@ -131,9 +145,21 @@ end
     centred = SBBRMI(M_MAIN.parent; mod = @__MODULE__, total_groups = (),
                      centered_groups = [:g])
     pc = instantiate(centred)
-    locs = cell_locations(adaptive_centering_problem(centred, pc, AutoEnzyme()), centred)
+    rp_c = adaptive_centering_problem(centred, pc, AutoEnzyme())
+    locs = cell_locations(rp_c, centred; groups = (:g,))
     @test locs[(:g, :Intercept)] === nothing && locs[(:g, :x)] === nothing
-    @test locs[(:h, :Intercept)] == intercept_name(BS.param_unc_names(pc.model))
+    # `h` (crossed with `g`, design `(1, t)`) reads `x`'s within-level fit
+    # (snag adaptive-centrin-647119ba)
+    unc_c = BS.param_unc_names(pc.model)
+    xname_c = unc_c[only(BRM.brm_population_effect_coordinates(brm_descriptor(centred), :mu,
+                                                              unc_c; coefficient = :x).coordinates)]
+    label_c(w, name) = w == 1 ? name : string(round(w; sigdigits = 6), "*", name)
+    for r in adaptive_centering_controls(rp_c, centred)
+        r.family === :ranef && r.group === :h && r.margin.coefficient === :Intercept || continue
+        I = findall(==(string(r.level)), data.h)
+        w = hcat(ones(length(I)), data.t[I]) \ data.x[I]
+        @test r.location == intercept_name(unc_c) * " + " * label_c(w[1], xname_c)
+    end
 
     s2z = SBBRMI(merge(@brm(begin
         mu ~ 1 + (1 | band) + (1 | h)
@@ -160,7 +186,17 @@ end
         values = BS.param_constrain(P_MAIN.model, model)
         names = BS.param_names(P_MAIN.model)
         value(name) = values[only(findall(==(name), names))]
-        beta_of(r) = r.location === nothing ? 0.0 : q[coordinate(r.location)]
+        # `g` cells read their matched coefficient; an `h` cell also `x`'s
+        # within-level fit on `(1, t)` (snag adaptive-centrin-647119ba).
+        xi = only(BRM.brm_population_effect_coordinates(brm_descriptor(M_MAIN), :mu,
+                                                       UNC_MAIN; coefficient = :x).coordinates)
+        function beta_of(r)
+            r.group === :h || return r.location === nothing ? 0.0 : q[coordinate(r.location)]
+            I = findall(==(string(r.level)), data.h)
+            w = hcat(ones(length(I)), data.t[I]) \ data.x[I]
+            r.margin.coefficient === :Intercept ?
+                q[coordinate(intercept_name(UNC_MAIN))] + w[1] * q[xi] : w[2] * q[xi]
+        end
         for block in blocks
             K = block.ranef.n_terms
             binding = block.ranef.binding
@@ -187,6 +223,26 @@ end
     @test first(WarmupHMC.reparametrizer(rp).pairs).second.args[1] isa
           ext.BRMAdaptiveCenteringArgument{:location,1}
     check_gradients(M_MAIN, P_MAIN)
+    # `h`'s cells read `x`'s within-level fit, a weighted read-only coordinate
+    # (snag adaptive-centrin-647119ba). Such a plan reads no other cell, so it
+    # stays in the hand-written pass, which equals WarmupHMC's generic pass.
+    enzyme_ext = Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCEnzymeExt)
+    state = first(WarmupHMC.reparametrizer(rp).pairs).second.args[1].state
+    @test state.extended && !isempty(state.pair_factors)
+    @test !enzyme_ext._small_plan_reads_cells(state)
+    @test which(LogDensityProblems.logdensity_and_gradient,
+                (typeof(rp), Vector{Float64})).module === enzyme_ext
+    n = length(WarmupHMC.reparametrizer(rp).pairs)
+    for seed in 1:3
+        wrapped = adaptive_centering_problem(M_MAIN, P_MAIN, AutoEnzyme();
+                                             centeredness = rand(Xoshiro(seed), n))
+        q = 0.3 .* randn(Xoshiro(10 + seed), LogDensityProblems.dimension(wrapped))
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, q)
+        lp_generic, gradient_generic = invoke(LogDensityProblems.logdensity_and_gradient,
+            Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, wrapped, q)
+        @test lp == lp_generic
+        @test gradient ≈ gradient_generic rtol = 1e-11 atol = 1e-11
+    end
 end
 
 const M_WIDE = SBBRMI(merge(@brm(begin
