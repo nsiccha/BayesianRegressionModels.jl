@@ -661,6 +661,58 @@ end
     @test only(grad_a .- grad_b) ≈ julia_gradient atol=2e-6
 end
 
+@testset "NegativeBinomial2 scores a declared log mean on the predictor scale" begin
+    linked = @brm begin
+        log(mu) ~ 1 + offset(x)
+        y ~ NegativeBinomial2(mu, phi)
+    end
+    data = (; y=[0, 3], x=[-0.5, 0.75], phi=[1.5, 3.0])
+    descriptor = brm_descriptor(linked, data; mod=@__MODULE__)
+    code = brm_execute(descriptor, :transpile)
+    target, generated = split(code, "generated quantities {")
+    @test occursin("y ~ neg_binomial_2_log(log_mu, phi);", target)
+    @test !occursin("exp(log_mu)", target)
+    @test occursin("mu = exp(log_mu);", generated)
+    @test occursin("neg_binomial_2_log_lpmfs(y, log_mu, phi)", generated)
+    @test brm_output(descriptor, :mu; role=:linear_predictor).name === :mu
+
+    mkpath(FAMILY_SURFACE_CACHE)
+    path = joinpath(FAMILY_SURFACE_CACHE, string(descriptor.id) * ".stan")
+    problem = brm_execute(descriptor, :instantiate; path)
+    @test LogDensityProblems.dimension(problem) == 1
+    for intercept in (-1000.0, 1000.0)
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, [intercept])
+        @test isfinite(lp)
+        @test all(isfinite, gradient)
+    end
+    q = [0.2]
+    pointwise = brm_execute(descriptor, :pointwise_loglik; problem, draws=q, seed=21)
+    means = exp.(only(q) .+ data.x)
+    @test pointwise.y_likelihood ≈ logpdf.(NegativeBinomial2.(means, data.phi), data.y)
+    predictive = brm_execute(descriptor, :predict; problem, draws=q, seed=21)
+    @test length(predictive.y_gen) == length(data.y)
+    @test all(k -> isinteger(k) && k >= 0, predictive.y_gen)
+
+    shared = @brm begin
+        log(mu) ~ 1 + offset(x)
+        y ~ NegativeBinomial2(mu, phi)
+        z ~ Normal(mu, 1)
+        raw ~ NegativeBinomial2(other_mean, phi)
+        bounded ~ truncated(NegativeBinomial2(mu, phi); upper=5)
+        repetitions ~ weighted(NegativeBinomial2(mu, phi), fweights(freq))
+    end
+    mixed = merge(data, (; z=[1.0, 2.0], raw=[1, 2], other_mean=[2.0, 3.0],
+                          bounded=[0, 4], repetitions=[1, 2], freq=[1, 3]))
+    shared_code = stan_code(SBBRMI(shared(mixed); mod=@__MODULE__))
+    shared_target = first(split(shared_code, "generated quantities {"))
+    @test occursin("mu = exp(log_mu);", shared_target)
+    @test occursin("z ~ normal(mu, 1);", shared_target)
+    @test occursin("y ~ neg_binomial_2_log(log_mu, phi);", shared_target)
+    @test occursin("raw ~ neg_binomial_2(other_mean, phi);", shared_target)
+    @test occursin("weighted_neg_binomial_2_log_lpmf", shared_code)
+    @test StanBlocks.stanc_check(shared_code; warn_pedantic=false).ok
+end
+
 @testset "SBBRMI lowers density, pointwise log-lik and RNG paths" begin
     plan = generative_plan(family_builder, df; mod=@__MODULE__)
     # StanBlocks 0eaebfa renamed the public HOF tokens without aliases. This
@@ -677,7 +729,7 @@ end
     @test occursin("gamma_prior = gamma_rng(3.0, (1.0 ./ 2.5));", code)
     @test occursin("zero_inflated_poisson(", code)
     @test occursin("hurdle_poisson(", code)
-    @test occursin("neg_binomial_2(", code)
+    @test occursin("y_nb ~ neg_binomial_2_log(log_mu, phi);", code)
     @test occursin("ordered_logistic(", code)
     @test occursin("student_t(", code)
     @test occursin("beta_binomial(", code)
@@ -726,7 +778,7 @@ end
                     if d.role === :observation)
     @test families[:y_zip] === :zero_inflated_poisson
     @test families[:y_hurdle] === :hurdle_poisson
-    @test families[:y_nb] === :neg_binomial_2
+    @test families[:y_nb] === :neg_binomial_2_log
     @test families[:y_ord] === :ordered_logistic
     @test families[:y_t] === :student_t
     @test families[:y_bb_shapes] === :beta_binomial

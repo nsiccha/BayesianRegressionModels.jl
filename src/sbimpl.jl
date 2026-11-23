@@ -9011,6 +9011,14 @@ function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_s
     found
 end
 
+function _sb_declares_link(arg, link)
+    decl = _named_op(arg)
+    isnothing(decl) && return false
+    getf(decl) === (~) || return false
+    lhs, _ = getargs(decl, 2)
+    lhs isa ExprColumn && _peel_lp_lhs(lhs) === (link, name(arg))
+end
+
 # A `kernel(...)` positional (or `ragged(...)` first arg) guessing the LINK
 # spelling of a linked linear predictor — `log(Vc)` after `log(Vc) ~ ...`.
 # The classifier below only accepts bare `NamedColumn`s, so that guess fails
@@ -9027,11 +9035,7 @@ function _sb_kernel_link_match(c)
     args = getargs(c)
     length(args) == 1 || return nothing
     inner = only(args)
-    inner isa NamedColumn || return nothing
-    decl = parent(inner)
-    decl isa ExprColumn && getf(decl) === (~) || return nothing
-    lhs = getargs(decl)[1]
-    lhs isa ExprColumn && getf(lhs) === f || return nothing
+    _sb_declares_link(inner, f) || return nothing
     (name(inner), f)
 end
 
@@ -10671,10 +10675,6 @@ _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
 # Mapping the emitted name back to the public one is not derivable by string
 # surgery (`pop_log_Vc` is equally `pop_` + an inert LP literally named
 # `log_Vc`), so it is derived FORWARDS from the formula through this function.
-# LOCKSTEP: `_sb_sampling_through_link!` below is the only emitter of the
-# linked form, and `brm_descriptor`'s `pop_lp` map (`descriptor.jl`) is its
-# only other caller — keep the three in step.
-#
 # `identity` is `linear_predictors`' marker for an UNWRAPPED LHS (`loc ~ 1 + x`),
 # which emits under its own name. A literal `identity(loc) ~ 1 + x` reaches the
 # link path instead and takes the same branch — harmless, because Stan has no
@@ -17830,12 +17830,21 @@ function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index
     NamedColumn(entry, MissingColumn())
 end
 
-function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
+function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data; needs_cdf=false)
     f = getf(rhs)
     args = Tuple(map(enumerate(getargs(rhs))) do (index, argument)
         _sb_grouped_argument!(stmts, data, target, argument, index)
     end)
-    _sb_lik_family!(stmts, target, f, args, getkwargs(rhs), data)
+    kwargs = getkwargs(rhs)
+    if !needs_cdf && f isa Type{<:NegativeBinomial2} && isempty(kwargs) &&
+            length(args) == 2 && _sb_declares_link(first(args), log)
+        # The bare mean remains available wherever another expression reads it.
+        mu, phi = args
+        eta = _sb_lp_emitted_name(name(mu), log)
+        return _sb_lik_stan_exprs!(stmts, target, :neg_binomial_2_log,
+                                   (eta, _sb_scalar_expr(phi, data)))
+    end
+    _sb_lik_family!(stmts, target, f, args, kwargs, data)
 end
 
 _sb_weight_data_key(target::Symbol) = Symbol(:brm_weight_, target)
@@ -17873,12 +17882,12 @@ end
 
 function _sb_objective_weighted_likelihood!(stmts, target::Symbol,
                                             distribution::ExprColumn,
-                                            weight_key::Symbol, data)
+                                            weight_key::Symbol, data; needs_cdf=false)
     # Translate the ordinary distribution exactly once, then wrap that call.
     # Parameterization/composition adapters and custom likelihood hooks thereby
     # work under weights without another constructor catalogue.
     translated = Any[]
-    _sb_likelihood!(translated, target, distribution, data)
+    _sb_likelihood!(translated, target, distribution, data; needs_cdf)
     sites = findall(stmt -> Meta.isexpr(stmt, :call) &&
                     length(stmt.args) == 3 && stmt.args[1] === :~ &&
                     stmt.args[2] === target, translated)
@@ -17901,7 +17910,7 @@ end
 # An omitted response (no `target` data) emits the same statement: StanBlocks
 # then forward-simulates it from the law the fitted predictive draw uses.
 function _sb_likelihood!(stmts, target::Symbol,
-                         rhs::ExprColumn{typeof(weighted)}, data)
+                         rhs::ExprColumn{typeof(weighted)}, data; needs_cdf=false)
     response = get(data, target, nothing)
     isnothing(response) || response isa AbstractVector || error(
         "sbimpl: weighted response `$target` must be an observed vector, got " *
@@ -17915,7 +17924,7 @@ function _sb_likelihood!(stmts, target::Symbol,
             stmts, target, plan.distribution, weight_key, data)
     else
         _sb_objective_weighted_likelihood!(
-            stmts, target, plan.distribution, weight_key, data)
+            stmts, target, plan.distribution, weight_key, data; needs_cdf)
     end
 end
 _sb_likelihood!(stmts, target, rhs, _) =
@@ -18233,10 +18242,6 @@ _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
 _sb_lik_family!(stmts, target, ::Type{<:HurdlePoisson},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :hurdle_poisson, args, data)
-
-_sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
-                args::Tuple{Any,Any}, data) =
-    _sb_lik_stan!(stmts, target, :neg_binomial_2, args, data)
 
 function _sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},
                          args::Tuple{Any,Any}, data)
@@ -18754,7 +18759,9 @@ end
 # asking it to group literal `nothing` has no Stan type and cannot transpile.
 function _sb_composed_stan_call!(stmts, target, base, data)
     translated = Any[]
-    _sb_likelihood!(translated, target, base.distribution, data)
+    # Bounds and mixture components also use the base CDF/CCDF, which Stan
+    # provides for neg_binomial_2 only on the mean scale.
+    _sb_likelihood!(translated, target, base.distribution, data; needs_cdf=true)
     sites = findall(stmt -> Meta.isexpr(stmt, :call) &&
         length(stmt.args) == 3 && stmt.args[1] === :~ && stmt.args[2] === target,
         translated)

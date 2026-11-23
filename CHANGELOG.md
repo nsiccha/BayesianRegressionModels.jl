@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.389
+
+- On Stan, `y ~ NegativeBinomial2(mu, phi)` uses the log mean directly
+  when the model declares `log(mu) ~ ...`. Sampling and pointwise
+  log probabilities can then handle predictors whose exponential overflows
+  or rounds to zero. Other expressions that read `mu` receive the mean
+  on its original scale. Requesting all generated quantities at an extreme
+  predictor can still fail when Stan cannot draw a predictive count.
+
 ## 0.2.388
 
 - A function component recognizes every indexed output of its selected
