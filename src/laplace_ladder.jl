@@ -187,7 +187,8 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         φ2 = mode.draws[p.population, 1]
         push!(rungs, (; rung=2, name=:marginal_mode, point=φ2, draws=mode.draws))
         push!(ladder, (; rung=2, name=:marginal_mode, mode.diagnostics.converged,
-            mode.diagnostics.gradient_norm, mode.diagnostics.iterations, replanned,
+            mode.diagnostics.stop, mode.diagnostics.gradient_norm,
+            mode.diagnostics.iterations, replanned,
             switched))
     end
     if upto >= 3 && !done(3)
