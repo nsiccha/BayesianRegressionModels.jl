@@ -7,6 +7,7 @@ _brm_group_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
 # or live on entirely different axes, and are not a formula's row columns.
 _brm_kernel_value_input(_value) = false
 _brm_kernel_value_input(value::NamedColumn) = _brm_kernel_value_input(parent(value))
+_brm_kernel_value_input(::_BRMComponentInput) = true
 _brm_kernel_value_input(::ExprColumn{typeof(assign)}) = true
 function _brm_kernel_value_input(value::ExprColumn{typeof(~)})
     rhs = last(getargs(value))
@@ -537,6 +538,9 @@ function _brm_plate_cell_refs(select, x::Expr, outputs, bound=())
             specs...)
     elseif Meta.isexpr(x, :quote)
         return x
+    elseif Meta.isexpr(x, :brm_component_cells, 1)
+        name = only(x.args)
+        return name isa Symbol && name in outputs && !(name in bound) ? select(name) : recur(name)
     elseif Meta.isexpr(x, :ref, 2) && x.args[1] isa Symbol &&
             x.args[1] in outputs && !(x.args[1] in bound)
         return select(x.args[1], recur(x.args[2]))

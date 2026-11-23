@@ -297,6 +297,18 @@ function _brm_collection_paths(brmi)
     Dict(axis.path => axis for axis in _brm_collection_axes(brmi) if !isempty(axis.path))
 end
 
+function _brm_collection_member(model, submodel, caller)
+    if submodel isa Tuple{Symbol,Union{Int,Symbol}}
+        collection, key = submodel
+        for axis in _brm_collection_axes(model)
+            axis.collection === collection || continue
+            index = findfirst(isequal(key), axis.keys)
+            isnothing(index) || return axis, index
+        end
+    end
+    throw(ArgumentError("$caller: unknown record member `$submodel`; use (collection, key)"))
+end
+
 function _brm_collection_public_records(brmi, records)
     axes = _brm_collection_paths(brmi)
     isempty(axes) && return map(_brm_public_component_record, records)

@@ -1,9 +1,11 @@
-# A formula inside a repeated component is prepared on each record's actual
-# inputs. Its native submodel body is shared by the plate. Prepared arrays
-# (such as HSGP basis matrices) have one entry per record.
+# Formulas and nested plates need each record's actual design, including
+# the subject counts and observed rows. The native submodel body is shared.
 function _brm_collection_cell_calls(component, call, scope, columns, count)
     symbolic = _brm_component_cell_ir(component, call, scope)
-    isempty(linear_predictors(_brm_component_instance(component, symbolic))) && return nothing
+    if !any(_is_brm_plate, _brm_component_parts(component.source).body) &&
+            isempty(linear_predictors(_brm_component_instance(component, symbolic)))
+        return nothing
+    end
     arguments = _brm_component_arguments(component, symbolic)
     map(1:count) do i
         values = map(arguments) do arg

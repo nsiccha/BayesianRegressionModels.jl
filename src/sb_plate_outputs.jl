@@ -33,6 +33,7 @@ StanBlocks.@deffun begin
     # Several selected vector cells remain a collection at helper boundaries.
     @inline brm_plate_cell(x::matrix[k, n], idx::int[m]) = EachCol(x[:, idx])
     @inline brm_plate_cell(x::RaggedVector, i) = x[i]
+    @inline brm_plate_cell(x::NestedRaggedVector, i) = x[i]
 
     # Preserve the member axis when concatenating declaration variants.
     # A fixed-width collection stores columns, a ragged one stores flat
@@ -69,6 +70,12 @@ StanBlocks.@deffun begin
     @inline brm_concat_members(a::RaggedVector, b::RaggedVector) =
         RaggedVector(append_row(a.mem, b.mem),
             append_array(a.ends, brm_shifted_ends(b.ends, brm_ends_total(a.ends))))
+    # A member returning a subject plate has two sets of cumulative ends.
+    # Shift reading ends by the left reading count and group ends by its subject count.
+    @inline brm_concat_members(a::NestedRaggedVector, b::NestedRaggedVector) =
+        NestedRaggedVector(append_row(a.mem, b.mem),
+            append_array(a.ends, brm_shifted_ends(b.ends, brm_ends_total(a.ends))),
+            append_array(a.groups, brm_shifted_ends(b.groups, size(a.ends))))
     @inline brm_concat_members(a::matrix[k,n], b::matrix[j,m]) =
         brm_concat_members(brm_member_vectors(a), brm_member_vectors(b))
     @inline brm_concat_members(a::matrix[k,n], b::RaggedVector) =

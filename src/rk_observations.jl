@@ -63,9 +63,9 @@ Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI
     # The emitted declaration inventory also finds synthetic observations
     # (for example a modeled baseline). Endpoint absence alone must never
     # discard their densities or their inference coordinates.
-    generated = generative_plan(SBBRMI(brmi; _rk_cell_module(brmi)...))
-    any(d -> d.role === :observation && d.data_source !== nothing,
-        generated.declarations) && return nothing
+    sb = SBBRMI(brmi; _rk_cell_module(brmi)...)
+    _sb_observation_triage(sb).bound > 0 && return nothing
+    generated = generative_plan(sb)
     _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data))
 end
 function Base.getproperty(plan::_RKHeldOutPlan, field::Symbol)
@@ -404,6 +404,8 @@ _rk_structural_responses(plan::_RKStructuralPlan) = Tuple(unique(
 _rk_observed_names(plan::_RKValuePlan) = (Tuple(o.name for o in plan.observations)...,
     (name for assignment in plan.assignments if assignment isa _RKPreparedSubmodelAssignment
         for name in assignment.observed)...,
+    (name for kernel in _rk_plan_kernels(plan) for statement in kernel.body
+        if _rk_is_cell_component(statement) for name in _rk_cell_component_observations(statement))...,
     (c.totals.weights for c in plan.completions if c.noncentered && c.totals !== nothing)...,
     (_rk_mi_free_weight_name(c) for c in plan.completions if _rk_mi_free_weight_name(c) !== nothing)...,
     _rk_car_term_placeholders(plan)...)

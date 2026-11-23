@@ -303,8 +303,9 @@ struct BRMOutput
     predictors::Tuple{Vararg{Symbol}}
     term::Union{Nothing,Symbol}
     # A labelled member of a collection shares a physical carrier with its
-    # peers. Its coordinates select this entry of the outer plate dimension.
-    member::Union{Nothing,Int,Vector{Int}}
+    # peers. Select its outer plate entry, its range of nested readings, or
+    # the explicit positions of an interleaved observation.
+    member::Union{Nothing,Int,UnitRange{Int},Vector{Int}}
 end
 BRMOutput(name, kind, type, size, constraints, generative, source, role,
           declaration, logical, labels, segments, component, dims, predictors, term) =
@@ -813,7 +814,7 @@ function _brm_submodel_declarations(model::StanBlocks.SlicModel, inputs)
 end
 _brm_submodel_declarations(_model, _inputs) = ()
 
-function _brm_submodels(plan, outputs)
+function _brm_submodels(plan, outputs, stan)
     entries = NamedTuple[]
     components = Dict(call.path => call.definition for call in _brm_component_records(plan.parent))
     function visit!(declaration, scope, path, parent_index, root, trigger, stack)
@@ -870,7 +871,7 @@ function _brm_submodels(plan, outputs)
     native = Tuple(BRMSubmodel(e.name, e.model, e.target, Tuple(e.path), e.parent, e.trigger,
                       e.declaration, e.inputs, e.declarations, Tuple(owned[i]), e.source)
           for (i, e) in enumerate(entries))
-    _brm_collection_submodels(native, _brm_collection_paths(brmi), plan.preproc, outputs)
+    _brm_collection_submodels(native, _brm_collection_paths(brmi), plan.preproc, outputs, stan)
 end
 
 function _brm_member_predictions(preproc, outputs)
@@ -897,11 +898,15 @@ function _brm_member_predictions(preproc, outputs)
     predictions
 end
 
-function _brm_collection_submodels(native, axes, preproc, all_outputs)
+function _brm_collection_submodels(native, axes, preproc, all_outputs, stan)
     isempty(axes) && return native
     entries = BRMSubmodel[]
     indices = Dict{Tuple,Int}()
     predictions = _brm_member_predictions(preproc, all_outputs)
+    # Each outer group ends at a subject index. Translate it to the number
+    # of readings through that subject, including a possible empty first group.
+    reading_ends = Dict(o.name => [s == 0 ? 0 : o.segments[s] for s in o.groups]
+                        for o in stan.outputs if !isnothing(o.groups))
     for (i, entry) in enumerate(native)
         path = entry.native_path
         axis = length(path) < 2 ? nothing : get(axes, path[1:2], nothing)
@@ -918,7 +923,8 @@ function _brm_collection_submodels(native, axes, preproc, all_outputs)
                 outputs = BRMOutput[
                     BRMOutput(o.name, o.kind, o.type, o.size, o.constraints, o.generative,
                         o.source, o.role, o.declaration, o.logical, o.labels, o.segments,
-                        o.component, o.dims, o.predictors, o.term, j)
+                        o.component, o.dims, o.predictors, o.term,
+                        haskey(reading_ends, o.name) ? _brm_member_segment(reading_ends[o.name], j) : j)
                     for o in entry.outputs]
                 append!(outputs, get(predictions, address, ()))
                 push!(entries, BRMSubmodel(entry.name, entry.model, last(address), Base.front(address),
@@ -1719,7 +1725,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
 
     BRMDescriptor(stan.id, stan.name, _brm_descriptor_formula(brmi), plan, stan, highlights,
                   Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
-                  Tuple(unpredictable), _brm_submodels(plan, outputs),
+                  Tuple(unpredictable), _brm_submodels(plan, outputs, stan),
                   requested_highlights)
 end
 
@@ -1836,7 +1842,7 @@ end
 function _brm_empty_carrier(output::BRMOutput)
     !isnothing(output.dims) && any(iszero, output.dims) && return true
     m, ends = output.member, output.segments
-    m isa Vector{Int} && return isempty(m)
+    m isa AbstractVector && return isempty(m)
     !isnothing(m) && !isnothing(ends) && ends[m] == (m == 1 ? 0 : ends[m-1])
 end
 
@@ -2522,6 +2528,11 @@ end
 _brm_member_segment(ends, member) =
     ((member == 1 ? 0 : ends[member - 1]) + 1):ends[member]
 
+_brm_member_positions(rows::Vector{Int}, ends) = Set(rows)
+_brm_member_positions(rows::UnitRange{Int}, ends) = rows
+_brm_member_positions(member::Int, ends) =
+    isnothing(ends) ? (member:member) : _brm_member_segment(ends, member)
+
 function _brm_emitted_coordinates(output::BRMOutput, constrained_names)
     stem = String(output.name)
     prefix = stem * "."
@@ -2529,9 +2540,7 @@ function _brm_emitted_coordinates(output::BRMOutput, constrained_names)
         member = output.member
         # Stan packs variable-width cells end-to-end. Fixed-width cells
         # occupy columns, and a scalar occupies its own vector entry.
-        ends = output.segments
-        selected = member isa Vector{Int} ? Set(member) : isnothing(ends) ? (member:member) :
-            _brm_member_segment(ends, member)
+        selected = _brm_member_positions(member, output.segments)
         return Int[i for (i, raw) in enumerate(constrained_names) if begin
             name = string(raw)
             startswith(name, prefix) && tryparse(Int, last(split(name, '.'))) in selected

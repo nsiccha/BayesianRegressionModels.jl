@@ -69,15 +69,22 @@ end
 
 # Native return statements. A parent's `kin.recovery` reads the field's private
 # local result name (`_brm_component_field_read`). StanBlocks returns a Stan
-# tuple labelled by those names (`kin.1`). RKPPL reads a call's local directly
+# tuple labelled by those names (`kin.1`), or the field itself for a singleton
+# because Stan tuples need at least two fields. RKPPL reads a call's local directly
 # (`kin.component_result_recovery`, rkppl-use §12), so its submodel returns one
 # value and every field stays a local of the call.
-_sb_component_return(component::BRMComponent) = component.result isa Symbol ?
-    Expr(:return, component.result) :
-    Expr(:return, Expr(:tuple, Expr(:parameters,
-        (Expr(:kw, local_name, local_name) for local_name in values(component.result))...)))
+function _sb_component_return(component::BRMComponent)
+    results = _brm_component_results(component)
+    length(results) == 1 && return Expr(:return, only(results))
+    fields = (Expr(:kw, name, name) for name in results)
+    Expr(:return, Expr(:tuple, Expr(:parameters, fields...)))
+end
 _rk_component_return(component::BRMComponent) =
     Expr(:return, first(_brm_component_results(component)))
+
+_brm_component_field_expr(object, fields, label) = Expr(:., object, QuoteNode(label))
+_sb_component_field_expr(object, fields, label) =
+    length(fields) == 1 ? object : _brm_component_field_expr(object, fields, label)
 
 # A prepared read of one returned field: the RK emitter spells it as a native
 # local read `call.label`.
@@ -178,7 +185,8 @@ function _brm_component(source::Expr, scope::Module)
             for (local_name, expression) in zip(locals, last.(fields))]
     end
     statements = _brm_strip_observers(Expr(:block, body..., assignments...))
-    builder = if any(_brm_declaration_guard, body) || any(_brm_has_record_rhs, body)
+    builder = if any(st -> _brm_declaration_guard(st) || _brm_has_record_rhs(st) ||
+            _brm_plate_slices_input_field(st, inputs), body)
         BRMBuilder(_BRMGuardedComponentBody(statements, inputs, scope),
             statements, inputs, scope)
     else

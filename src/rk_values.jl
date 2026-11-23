@@ -1484,11 +1484,12 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
     hoisted = _rk_nested_kernel_arguments(plan, bindings, taken)
     # Each plate output's per-cell graph value, for model-scope reads by cell.
     cells = Dict{Symbol,Symbol}()
+    densities = Set{Symbol}(c.source for c in plan.completions if c.totals !== nothing)
     for assignment in plan.assignments
         if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
                 arguments=get(hoisted.kernels, assignment.name, nothing), coordinates,
-                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells,
+                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells, densities,
                 documentation=get(documentation_owners, assignment.name, ()))
             _rk_plate_output_cells!(cells, stmts, assignment, kernel_outputs[assignment.name])
         else
@@ -1571,6 +1572,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
     # a different axis. Formula-level reads were lowered above; lower these
     # captures before ordering so the dependency is the complete cell array.
     select_cell(name, index) = Expr(:ref, cells[name], index)
+    select_cell(name) = cells[name]
     stmts = Any[_brm_plate_cell_refs(select_cell, stmt, keys(cells)) for stmt in stmts]
     computed = Set{Symbol}()
     foreach(statement -> _rk_source_assignments!(computed, statement), stmts)
@@ -1579,8 +1581,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors),
         Iterators.flatten(values(kernel_outputs)))
-    densities = union(Set(c.source for c in plan.completions if c.totals !== nothing),
-        Set(a.name for a in plan.assignments if a isa _RKPreparedSubmodelAssignment &&
+    union!(densities, (a.name for a in plan.assignments if a isa _RKPreparedSubmodelAssignment &&
             !isempty(a.observed)))
     emitted = _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),

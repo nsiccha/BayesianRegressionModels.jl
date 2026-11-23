@@ -1,5 +1,5 @@
 using StanBlocks
-import StanBlocks: RaggedVector
+import StanBlocks: NestedRaggedVector, RaggedVector
 
 
 # ==============================================================================
@@ -5955,13 +5955,20 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     unbound = sort!(unique!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
                               !(d.target in missing_sources) && !(d.target in fresh_sources)]))
+    function include_call(prefix, fitted)
+        nested = _sb_observation_triage(fitted)
+        append!(unbound, (Symbol(prefix, :., target) for target in nested.unbound))
+        union!(fresh_sources, (Symbol(prefix, :., target) for target in nested.fresh_sources))
+        nested.bound
+    end
     for entry in values(sb.preproc)
-        entry.kind === :brm_component || continue
-        record = entry.const_
-        nested = _sb_observation_triage(record.fitted)
-        bound += nested.bound
-        append!(unbound, (Symbol(record.target, :., target) for target in nested.unbound))
-        union!(fresh_sources, (Symbol(record.target, :., target) for target in nested.fresh_sources))
+        if entry.kind === :brm_component
+            bound += include_call(entry.const_.target, entry.const_.fitted)
+        elseif entry.kind === :collection_cells
+            for (index, fitted) in pairs(entry.const_.fits)
+                bound += include_call(Symbol(entry.raw_ref, :., index), fitted)
+            end
+        end
     end
     (; bound, unbound, fresh_sources)
 end
@@ -8952,7 +8959,7 @@ end
 # Split a kernel do-block lambda into its plain-name params and body statements;
 # `nothing` when the lambda is malformed. The emitter validates loudly on
 # `nothing`; formula walkers (which run where emission already succeeded) skip.
-function _sb_kernel_lambda_parts(lam)
+function _sb_kernel_lambda_parts(lam; component_field=_brm_component_field_expr)
     scope = _brm_inline_scope(lam)
     lam = _brm_inline_expr(lam)
     lam isa Expr && lam.head === :-> && length(lam.args) >= 2 || return nothing
@@ -8972,7 +8979,7 @@ function _sb_kernel_lambda_parts(lam)
         statements[final] = only(statements[final].args)
     end
     # A cell's reads of a named-return component's fields, for both backends.
-    (params, _brm_cell_component_reads(statements, scope))
+    (params, _brm_cell_component_reads(statements, scope, component_field))
 end
 
 # The column a kernel positional binds to its cell formal: the column itself,
@@ -9062,7 +9069,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         error("sbimpl: kernel(...) do-block form takes ordinary `~` statements, not `obs=`")
 
     lam = first(dcols)
-    parts = _sb_kernel_lambda_parts(lam)
+    parts = _sb_kernel_lambda_parts(lam; component_field=_sb_component_field_expr)
     isnothing(parts) &&
         error("sbimpl: kernel(...) do-block params must be plain names (no types/defaults)")
     params, body_stmts = parts
@@ -19662,8 +19669,9 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
         obj, field = getargs(x)      # field is a QuoteNode(:name)
         # A component's returned field reads its private label.
         read = _brm_component_field_read(x)
-        read === nothing || (field = QuoteNode(read.result))
-        return Expr(:., _sb_scalar_expr(obj, data), field)
+        object = _sb_scalar_expr(obj, data)
+        isnothing(read) && return Expr(:., object, field)
+        return _sb_component_field_expr(object, _brm_component_fields(read.component), read.result)
     elseif f === getindex
         obj = first(getargs(x))
         idxs = getargs(x)[2:end]
