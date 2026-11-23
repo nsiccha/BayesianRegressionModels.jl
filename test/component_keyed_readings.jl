@@ -76,16 +76,18 @@ end
     offset ~ Normal(0, 0.6)
     if heavy
         @plate for s in eachindex(y)
-            loc[s] = signal[s][picks[s]] .+ offset
+            picked[s] = signal[s][picks[s]]
+            loc[s] = picked[s] .+ offset
             y[s] .~ student_t.(6, loc[s], 1)
         end
     else
         @plate for s in eachindex(y)
-            loc[s] = signal[s][picks[s]] .+ offset
+            picked[s] = signal[s][picks[s]]
+            loc[s] = picked[s] .+ offset
             y[s] .~ Normal.(loc[s], 1)
         end
     end
-    return (; loc)
+    return (; picked, loc)
 end
 const single = @brm begin
     gain ~ Normal(0, 1)
@@ -99,7 +101,13 @@ end
     x = [[2.5, 1.], [.2, 1.1, .8]]
     for (heavy, picks, y) in ((false, [[1, 2], Int[]], [[.9, .5], Float64[]]),
                               (true, [Int[], [3]], [Float64[], [.3]]))
-        rk, problem = consumer_problem(single((; x, picks, y, heavy)))
+        model = single((; x, picks, y, heavy))
+        rk, problem = consumer_problem(model)
+        sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
+        stan = consumer_stan(model, "sensor-returned-pair-$heavy"; mod=@__MODULE__).model
+        descriptor = brm_descriptor(sb)
+        names = BridgeStan.param_names(stan; include_tp=true, include_gq=true)
+        selected = reduce(vcat, (row[idx] for (row, idx) in zip(x, picks)))
         @test LogDensityProblems.dimension(problem) == 2
         family = heavy ? TDist(6) : Normal()
         function oracle(u)
@@ -111,7 +119,16 @@ end
             value
         end
         for u in ([.3, .4], [-.2, .15])
-            check_consumer_point(problem, u, oracle)
+            value, gradient = check_consumer_point(problem, u, oracle)
+            stan_value, stan_gradient = BridgeStan.log_density_gradient(stan, u; propto=false)
+            @test stan_value ≈ value
+            @test stan_gradient ≈ gradient
+            constrained = BridgeStan.param_constrain(stan, u; include_tp=true, include_gq=true,
+                rng=BridgeStan.StanRNG(stan, 1))
+            for (field, expected) in ((:picked, u[1] .* selected), (:loc, u[1] .* selected .+ u[2]))
+                indices = brm_output_coordinates(descriptor, field, names; submodel=:device)
+                @test constrained[indices] ≈ expected
+            end
         end
     end
 end

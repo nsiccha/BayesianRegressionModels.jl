@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.388
+
+- A function component recognizes every indexed output of its selected
+  `@plate` as a local declaration. When `picked[s]` feeds `loc[s]`,
+  `return (; picked, loc)` can refer to both outputs.
+
 ## 0.2.387
 
 - `adaptive_centering_problem` (SBBRMI and RKBRMI) centres each random-effect

@@ -362,10 +362,15 @@ function _brm_component_instance(component::BRMComponent, call::ExprColumn)
     model = component.builder(_BRMCellFormulaInputs((;), bindings))
     # The component's module resolves functions; all model inputs come from
     # its interface. An undeclared name must never capture a caller parameter.
+    plate_reads = nothing
     for (key, column) in _brm_operation_entries(model)
+        column isa NamedColumn && parent(column) isa MissingColumn || continue
         (key in component.inputs || key === :Inf) && continue
         key === _BRM_LENGTH_SCALE_FLOOR && _brm_floor_names_term_floors(model) && continue
-        column isa NamedColumn && parent(column) isa MissingColumn &&
+        # Only the final indexed output owns the plate operation. An earlier
+        # output has a MissingColumn reference resolved by its producing plate.
+        isnothing(plate_reads) && (plate_reads = _brm_kernel_output_reads(model))
+        haskey(plate_reads, key) ||
             throw(ArgumentError("component `$(component.name)` reads undeclared input `$key`"))
     end
     model
