@@ -115,9 +115,18 @@ end
 # module but the package being precompiled is closed to `eval`, and a model
 # may be defined in one of its dependencies.
 function _rk_kernel_binding(scope, head)
+    value = _sb_cell_binding(scope, head)
+    value isa _BRMCellODE && return value
+    name = value isa Function ? nameof(value) : head
+    if name isa Symbol && (name in (:ode_adams, :ode_adams_tol, :ode_ckrk, :ode_ckrk_tol) ||
+            startswith(string(name), "pmx_solve_"))
+        if value === nothing || (isdefined(StanBlocks.stan, name) &&
+                value === getfield(StanBlocks.stan, name))
+            throw(ArgumentError("RKBRMI: `$name` is a Stan-only solver. Use SBBRMI for this cell."))
+        end
+    end
     head isa Symbol && !isdefined(scope, head) && isdefined(StanBlocks.stan, head) &&
         return getfield(StanBlocks.stan, head)
-    value = _sb_cell_binding(scope, head)
     value === nothing && error("RK backend: `$head` names nothing in module `$scope`")
     value
 end
@@ -1494,6 +1503,18 @@ end
 function _rk_kernel_bind_calls(value, scope, bindings, taken; index=false, defs=nothing)
     value isa Expr || return value
     if Meta.isexpr(value, :call)
+        head = first(value.args)
+        solver = _sb_cell_binding(scope, head)
+        if solver isa _BRMCellODE
+            operands = value.args[2:end]
+            if _brm_ode_stan_times(operands)
+                # Preserve the fitted RK program's callable for legacy cells.
+                legacy = GlobalRef(StanBlocks.stan.builtin, nameof(solver))
+                value = Expr(:call, legacy, operands...)
+            else
+                value = Expr(:call, head, _brm_ode_operands(solver, operands)...)
+            end
+        end
         call = _rk_statistic_call_parts(value, scope)
         if call !== nothing
             statistic = _rk_distribution_statistic!(

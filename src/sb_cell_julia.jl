@@ -149,9 +149,17 @@ _sb_cell_value(x, scope) = x
 function _sb_cell_value(x::Expr, scope)
     if x.head === :call
         head = first(x.args)
+        callable = _sb_cell_binding(scope, head)
         args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
+        if callable isa _BRMCellODE
+            # Keep the array-of-vectors return of the old Stan spelling.
+            _brm_ode_stan_times(args) && return Expr(:call, nameof(callable), args...)
+            operands = _brm_ode_operands(callable, args)
+            operands[4] = Expr(:call, :to_array_1d, operands[4])
+            solve = callable === ode_rk45 ? :ode_rk45_tol : :ode_bdf_tol
+            return Expr(:call, ranef_b_matrix, Expr(:call, solve, operands...))
+        end
         if !any(_sb_cell_keyword_argument, args)
-            callable = _sb_cell_binding(scope, head)
             statistic = _sb_distribution_statistic(callable, args, scope)
             statistic === nothing || return statistic
             rewritten = callable === nothing ? nothing : _sb_julia_stan_call(callable, args)

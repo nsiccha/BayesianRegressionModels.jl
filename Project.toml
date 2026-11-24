@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.392"
+version = "0.2.393"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
@@ -55,6 +55,7 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
+BayesianRegressionModelsODEExt = "ReactiveKernels"
 BayesianRegressionModelsHTMXObjectsExt = "HTMXObjects"
 BayesianRegressionModelsTreeArraysExt = "TreeArrays"
 BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"

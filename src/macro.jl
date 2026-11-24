@@ -2756,11 +2756,13 @@ end
 # `_brm_plate_kernel` hands the rendered cell and its indexed outputs to `_x` as
 # a third `->` argument, which `parselocals!` never reads; split it off here so
 # emitters only ever see the two-argument lambda.
-_BRMInlineBody(expression::Expr, scope::Module) =
+function _BRMInlineBody(expression::Expr, scope::Module)
+    expression.args[2] isa Expr && _brm_warn_legacy_ode(expression.args[2], scope)
     Meta.isexpr(expression, :->, 3) ?
         _BRMInlineBody(Expr(:->, expression.args[1], expression.args[2]), scope,
                        expression.args[3].source, expression.args[3].outputs) :
         _BRMInlineBody(expression, scope, nothing, ())
+end
 _brm_inline_expr(x) = x
 _brm_inline_expr(x::_BRMInlineBody) = x.expression
 _brm_inline_scope(x) = Main

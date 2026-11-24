@@ -463,6 +463,10 @@ function _brmd_value(x::Expr, env, id)
             end
         end
         callable=_brmd_binding(head, env.mod)
+        if get(env.provenance, :cell_owner, nothing) !== nothing &&
+                head in (:ode_rk45, :ode_bdf) && !_brm_ode_stan_times(x.args[2:end])
+            callable = _sb_cell_binding(env.mod, head)
+        end
         callable===vcat && !distribution &&
             (env=merge(env,(;provenance=merge(env.provenance,(;concatenation=true)))))
         return _brmd_call_component(env, id, callable, args, kwargs)

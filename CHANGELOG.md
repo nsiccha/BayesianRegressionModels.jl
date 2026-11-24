@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.393
+
+- A plate cell can call `ode_rk45(rhs, y0, t0, ts, args...)` or `ode_bdf`
+  with Julia vectors and optional `reltol`, `abstol` and `maxsteps` keywords.
+  Both backends return a matrix with one row per output time. The same
+  functions run directly in Julia with the ReactiveKernels ODE solvers loaded.
+
 ## 0.2.392
 
 - `brm_svi_fit` and `brm_svi_resume` accept `device=:gpu` with a loaded

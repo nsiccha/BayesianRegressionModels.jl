@@ -2295,7 +2295,11 @@ stanblocks-use §29 writes them (`rep_vector`, `to_array_1d`, `[:, 1]`,
 `to_vector`) with a `@deffun @juliacompat` right-hand side. On RKBRMI each
 solve is checked against the closed-form model's density and Reverse gradient
 at the same coordinates, and the tolerance-controlled forms against the
-compiled Stan density and gradient. It needs ReactiveKernels with
+compiled Stan density and gradient. The "Julia ODE calls" testset also checks
+the exported solvers directly and uses a two-state transfer model to test
+matrix orientation and gradients through both the initial state and the
+rates. It compares both backends with the closed form at default and tight
+tolerances. The file needs ReactiveKernels with
 `rk_ode_rk45_tol` (`ce48fc77` or later, which the test environment's pin
 contains) and the solver packages, which the test environment does not carry,
 so under `--project=test` it fails at its `using` line by design. Run it from a
