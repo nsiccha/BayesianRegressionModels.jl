@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.397
+
+- Stan replay with `resample_groups` now supports a record member that
+  observes readings inside its own plate. StanBlocks 0.2.66 keeps the readings
+  as data while redrawing the selected group effects.
+
 ## 0.2.396
 
 - The ReactiveKernels backend now requires ReactiveKernelsPPL 0.1.259 or
