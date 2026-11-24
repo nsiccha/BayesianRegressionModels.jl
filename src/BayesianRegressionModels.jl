@@ -46,6 +46,7 @@ include("censored_delays.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")
 include("formula_markers.jl")
+include("ode.jl")
 include("gmrf_precision.jl")
 include("gmrf_interpolation.jl")
 include("gmrf_vecchia.jl")
@@ -276,6 +277,7 @@ export me, mi, s, t2, ar, dar, rw, cdar, car, gmrf, mo, mo1, hsgp, multigroup, O
 # (A former whole-model parametric response marker was shed as dead code;
 # the shared-bucket + `kernel(...)` composition is the current idiom.)
 export TruncatedNormal, kernel, ragged
+export ode_rk45, ode_bdf
 # A plate's grouping by a data column, and per-group AR(1) residuals in its cells.
 export groups, AR1Normal
 # A sequence observed through a hidden Markov state, in a `@plate` cell.

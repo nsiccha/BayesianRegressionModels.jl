@@ -96,3 +96,83 @@ end
         end
     end
 end
+
+# The second state receives flow from the first. Initial level and both
+# rates vary with sampled parameters. Unequal time and state counts expose a
+# transposed result even when a one-state example would appear to work.
+StanBlocks.@deffun @juliacompat cell_transfer_rhs(t::real, y::vector[n], a::real, b::real)::vector[n] = begin
+    dy::vector[n]
+    dy[1] = -a * y[1]
+    dy[2] = a * y[1] - b * y[2]
+    dy
+end
+
+const TRANSFER_PREDICTIONS = (
+    closed=:(level * a / (a - b) .* (exp.(-b .* t[i]) .- exp.(-a .* t[i]))),
+    rk45=:(ode_rk45(cell_transfer_rhs, [level, 0.0], 0.0, t[i], a, b)[:, 2]),
+    bdf=:(ode_bdf(cell_transfer_rhs, [level, 0.0], 0.0, t[i], a, b)[:, 2]),
+    rk45_tol=:(ode_rk45(cell_transfer_rhs, [level, 0.0], 0.0, t[i], a, b;
+        reltol=1e-10, abstol=1e-10, maxsteps=100000)[:, 2]),
+    bdf_tol=:(BayesianRegressionModels.ode_bdf(cell_transfer_rhs, [level, 0.0], 0.0, t[i], a, b;
+        maxsteps=100000, abstol=1e-10, reltol=1e-10)[:, 2]),
+)
+const STAN_ONLY_CELL = @brm begin
+    rate ~ Exponential(1)
+    @plate for i in eachindex(dose)
+        pred[i] = to_vector(ode_adams(elimination, [dose[i]], 0.0,
+            to_array_1d(t[i]), rate)[:, 1])
+        dv[i] .~ Normal.(pred[i], 1.0)
+    end
+end
+for (name, prediction) in pairs(TRANSFER_PREDICTIONS)
+    @eval $(Symbol(:transfer_model_, name))(data) = @brm data begin
+        log_a ~ Normal(0, 0.5)
+        log_b ~ Normal(0, 0.5)
+        log_level ~ Normal(0, 1)
+        @plate for i in eachindex(dose)
+            a = 2 * exp(log_a)
+            b = exp(log_b)
+            level = dose[i] * exp(log_level)
+            pred[i] = $prediction
+            dv[i] .~ Normal.(pred[i], 1.0)
+        end
+    end
+end
+
+@stestset "Julia ODE calls in cells and outside models" begin
+    ts = [0.2, 0.7, 1.3]
+    y0 = [3.0, 0.0]
+    expected = hcat(3 .* exp.(-2 .* ts), 6 .* (exp.(-ts) .- exp.(-2 .* ts)))
+    for solver in (BRM.ode_rk45, BRM.ode_bdf)
+        @test solver(cell_transfer_rhs, y0, 0.0, ts, 2.0, 1.0; reltol=1e-10,
+            abstol=1e-10) ≈ expected rtol=1e-8
+    end
+    @test y0 == [3.0, 0.0]
+    @test ts == [0.2, 0.7, 1.3]
+    @test_throws "ode_adams` is a Stan-only solver. Use SBBRMI" RKBRMI(STAN_ONLY_CELL(ODE_DATA))
+    @test_logs (:warn, r"ode_rk45_tol.*deprecated.*reltol") match_mode=:any ode_pk_rk45_tol(ODE_DATA)
+
+    reference, closed = consumer_problem(transfer_model_closed(ODE_DATA))
+    names = coordinate_names(reference.model.layout)
+    for (name, rtol) in pairs((rk45=2e-5, bdf=2e-5, rk45_tol=1e-8, bdf_tol=1e-8))
+        brmi = getfield(@__MODULE__, Symbol(:transfer_model_, name))(ODE_DATA)
+        rk, problem = consumer_problem(brmi)
+        @test coordinate_names(rk.model.layout) == names
+        sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+        stan = BRM.stan_instantiate(sb; path=joinpath(mktempdir(), "transfer_$name.stan"))
+        transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
+        for point in ODE_POINTS
+            u = point(names)
+            value, grad = LogDensityProblems.logdensity_and_gradient(closed, u)
+            rk_value, rk_grad = LogDensityProblems.logdensity_and_gradient(problem, u)
+            stan_u = brm_rk_point_to_stan(transport, u)
+            stan_grad = similar(stan_u)
+            stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u, stan_grad;
+                propto=false, jacobian=true)
+            @test rk_value ≈ value rtol=rtol
+            @test rk_grad ≈ grad rtol=rtol
+            @test stan_value + transport.logdensity_offset ≈ value rtol=rtol
+            @test brm_stan_gradient_to_rk(transport, u, stan_grad) ≈ grad rtol=rtol
+        end
+    end
+end

@@ -33,6 +33,8 @@ end
 # Stan's defaults. Each bridge needs its solver package loaded with SciMLBase
 # and SciMLSensitivity (reactivekernels-use §4g).
 const _STAN_BUILTIN = BRM.StanBlocks.stan.builtin
+BRM._rk_kernel_stan_builtin(solve::BRM._BRMCellODE) = BRM._brm_ode_bridge(solve)
+BRM._rk_kernel_function_arguments(::BRM._BRMCellODE) = (1,)
 BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.to_vector)) = vec
 BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.to_array_1d)) = vec
 BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_rk45_tol)) =
@@ -45,9 +47,9 @@ BRM._rk_kernel_function_arguments(::Union{typeof(_STAN_BUILTIN.ode_rk45),
     typeof(_STAN_BUILTIN.ode_rk45_tol), typeof(_STAN_BUILTIN.ode_bdf),
     typeof(_STAN_BUILTIN.ode_bdf_tol)}) = (1,)
 _rk_ode_rk45(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
-    ReactiveKernels.rk_ode_rk45_tol(f, y0, t0, ts, 1e-6, 1e-6, 10^6, args...)
+    BRM.ode_rk45(f, y0, t0, ts, args...)
 _rk_ode_bdf(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
-    ReactiveKernels.rk_ode_bdf_tol(f, y0, t0, ts, 1e-6, 1e-6, 10^6, args...)
+    BRM.ode_bdf(f, y0, t0, ts, args...)
 
 # `T::shares(total) ~ Law(…)` in a `@plate` cell (src/cell_total_coordinates.jl)
 # is one joint latent per cell, `T[i] ~ _BRMShares{Law}(n, total, args…)`: its
