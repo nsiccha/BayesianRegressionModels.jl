@@ -584,7 +584,10 @@ const PINS = [
     # view; before the repair its gradient raised IllegalTypeAnalysisException
     # in `QRPivoted.getproperty` (ReactiveKernels snag
     # reverse-gradient-6b38cade; test/model_scope_dense_solve.jl).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "568d6242733da0cd9149d9796bd0d3de1fbdd0b3"),  # dogfood
+    # 0997a2c7 / libEnzyme 24b44443 adds `later_store_targets`. A prepared
+    # Vecchia row pullback can store its result without copying the constant
+    # field geometry (test/nlme_svi_field_rows.jl).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0997a2c75ea917d3ee243e49050eee09945ad3f2"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

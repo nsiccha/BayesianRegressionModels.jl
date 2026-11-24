@@ -225,11 +225,7 @@ instead of failing at run time.
   at batch 8 took 0.22 s against 0.02 s packed on 256 states and 3.4 s against
   0.025 s on 4,096. The fit reads each coefficient row through
   ReactiveKernelsPPL's `indexed_value` query (ReactiveKernelsPPL 0.1.244),
-  which raises the ReactiveKernels floor to 0.1.347. A row's derivative
-  costs memory in proportion to the field's size: inside a prepared query,
-  ReactiveKernels still copies the fixed inputs of a derivative rule on each
-  reverse call (its snag `native-reverse-r-b8de62b9`, open on the Enzyme
-  side). A spatial field with no time axis
+  which raises the ReactiveKernels floor to 0.1.347. A spatial field with no time axis
   (`gmrf((east, north); neighbors=m)`) keeps its states in the units' factors
   and takes the same map.
 - `brm_svi_fit(checkpoint, model)` accepts disjoint observation windows for
