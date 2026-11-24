@@ -35,7 +35,8 @@ frozen preprocessing, the packed coordinates, which `mi(...)` completions are
 non-centered, the subject groupings and coordinate ownership, and the fixed
 shared values). It holds no observations,
 compiled model or AD workspace. Its size is that of the variational factors
-(twice while polishing; plus the averaging window for GaussianBlockLaplace)
+(a second factor and its sparse sites while exploring and settling with `restore_best`,
+or a second factor while polishing; plus the averaging window for GaussianBlockLaplace)
 plus at most 512 observations per monitored moment and one ELBO value per iteration so far; a run keeps no history of
 checkpoints.
 
@@ -237,7 +238,13 @@ end
 function _brm_svi_consistent(run::_BRMSVIRun, t, c)
     q = run.q
     D, N = length(t.globals), length(t.units)
+    reference = get(run.sampling, :reference, nothing)
     factors = (q, something(run.average, q))
+    if reference !== nothing
+        get(c, :restore_best, false) && 0 < reference.iteration <= run.iteration &&
+            !_brm_svi_polishing(run) || return false
+        factors = (q, reference.q)
+    end
     all(f -> length(f.μ) == D && length(f.ρ) == D && size(f.Β, 1) == D &&
             length(f.M) == length(f.Λ) == length(f.U) == length(f.unit_opt) == N &&
             all(i -> length(f.M[i]) == size(f.Λ[i], 1) == size(f.U[i], 1) ==
