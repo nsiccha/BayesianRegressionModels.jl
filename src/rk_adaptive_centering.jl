@@ -13,6 +13,31 @@
 # records and layout, with no SBBRMI emission or Stan compile; the WarmupHMC
 # extension wraps `rk_logdensity_problem(rk; ad_backend)` with them.
 
+# All readers of an adaptive map use the same coordinate order. On a sparse
+# Laplace target the names, support transforms and bounds are the retained
+# entries of the model's layout, and positions index the outer vector.
+struct _RKAdaptiveLayout
+    names::Vector{String}
+    pos::Dict{String,Int}
+    transforms::Vector{Symbol}
+    bounds::Vector{Union{Nothing,Tuple{Float64,Float64}}}
+end
+
+_rk_adaptive_layout(::RKBRMI, layout::_RKAdaptiveLayout) = layout
+function _rk_adaptive_layout(rk::RKBRMI, unc_names, population=nothing)
+    names = [String(n) for n in unc_names]
+    transforms = _rk_layout_coordinate_transforms(rk)
+    bounds = _rk_adaptive_scale_bounds(rk, transforms)
+    if !isnothing(population)
+        transforms = transforms[population]
+        bounds = bounds[population]
+    end
+    length(names) == length(transforms) || error(
+        "BRM adaptive centering on RKBRMI: `unc_names` has $(length(names)) ",
+        "entries for a layout of $(length(transforms)) coordinates.")
+    _RKAdaptiveLayout(names, Dict(n => i for (i, n) in enumerate(names)), transforms, bounds)
+end
+
 # A record's draws root: `b_g` of `b_g.z`.
 function _rk_adaptive_binding(record)
     z = String(record.z)
@@ -111,13 +136,7 @@ of their own ([`adaptive_centering_cells`](@ref)).
 """
 function adaptive_centering_blocks(rk::RKBRMI,
         unc_names=_rk_layout_coordinate_names(rk))
-    names = String.(unc_names)
-    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
-    transforms = _rk_layout_coordinate_transforms(rk)
-    length(transforms) == length(names) || error(
-        "BRM adaptive centering on RKBRMI: `unc_names` has $(length(names)) ",
-        "entries for a layout of $(length(transforms)) coordinates.")
-    bounds = _rk_adaptive_scale_bounds(rk, transforms)
+    (; names, pos, transforms, bounds) = _rk_adaptive_layout(rk, unc_names)
     out = AbstractAdaptiveCenteringBlock[]
     for record in _rk_adaptive_records(rk)
         haskey(record, :level_correlation) && _rk_adaptive_refuse(record,
@@ -397,8 +416,7 @@ end
 # `(predictor, coefficient)`: RK's `:population` records whose coordinate the
 # layout keeps under the identity transform (a bounded coefficient's coordinate
 # is not its value).
-function _rk_adaptive_population(rk::RKBRMI, pos)
-    transforms = _rk_layout_coordinate_transforms(rk)
+function _rk_adaptive_population(rk::RKBRMI, pos, transforms)
     out = Dict{Tuple{Symbol,Symbol},Int}()
     for r in _rk_coordinate_records(rk)
         r.kind === :population || continue
@@ -432,10 +450,8 @@ function _adaptive_ranef_locations(rk::RKBRMI, blocks, unc_names;
                                    walks=_AdaptiveWalkTerm[])
     out = IdDict{Any,_AdaptiveRanefLocations}()
     isempty(blocks) && return out
-    names = String.(unc_names)
-    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
-    transforms = _rk_layout_coordinate_transforms(rk)
-    population = _rk_adaptive_population(rk, pos)
+    (; pos, transforms) = _rk_adaptive_layout(rk, unc_names)
+    population = _rk_adaptive_population(rk, pos, transforms)
     margins = _rk_adaptive_margins(rk)
     rows = _rk_adaptive_group_rows(rk, blocks)
     nested = _rk_adaptive_nested_bindings(rows, margins)
@@ -485,10 +501,7 @@ as the log of a positive value (`:exp`, or `:floored` at 0). A sum-to-zero walk 
 its level, slope and roughness in a basis, not a path, and is not read.
 """
 function _rk_adaptive_walk_terms(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
-    names = String.(unc_names)
-    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
-    transforms = _rk_layout_coordinate_transforms(rk)
-    bounds = _rk_adaptive_scale_bounds(rk, transforms)
+    (; pos, transforms, bounds) = _rk_adaptive_layout(rk, unc_names)
     out = _AdaptiveWalkTerm[]
     context = nothing
     for r in _rk_coordinate_records(rk)
@@ -584,10 +597,8 @@ function _rk_adaptive_hyper(pos, bounds, names, declaration, ref, what; unit=fal
 end
 
 function _rk_adaptive_car_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
-    names = String.(unc_names)
-    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
-    bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
-    population = _rk_adaptive_population(rk, pos)
+    (; names, pos, transforms, bounds) = _rk_adaptive_layout(rk, unc_names)
+    population = _rk_adaptive_population(rk, pos, transforms)
     out = _CARAdaptiveCenteringBlock[]
     for r in _rk_coordinate_records(rk)
         r.kind === :car || continue
@@ -635,9 +646,7 @@ function _rk_adaptive_car_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_nam
 end
 
 function _rk_adaptive_cdar_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
-    names = String.(unc_names)
-    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
-    bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
+    (; names, pos, bounds) = _rk_adaptive_layout(rk, unc_names)
     out = _CDARAdaptiveCenteringBlock[]
     for r in _rk_coordinate_records(rk)
         r.kind === :cdar || continue
@@ -742,9 +751,7 @@ _rk_adaptive_hsgp_omega2(modes, widths) =
      for b in 1:prod(modes), j in eachindex(widths)]
 
 function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
-    names = String.(unc_names)
-    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
-    bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
+    (; names, pos, bounds) = _rk_adaptive_layout(rk, unc_names)
     out = _HSGPAdaptiveCenteringBlock[]
     for r in _rk_coordinate_records(rk)
         r.kind === :hsgp && !_rk_hsgp_level_mapped(rk, r) || continue
@@ -882,10 +889,7 @@ multigroup(...)` and a level-mapped periodic term raise.
 """
 function _rk_adaptive_hsgp_level_blocks(rk::RKBRMI,
                                         unc_names=_rk_layout_coordinate_names(rk))
-    names = String.(unc_names)
-    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
-    transforms = _rk_layout_coordinate_transforms(rk)
-    bounds = _rk_adaptive_scale_bounds(rk, transforms)
+    (; names, pos, transforms, bounds) = _rk_adaptive_layout(rk, unc_names)
     out = _HSGPLevelAdaptiveCenteringBlock[]
     for r in _rk_coordinate_records(rk)
         _rk_hsgp_level_mapped(rk, r) || continue
