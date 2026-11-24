@@ -136,10 +136,11 @@ end
 @brm function reading_sensor(record, signal)
     offset ~ Normal(0, 1)
     @plate for s in eachindex(record.y)
-        loc[s] = signal[s][record.picks[s]] .+ offset
+        picked[s] = signal[s][record.picks[s]]
+        loc[s] = picked[s] .+ offset
         record.y[s] .~ Normal.(loc[s], record.scale)
     end
-    return (; loc)
+    return (; picked, loc)
 end
 
 const observed_collection = @brm begin
@@ -173,9 +174,10 @@ end
         descriptor = brm_descriptor(sfit)
         problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
         @test LogDensityProblems.dimension(problem) == size(U, 1)
-        draws = Dict(rec.id => rk_draw_values(rk, U, (:loc,); submodel=(:sensors, rec.id)).loc
+        draws = Dict(rec.id => rk_draw_values(rk, U, (:picked, :loc); submodel=(:sensors, rec.id))
             for rec in design.records)
-        location(rec, s, u) = u[1] .* design.x[s][rec.picks[s]] .+ u[rec.id === :a ? 2 : 3]
+        picked(rec, s, u) = u[1] .* design.x[s][rec.picks[s]]
+        location(rec, s, u) = picked(rec, s, u) .+ u[rec.id === :a ? 2 : 3]
         function oracle(u)
             value = sum(logpdf.(Normal(), u))
             for rec in design.records, s in eachindex(rec.y)
@@ -194,10 +196,12 @@ end
             constrained = BridgeStan.param_constrain(stan, point; include_tp=true, include_gq=true,
                 rng=BridgeStan.StanRNG(stan, j))
             for rec in design.records
-                expected = reduce(vcat, (location(rec, s, u) for s in eachindex(rec.y)); init=Float64[])
-                @test draws[rec.id][j] ≈ expected
-                indices = brm_output_coordinates(descriptor, :loc, names; submodel=(:sensors, rec.id))
-                @test constrained[indices] ≈ expected
+                for (field, value) in ((:picked, picked), (:loc, location))
+                    expected = reduce(vcat, (value(rec, s, u) for s in eachindex(rec.y)); init=Float64[])
+                    @test draws[rec.id][field][j] ≈ expected
+                    indices = brm_output_coordinates(descriptor, field, names; submodel=(:sensors, rec.id))
+                    @test constrained[indices] ≈ expected
+                end
             end
         end
     end

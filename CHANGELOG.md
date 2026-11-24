@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.390
+
+- A keyed component can return multiple variable-length reading vectors from
+  its subject plate on Stan. With the new StanBlocks 0.2.65 minimum,
+  `brm_output_coordinates` selects each field for the requested member,
+  including after replay on reordered or empty reading schedules.
+
 ## 0.2.389
 
 - On Stan, `y ~ NegativeBinomial2(mu, phi)` uses the log mean directly
