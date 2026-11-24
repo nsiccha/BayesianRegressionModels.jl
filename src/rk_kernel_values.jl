@@ -1562,8 +1562,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # Nothing written or observed per subject (a cell without a collected
     # value whose observations read only shared values): there is no cell to
     # run.
-    observing = Symbol[statement.args[1] for statement in kernel.body if
-        _rk_is_cell_component(statement) && !isempty(_rk_cell_component_observations(statement))]
+    observing = _rk_observing_cell_components(kernel)
     isempty(written) && isempty(scanned) && isempty(observing) && return
     slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)..., scanned..., observing...))
     # The cell latents the program reads. One nothing reads is a generated
@@ -2168,8 +2167,14 @@ function _rk_nested_observation_reads(observation, distribution, reads)
         _BRMPreparedExpr(distribution.callable, args, distribution.kwargs)
 end
 
+# A component call contributes its own likelihood even if the parent never
+# reads its return. Its local binding roots the call and its input dependencies.
+_rk_observing_cell_components(kernel) = Symbol[first(statement.args) for statement in kernel.body
+    if _rk_is_cell_component(statement) && !isempty(_rk_cell_component_observations(statement))]
+
 # The names a cell's observations read.
 function _rk_kernel_observation_reads!(reads, kernel::_RKPreparedKernelAssignment)
+    union!(reads, _rk_observing_cell_components(kernel))
     for observation in kernel.observations
         push!(reads, observation.param)
         foreach(argument -> _brm_cell_value_refs!(reads, argument), observation.arguments)

@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.394
+
+- On the ReactiveKernels backend, omitting a response keeps the likelihoods
+  and fitted parameters of record members that observe their own data, even
+  when the parent model does not read their returns.
+
 ## 0.2.393
 
 - Minibatch SVI keeps the best factor of exploration and of settling and can
