@@ -153,6 +153,46 @@ const observed_collection = @brm begin
     end
 end
 
+const optional_calibration = @brm begin
+    gain ~ Normal(0, 1)
+    @plate for s in eachindex(x)
+        signal[s] = gain .* x[s]
+    end
+    for record in records
+        sensors[record.id] ~ reading_sensor(record, signal)
+    end
+    calibration_bias ~ Normal(0, 1)
+    @plate for j in eachindex(t)
+        calibration[j] ~ Normal(calibration_bias * t[j], 1)
+    end
+    reference ~ Normal(0, 1)
+end
+
+@stestset "Omitting a separate response keeps the record members' likelihoods" begin
+    x = [[2., 1.], [3.]]
+    record = (; id=:a, picks=[[2, 1], Int[]], y=[[0.1, 0.8], Float64[]], scale=0.7)
+    design = (; records=[record], x, t=[1., 2.], reference=[0.4])
+    for calibration in (nothing, [0.2, -0.1])
+        data = isnothing(calibration) ? design : merge(design, (; calibration))
+        rk, problem = consumer_problem(optional_calibration(data))
+        names = coordinate_names(rk.model.layout)
+        bias = Symbol("sensors_member_all.offset.1")
+        expected = isnothing(calibration) ? [:gain, bias] : [:gain, bias, :calibration_bias]
+        @test Set(names) == Set(expected)
+        function oracle(u)
+            gain, offset = u[coordinate(names, :gain)], u[coordinate(names, bias)]
+            score = sum(logpdf.(Normal(), u)) + logpdf(Normal(), only(design.reference))
+            for s in eachindex(x), (row, y) in zip(record.picks[s], record.y[s])
+                score += logpdf(Normal(gain * x[s][row] + offset, record.scale), y)
+            end
+            isnothing(calibration) && return score
+            delta = u[coordinate(names, :calibration_bias)]
+            score + sum(logpdf(Normal(delta * t, 1), y) for (t, y) in zip(design.t, calibration))
+        end
+        check_consumer_point(problem, collect(range(-0.3, 0.2; length=length(names))), oracle)
+    end
+end
+
 @stestset "Repeated sensors score and return their own readings on replay" begin
     a = (; id=:a, picks=[[2, 1], Int[]], y=[[.3, -.2], Float64[]], scale=.7)
     b = (; id=:b, picks=[[1], [2]], y=[[.4], [.8]], scale=1.2)
