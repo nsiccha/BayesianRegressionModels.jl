@@ -493,6 +493,105 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         partitioned=_rk_spl_partitioned(backend, integrated))
 end
 
+# A computed NB2 shape may vary by row and sampled scalar, while staying
+# constant in a conditional mode search. Recognize positive row arithmetic
+# over those inputs only. Leave arbitrary calls and latent reads as factors.
+function _brm_spl_positive_shape(x, scalars, static, data, n)
+    positive(v) = v isa Real && isfinite(v) && v > 0
+    x isa Real && return positive(x)
+    if x isa _BRMPreparedRef
+        x.name in scalars && return true
+        x.name in static || return false
+        v = data[x.name]
+        return positive(v) || (v isa AbstractVector && length(v) == n && all(positive, v))
+    end
+    x isa _BRMPreparedExpr && isempty(x.kwargs) || return false
+    f = x.callable isa _BRMBroadcastCall ? x.callable.f : x.callable
+    (f in (+, *, /, _brm_dotted_product) || (x.callable isa _BRMBroadcastCall && f === inv)) &&
+        all(arg -> _brm_spl_positive_shape(arg, scalars, static, data, n), x.args)
+end
+
+# Row design requires each term to read at most one level per integrated
+# block, with loadings fixed except for the block's own scales/correlations.
+function _brm_spl_nb2_predictor(predictor, regression, static, data, n)
+    predictor.link === :log || return false
+    row_column(k) = k in static && data[k] isa AbstractVector && length(data[k]) == n
+    predictor.row_source === nothing || row_column(predictor.row_source) || return false
+    all(predictor.terms) do term
+        all(row_column, term.columns) && !_rk_model_offset(term) || return false
+        if term.kind === :cdar
+            o = term.options
+            return o.factor === nothing && row_column(o.group) && row_column(o.source) &&
+                !(o.sigma_param isa _BRMDerivedTermValue || o.rho_param isa _BRMDerivedTermValue)
+        elseif term.kind === :ranef_gather
+            return all(regression.ranef_buckets) do b
+                b.id == term.options.bucket_id && b.group == term.options.bucket_group || return true
+                b.grouping.form === :plain && b.level_cor === nothing && b.decomposition === nothing &&
+                    all(m -> m.z.kind === :ones || row_column(m.z.column), b.margins) &&
+                    !any(v -> v isa _BRMDerivedTermValue, b.sd_priors)
+            end
+        end
+        term.kind in (:intercept, :continuous, :factor, :offset)
+    end
+end
+
+function _brm_spl_nb2_rows(backend, records)
+    plan = backend.plan
+    responses = _brm_slap_responses(plan)
+    promoted = Symbol[]
+    plan isa _RKValuePlan && isempty(plan.completions) &&
+        all(r -> r.kind in (:ranef, :cdar), records) || return backend, responses, promoted
+    reg = plan.regression
+    data = rk_bound_data(backend)
+    static = setdiff(Set(keys(data)), (a.name for a in plan.assignments),
+        (a.name for a in reg.assignments), (v.name for v in reg.vector_parameters),
+        (p.name for p in reg.parameters), (p.name for p in reg.predictors))
+    scalars = Set(p.name for p in reg.parameters if p.dimension === nothing &&
+        (p.support_override === :positive || (p.support_override === nothing &&
+         p.family in (:LogNormal, :Gamma, :Exponential, :Beta))))
+    assignments = Dict(a.name => a.expression for a in plan.assignments)
+    extra = _BRMPreparedAssignment[]
+    specs = NamedTuple[]
+    taken = _rk_plan_taken(plan)
+    nrows = isempty(responses) ? nothing : length(data[first(responses).response])
+    for o in plan.observations
+        o isa _BRMPreparedObservation && o.modifier === nothing && o.weight === nothing &&
+            o.missing_response === nothing || continue
+        d = o.distribution
+        d isa _BRMPreparedExpr && d.callable === NegativeBinomial2 && isempty(d.kwargs) &&
+            length(d.args) == 2 || continue
+        mu, shape = d.args
+        y = get(data, o.name, nothing)
+        y isa AbstractVector && !isempty(y) || continue
+        nrows === nothing || nrows == length(y) || continue
+        mu isa _BRMPreparedRef && any(p -> p.name === mu.name &&
+            _brm_spl_nb2_predictor(p, reg, static, data, length(y)), reg.predictors) || continue
+        all(v -> v isa Real && isinteger(v) && v >= 0, y) || continue
+        expr = shape isa _BRMPreparedRef ? get(assignments, shape.name, nothing) : shape
+        expr isa _BRMPreparedExpr && _brm_spl_positive_shape(expr, scalars, static, data, length(y)) ||
+            continue
+        scale = if shape isa _BRMPreparedRef
+            shape.name
+        else
+            isempty(extra) && _rk_source_outputs!(taken, _rk_retained_program(backend).main)
+            name = _rk_ast_fresh_name(string(o.name, "_laplace_shape"), taken)
+            push!(extra, _BRMPreparedAssignment(name, expr, _brm_prepared_references(expr)))
+            name
+        end
+        push!(specs, (; family=:nb2_log, response=o.name, predictor=mu.name, scale,
+            scale_predictor=nothing, trials=nothing))
+        push!(promoted, o.name)
+        nrows = length(y)
+    end
+    isempty(promoted) && return backend, responses, promoted
+    if !isempty(extra)
+        working = _RKValuePlan(reg, (plan.assignments..., extra...), plan.observations,
+            plan.columns, plan.completions)
+        backend = _brm_laplace_working_backend(backend, working)
+    end
+    backend, (responses..., specs...), promoted
+end
+
 function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
         maxiter, declarations=nothing, max_cell_width=128, screened=false,
         solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
@@ -507,7 +606,6 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     refusal === nothing || _brm_nlme_error("brm_laplace_problem: integrate = " *
         "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
         "of a supported family or an observation factor, but $refusal")
-    responses = _brm_slap_responses(backend.plan)
     (; records, names, integrated, population, blocks, omega, partitioned) =
         _brm_spl_layout(backend, integrate; declarations)
     if !screened
@@ -521,6 +619,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     selected = Set(_brm_spl_record_declaration(r) for r in records)
     sampled = any(r -> r.kind in _BRM_SPL_LATENT && _brm_spl_record_declaration(r) ∉ selected,
         _rk_coordinate_records(backend))
+    backend, responses, promoted = _brm_spl_nb2_rows(backend, records)
     families, ports = _brm_slap_ports(backend, responses)
     u0 = zeros(Float64, length(names))
     kernels = _rk_slap_kernels(backend, Tuple(ports), (), omega, u0, ad_backend)
@@ -545,8 +644,11 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     p.gmrf = _brm_spl_gmrf_prior(p, records, u0)
     _brm_spl_gmrf_parameters!(p, u0)
     _brm_spl_design!(p, u0)
-    sampled || _brm_slap_population_design!(p, u0)
-    cells = Set(_brm_slap_other_observations(backend.plan))
+    # A computed log shape can be nonlinear in the outer parameters.
+    if !sampled && isempty(promoted)
+        _brm_slap_population_design!(p, u0)
+    end
+    cells = setdiff(Set(_brm_slap_other_observations(backend.plan)), promoted)
     _brm_slap_verify!(p, u0, t.response, t.row; cells)
     _brm_spl_verify_prior(p, u0)
     _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend; partitioned, progress)

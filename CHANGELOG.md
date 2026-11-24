@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.399
+
+- Sparse Laplace evaluation can use analytic negative-binomial rows when
+  the log mean contains ordinary group effects or an independent grouped
+  `cdar` and the shape uses positive arithmetic on data and sampled scalars.
+  When all rows have fixed conditional scales, the mode search can take one
+  full-likelihood Newton stage at each new population point.
+
 ## 0.2.398
 
 - On the ReactiveKernels backend, a likelihood can read a named expression
