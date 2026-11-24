@@ -56,6 +56,22 @@ function _rk_callable_source!(definitions, bindings, entry, ::typeof(native_curv
     :done
 end
 
+@kernel shifted_input(a) = begin
+    z = a + 1
+    return z
+end
+shift_parameter(a) = a + 1
+function _rk_callable_source!(definitions, bindings, entry, ::typeof(shift_parameter))
+    push!(bindings, :package_shift => shifted_input)
+    push!(definitions, :(ReactiveKernels.@kernel \$entry(a) = begin
+        v = package_shift(a)
+        return v
+    end))
+    :done
+end
+const CHILD_FORMULA = "a ~ Normal(0, 1); sigma ~ Exponential(1); v = shift_parameter(a); mu = v + x; y ~ Normal(mu, sigma)"
+with_child(data) = brm(CHILD_FORMULA; mod=@__MODULE__)(data)
+
 # The cells call this module's functions and observe through `Normal`, a
 # name this module binds: the planner reads both from here.
 provided(d) = @brm d begin
@@ -156,6 +172,8 @@ function exercise_replay()
     RKBRMI(other, brm_fitted_state(RKBRMI(other)))
     constant_model = brm(WITH_CONSTANT; mod=@__MODULE__)(merge(data, (; scale=2.0)))
     RKBRMI(constant_model, brm_fitted_state(RKBRMI(constant_model)))
+    child_model = RKImageModels.with_child(data)
+    RKBRMI(child_model, brm_fitted_state(RKBRMI(child_model)))
     brm(WITH_MACRO; mod=@__MODULE__)
     nothing
 end

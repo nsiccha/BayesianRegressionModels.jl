@@ -96,6 +96,25 @@
     end
     @test first(group_fits).model.layout.total + 1 == last(group_fits).model.layout.total
 
+    # A provider can supply an existing package-owned graph to its emitted
+    # kernel. Redirecting its output changes subsequent independent opens.
+    child_template = W.RKImageModels.with_child
+    child_fit = RKBRMI(child_template(data))
+    child_state = brm_fitted_state(child_fit)
+    reopen() = RKBRMI(child_template(design), child_state)
+    before = reopen()
+    expected_child = mean_prediction(before)
+    @test mean_prediction(reprocess(child_fit, design)) == expected_child
+    child = W.RKImageModels.shifted_input
+    original = child.ports[:z]
+    try
+        child.ports[:z] = child.ports[:a]
+        @test mean_prediction(reopen()) ≈ expected_child .- 1
+        @test mean_prediction(before) == expected_child
+    finally
+        child.ports[:z] = original
+    end
+
     table = BRM._brm_image_table(W)
     @test any(entry -> BRM._brm_same_syntax(entry.source, BRM._brm_source_block(W.FORMULA)), table.builders)
     @test !any(entry -> BRM._brm_same_syntax(entry.source, BRM._brm_source_block(other)), table.builders)
