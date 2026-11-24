@@ -357,9 +357,13 @@ function _brm_spl_gmrf_parameters!(p, u)
 end
 
 # −½ zᵀQz per field and its gradient −Qz, through the separable product.
-function _brm_spl_gmrf_prior!(fc, g, p, z, fb, correction)
-    gmrf = p.gmrf
-    gmrf === nothing && return nothing
+# `p.gmrf` is untyped in the problem (this file is included after its struct),
+# so the loops over a field's draws run behind a typed method: they run once
+# per Newton step.
+_brm_spl_gmrf_prior!(fc, g, p, z, fb, correction) =
+    _brm_spl_gmrf_prior!(fc, g, p, p.gmrf, z, fb, correction)
+_brm_spl_gmrf_prior!(fc, g, p, ::Nothing, z, fb, correction) = nothing
+function _brm_spl_gmrf_prior!(fc, g, p, gmrf::_BRMSPLGMRF, z, fb, correction)
     for field in gmrf.fields
         x = reshape(z[field.z], field.shape)
         Qx = similar(x)
@@ -377,9 +381,9 @@ function _brm_spl_gmrf_prior!(fc, g, p, z, fb, correction)
     nothing
 end
 
-function _brm_spl_gmrf_precision!(nz, p)
-    gmrf = p.gmrf
-    gmrf === nothing && return nothing
+_brm_spl_gmrf_precision!(nz, p) = _brm_spl_gmrf_precision!(nz, p.gmrf)
+_brm_spl_gmrf_precision!(nz, ::Nothing) = nothing
+function _brm_spl_gmrf_precision!(nz, gmrf::_BRMSPLGMRF)
     for field in gmrf.fields
         _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
             nz[field.nz[k]] += _brm_gmrf_temporal_entry(field, ta, tb) *

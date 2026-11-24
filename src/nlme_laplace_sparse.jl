@@ -148,6 +148,14 @@ mutable struct BRMSparseLaplaceProblem{K}
     pattern_stats::NamedTuple
     pattern::SparseMatrixCSC{Float64,Int}
     diagonal::Vector{Int}
+    # each nonzero's transposed position (the pattern is symmetric), so a
+    # term's pair of effects is looked up once for both triangles
+    transpose::Vector{Int}
+    # The row terms' pairs' positions below the diagonal, term t's from
+    # `pairptr[t]` in `_brm_spl_scatter!`'s order; empty when there are more
+    # than `_BRM_SPL_PAIRS_KEPT` of them, and each is then searched for.
+    pairptr::Vector{Int}
+    pair::Vector{Int32}
     component::Vector{Int}
     components::Vector{Vector{Int}}
     term_component::Vector{Int}
@@ -526,7 +534,8 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], fill(false, length(blocks)), Float64[],
         Int[], Int[], Int[], (;),
-        spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
+        spzeros(0, 0), Int[], Int[], Int[], Int32[], Int[], Vector{Int}[], Int[], Int[], Float64[],
+        Vector{Int}[],
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
@@ -549,17 +558,15 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
 end
 
 # Link-scale tangents of the entries, from their parameters' tangents.
-function _brm_spl_dpsi(p::BRMSparseLaplaceProblem, values, tangents)
-    dψ = zeros(length(p.port))
-    for e in eachindex(dψ)
-        k = p.port[e]
-        k == 0 && continue
-        θ, t = p.index[e] == 0 ? (values[k], tangents[k]) :
-            (values[k][p.index[e]], tangents[k][p.index[e]])
-        dψ[e] = _brm_lap_dlink(p.link[e], θ) * t
-    end
-    dψ
+@inline function _brm_spl_dpsi(p::BRMSparseLaplaceProblem, values, tangents, e)
+    k = p.port[e]
+    k == 0 && return 0.0
+    θ, t = p.index[e] == 0 ? (values[k], tangents[k]) :
+        (values[k][p.index[e]], tangents[k][p.index[e]])
+    _brm_lap_dlink(p.link[e], θ) * t
 end
+_brm_spl_dpsi(p::BRMSparseLaplaceProblem, values, tangents) =
+    [_brm_spl_dpsi(p, values, tangents, e) for e in eachindex(p.port)]
 
 # At a packed point with the integrated draws at zero: the entries' values A,
 # the parameter values behind them (`nothing` when A is affine and comes from
@@ -572,41 +579,73 @@ end
 # that evaluation's difference from A and ∂C its tangent. This serves every
 # block kind alike (random effects, areal fields, walks), whatever maps its
 # draws to the rows.
-function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA)
+function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA; tangents::Bool=true)
     nψ = length(p.port)
     values = p.affine ? nothing : _rk_slap_values(p.kernels, uA)
     A = p.affine ? _brm_slap_affine_A(p, view(uA, p.population)) :
         _brm_slap_psi!(zeros(nψ), p, values)
     nc = isempty(p.coff) ? 0 : p.coff[end] + p.blocks[p.rblock[end]].K
     C = length(p.C0) == nc ? copy(p.C0) : zeros(nc)
-    dC = [zeros(nc) for _ in p.omega]
-    ψ = zeros(nψ)
+    dC = tangents ? [zeros(nc) for _ in p.omega] : nothing
+    probe = copy(uA)
     for (j, b) in enumerate(p.blocks), k in 1:b.K
         (isempty(p.block_reads[j]) || p.cfixed[j]) && continue
         # A native field's entries read several of its levels: probe them
         # one level color at a time (`_brm_gmrf_level_colors`).
         colors = _brm_spl_gmrf_colors(p, j)
         for color in (colors === nothing ? (0,) : 1:maximum(colors))
-            probe = copy(uA)
-            for l in axes(b.z, 1)
-                color == 0 || colors[l] == color || continue
-                probe[p.integrated[b.z[l, k]]] = 1.0
-            end
-            pv, pt = _rk_slap_values_and_tangents(p.kernels, probe, b.omega)
-            _brm_slap_psi!(ψ, p, pv)
-            dψ = [_brm_spl_dpsi(p, pv, t) for t in pt]
-            for r in p.block_reads[j]
-                color == 0 || colors[p.rlevel[r]] == color || continue
-                e = p.rentry[r]
-                C[p.coff[r] + k] = ψ[e] - A[e]
-                for (i, o) in enumerate(b.omega)
-                    dC[o][p.coff[r] + k] = dψ[i][e]
-                end
-            end
+            _brm_spl_probe!(C, dC, A, probe, uA, p, j, k, color, colors)
         end
     end
     C, dC, A, values
 end
+
+# One probe: margin k of block j at one in every level (of one color), the
+# parameters there (with their tangents along the block's own coordinates when
+# `dC` is wanted), and from them the C of the block's reads (of that color).
+# `probe` is `uA` before and after.
+function _brm_spl_probe!(C, dC, A, probe, uA, p::BRMSparseLaplaceProblem, j, k, color, colors)
+    b = p.blocks[j]
+    for l in axes(b.z, 1)
+        color == 0 || colors[l] == color || continue
+        probe[p.integrated[b.z[l, k]]] = 1.0
+    end
+    if dC === nothing
+        _brm_spl_probe_reads!(C, dC, A, p, _rk_slap_values(p.kernels, probe), (), j, k,
+            color, colors)
+    else
+        pv, pt = _rk_slap_values_and_tangents(p.kernels, probe, b.omega)
+        _brm_spl_probe_reads!(C, dC, A, p, pv, pt, j, k, color, colors)
+    end
+    for l in axes(b.z, 1)
+        color == 0 || colors[l] == color || continue
+        i = p.integrated[b.z[l, k]]
+        probe[i] = uA[i]
+    end
+    nothing
+end
+
+# Only the entries the probed block's reads name are evaluated: a probe moves
+# no other entry's C.
+function _brm_spl_probe_reads!(C, dC, A, p::BRMSparseLaplaceProblem, pv, pt, j, k, color,
+        colors)
+    omega = p.blocks[j].omega
+    for r in p.block_reads[j]
+        color == 0 || colors[p.rlevel[r]] == color || continue
+        e = p.rentry[r]
+        C[p.coff[r] + k] = _brm_slap_psi(p, pv, e) - A[e]
+        dC === nothing && continue
+        for (i, o) in enumerate(omega)
+            dC[o][p.coff[r] + k] = _brm_spl_dpsi(p, pv, pt[i], e)
+        end
+    end
+    nothing
+end
+
+# A state's ∂C: the mode search's, or computed here when the search was made
+# for a value alone (`tangents = false`).
+_brm_spl_dC(p::BRMSparseLaplaceProblem, state) = state.dC === nothing ?
+    _brm_spl_cmaps(p, state.uA)[2] : state.dC
 
 # The entries' reads: which level of which integrated block each entry reads,
 # from unit steps of the draws at u0. Shifting draw k of every level of a
@@ -1043,6 +1082,76 @@ end
     first(span) - 1 + searchsortedfirst(view(rows, span), i)
 end
 
+# The position of row `zi` in column `zj`, below its diagonal `kd` and after
+# the last hit `k` there (a term's effects ascend, as a column's rows do); `hi`
+# is the column's last position. A run of consecutive rows is indexed directly.
+@inline _brm_spl_below(rows, kd, hi, k, zj, zi) = rows[hi] - zj == hi - kd ?
+    kd + (zi - zj) : k + searchsortedfirst(view(rows, (k + 1):hi), zi)
+
+# The most row-term pairs whose positions are kept (4 bytes each).
+const _BRM_SPL_PAIRS_KEPT = 2^22
+
+# Keep the positions `_brm_spl_scatter!` would search for at every assembly,
+# while they are few: a row term reads the same pairs at every Newton step.
+function _brm_spl_pairs!(p::BRMSparseLaplaceProblem)
+    p.pairptr = Int[]; p.pair = Int32[]
+    width(t) = p.tptr[t + 1] - p.tptr[t]
+    total = sum(t -> width(t) * (width(t) - 1) ÷ 2, eachindex(p.family); init=0)
+    (0 < total <= _BRM_SPL_PAIRS_KEPT && length(p.transpose) <= typemax(Int32)) || return p
+    rows = rowvals(p.pattern)
+    colptr = SparseArrays.getcolptr(p.pattern)
+    sizehint!(p.pair, total)
+    for t in eachindex(p.family)
+        push!(p.pairptr, length(p.pair) + 1)
+        zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
+        for j in eachindex(zs)
+            kd = p.diagonal[zs[j]]
+            hi = colptr[zs[j] + 1] - 1
+            k = kd
+            for i in (j + 1):length(zs)
+                k = _brm_spl_below(rows, kd, hi, k, zs[j], zs[i])
+                rows[k] == zs[i] || error("brm_laplace_problem: internal: a term's pair " *
+                    "of effects is not on h's pattern")
+                push!(p.pair, k)
+            end
+        end
+    end
+    p
+end
+
+# Row term t's curvature on h's nonzeros: −weight × (ℓ″ along its local C
+# rows) for every pair of its effects `zs` (ascending). A pair has one
+# position, below the diagonal (kept in `p.pair`, else looked up); its mirror
+# is `p.transpose` of that position.
+@inline function _brm_spl_scatter!(nz, p::BRMSparseLaplaceProblem, t, zs, c1, c2, r,
+        moving, weight)
+    rows = rowvals(p.pattern)
+    colptr = SparseArrays.getcolptr(p.pattern)
+    pair(a, b) = (v = r.h11 * c1[a] * c1[b];
+        moving ? v + (r.h12 * (c1[a] * c2[b] + c2[a] * c1[b]) + r.h22 * c2[a] * c2[b]) : v)
+    m = length(zs)
+    kept = !isempty(p.pair)
+    q = kept ? p.pairptr[t] : 0
+    @inbounds for j in 1:m
+        zj = zs[j]
+        kd = p.diagonal[zj]
+        nz[kd] -= weight * pair(j, j)
+        hi = colptr[zj + 1] - 1
+        k = kd
+        for i in (j + 1):m
+            if kept
+                k = Int(p.pair[q])
+                q += 1
+            else
+                k = _brm_spl_below(rows, kd, hi, k, zj, zs[i])
+            end
+            nz[k] -= weight * pair(i, j)
+            nz[p.transpose[k]] -= weight * pair(j, i)
+        end
+    end
+    nothing
+end
+
 # h's pattern (the identity and every pair of effects a term reads), each
 # term's place in it, and the components: effects connected through terms.
 function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
@@ -1087,6 +1196,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     p.pattern_stats = built.stats
     index(i, j) = _brm_spl_nzindex(pattern, i, j)
     p.diagonal = [index(i, i) for i in 1:n]
+    p.transpose = [index(j, rowvals(pattern)[k]) for j in 1:n for k in nzrange(pattern, j)]
     # The prior precision's sparse part: the identity, or a field's Laplacian.
     prior = Dict{Int,Float64}()
     for b in p.blocks
@@ -1105,6 +1215,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     p.wcols = [[b.z[l, 1] for l in levels] for b in p.blocks for levels in b.sums]
     p.wλ = [λ for b in p.blocks for λ in b.λ]
     p.pattern = pattern
+    _brm_spl_pairs!(p)
     # Components by union-find over the terms' effects.
     parent = collect(1:n)
     root(i) = (while parent[i] != i; parent[i] = parent[parent[i]]; i = parent[i]; end; i)
@@ -1197,7 +1308,8 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             a += c1[i] * z[zs[i]]
             moving && (bb += c2[i] * z[zs[i]])
         end
-        r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, third, moving)
+        r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, third, moving,
+            !derivatives && rows === nothing)
         rows === nothing || (rows[t] = r)
         tv === nothing || (tv[t] = r.v + p.constant[t])
         if crows !== nothing
@@ -1220,11 +1332,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         for i in 1:m
             g[zs[i]] += weight * (c1[i] * r.g1 + (moving ? c2[i] * r.g2 : 0.0))
         end
-        for j in 1:m, i in 1:m
-            v = r.h11 * c1[i] * c1[j]
-            moving && (v += r.h12 * (c1[i] * c2[j] + c2[i] * c1[j]) + r.h22 * c2[i] * c2[j])
-            nz[_brm_spl_nzindex(p.pattern, zs[i], zs[j])] -= weight * v
-        end
+        _brm_spl_scatter!(nz, p, t, zs, c1, c2, r, moving, weight)
     end
     isempty(p.cells) && return rest
     # The `@plate` cells: each its value at the packed point, and with
@@ -1610,43 +1718,88 @@ _brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::Real) = shift
 _brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::AbstractVector) =
     shift[p.component]
 
+# The numeric factorizations of one problem share a symbolic analysis and one
+# CHOLMOD copy of h's pattern (`sparse`, lower triangle read), whose values
+# `x` are refreshed in place: `cholesky!(F, ::Hermitian)` would allocate that
+# copy and validate its structure again on every Newton step. `raw` and
+# `shift` are h's nonzeros and the shift of the factorization `F` holds.
+# (GaussianMarkovRandomFields.jl's workspace backend refreshes its CHOLMOD
+# matrix the same way.)
+mutable struct _BRMSPLFactorCache
+    F::SparseArrays.CHOLMOD.Factor{Float64}
+    sparse::SparseArrays.CHOLMOD.Sparse{Float64}
+    # `sparse`'s value buffer, which `sparse` owns
+    x::Vector{Float64}
+    pattern::SparseMatrixCSC{Float64,Int}
+    raw::Vector{Float64}
+    shift::Union{Float64,Vector{Float64}}
+end
+
+# The value buffer of a CHOLMOD sparse matrix as an array, in the CSC order
+# it was built from. The matrix owns the memory: keep it alive beside the array.
+function _brm_cholmod_values(S::SparseArrays.CHOLMOD.Sparse{Float64}, n::Int)
+    s = unsafe_load(pointer(S))
+    Int(s.nzmax) == n || _brm_nlme_error("brm_laplace_problem: internal: CHOLMOD holds " *
+        "$(Int(s.nzmax)) values for a pattern of $n")
+    unsafe_wrap(Array, Ptr{Float64}(s.x), n)
+end
+
+# The factored matrix's values from h's: each component's shift and each soft
+# sum's anchor on the diagonal. Returns the shift left for CHOLMOD.
+function _brm_spl_factor_values!(x, p::BRMSparseLaplaceProblem, raw, shift)
+    copyto!(x, raw)
+    β = 0.0
+    if shift isa AbstractVector
+        for i in eachindex(p.diagonal)
+            x[p.diagonal[i]] += shift[p.component[i]]
+        end
+    else
+        β = Float64(shift)
+    end
+    for c in eachindex(p.wcols)
+        i, ρ = _brm_spl_anchor(p, c)
+        x[p.diagonal[i]] += ρ
+    end
+    β
+end
+
 # The factor of h + shift I, plus each soft sum's anchor (`_brm_spl_anchor`,
 # which `_brm_spl_woodbury` takes out again), reusing the symbolic analysis.
 # `shift` is one number, or one per component (`p.components`; h is block
 # diagonal over them).
 function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h; shift=0.0)
     p.algebra === nothing || return _brm_operator_factor(p, h; shift)
-    if shift isa AbstractVector || !isempty(p.wcols)
-        hs = copy(h)
-        if shift isa AbstractVector
-            nonzeros(hs)[p.diagonal] .+= _brm_spl_effect_shift(p, shift)
-            shift = 0.0
-        end
-        for c in eachindex(p.wcols)
-            i, ρ = _brm_spl_anchor(p, c)
-            nonzeros(hs)[p.diagonal[i]] += ρ
-        end
-        H = Hermitian(hs, :L)
-    else
-        H = Hermitian(h, :L)
+    raw = nonzeros(h)
+    cached = p.factor[]
+    if !(cached isa _BRMSPLFactorCache) || cached.pattern !== p.pattern
+        # The first factorization: the symbolic analysis and CHOLMOD's copy.
+        p.factor[] = nothing
+        values = similar(raw)
+        β = _brm_spl_factor_values!(values, p, raw, shift)
+        S = SparseArrays.CHOLMOD.Sparse(Hermitian(SparseMatrixCSC(size(h)...,
+            SparseArrays.getcolptr(h), rowvals(h), values), :L))
+        F = cholesky(S; shift=β, check=false)
+        p.factor[] = _BRMSPLFactorCache(F, S, _brm_cholmod_values(S, length(raw)),
+            p.pattern, copy(raw), shift isa AbstractVector ? copy(shift) : β)
+        return F
     end
     # A Normal conditional has the same curvature at every Newton iterate.
     # The final determinant also uses the last iterate's curvature for other
-    # families. Compare the actual entries (including soft-sum anchors and
-    # component shifts) before doing another numeric factorization.
-    cached = p.factor[]
-    values = nonzeros(parent(H))
-    if cached === nothing || cached.pattern !== p.pattern
-        F = cholesky(H; shift, check=false)
-        p.factor[] = (; F, pattern=p.pattern, values=copy(values), shift)
-        return F
-    end
-    cached.shift == shift && cached.values == values && return cached.F
+    # families. Compare the actual entries and the shift before doing another
+    # numeric factorization (the anchors are the problem's own).
+    cached.shift == shift && cached.raw == raw && return cached.F
     p.factor[] = nothing
-    F = cholesky!(cached.F, H; shift, check=false)
-    copyto!(cached.values, values)
-    p.factor[] = (; F, pattern=p.pattern, cached.values, shift)
-    F
+    _brm_spl_refactor!(cached, p, raw, shift)
+    p.factor[] = cached
+    cached.F
+end
+
+function _brm_spl_refactor!(cached::_BRMSPLFactorCache, p::BRMSparseLaplaceProblem, raw, shift)
+    β = GC.@preserve cached _brm_spl_factor_values!(cached.x, p, raw, shift)
+    cholesky!(cached.F, cached.sparse; shift=β, check=false)
+    copyto!(cached.raw, raw)
+    cached.shift = shift isa AbstractVector ? copy(shift) : β
+    cached
 end
 
 # The shifts the Newton direction tries where a component's h is not positive
@@ -1695,7 +1848,8 @@ end
 
 # The population point's A (link-scale parameters at z = 0), the parameter
 # values behind it, and every read's C with its derivatives.
-function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
+function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector;
+        tangents::Bool=true)
     length(φ) == length(p.population) || throw(DimensionMismatch(
         "the population point has length $(length(φ)), the problem has " *
         "$(length(p.population)) population coordinates"))
@@ -1704,7 +1858,7 @@ function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     _brm_slap_zero_integrated!(uA, p)
     _brm_spl_gaussian_parameters!(p, uA)
     _brm_spl_gmrf_parameters!(p, uA)
-    C, dC, A, values = _brm_spl_cmaps(p, uA)
+    C, dC, A, values = _brm_spl_cmaps(p, uA; tangents)
     (; uA, values, A, C, dC)
 end
 
@@ -1850,12 +2004,17 @@ _brm_spl_search(nc, stages) = (; stages=collect(stages), steps=zeros(Int, nc),
 # `start` (`brm_laplace_integration`'s design, from its centre's modes) starts
 # Newton there instead, where the density is log-concave (one stage): its mode
 # is then unique, so only the number of steps changes.
-_brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing) =
-    _brm_laplace_last!((p, φ) -> _brm_spl_search!(p, φ; start), p, φ)
+#
+# `tangents = false` (a value alone) leaves C's derivatives out of the state;
+# the gradient computes them when it meets such a state (`_brm_spl_dC`).
+_brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing,
+        tangents::Bool=true) =
+    _brm_laplace_last!((p, φ) -> _brm_spl_search!(p, φ; start, tangents), p, φ)
 
-function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing)
+function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector; start=nothing,
+        tangents::Bool=true)
     p.algebra === nothing || empty!(p.algebra.diagnostics)
-    pop = _brm_spl_population(p, φ)
+    pop = _brm_spl_population(p, φ; tangents)
     if !(all(isfinite, pop.A) && all(isfinite, pop.C))
         p.nonfinite += 1
         return (; finite=false, value=-Inf, iterations=0)
@@ -1926,12 +2085,13 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
         λc[p.component[i]] += g[i] * δ[i]
     end
     ft = similar(fc); gt = similar(g); ht = _brm_spl_precision(p)
+    fbt = zeros(nb)
     trial = copy(z)
     for i in 1:n
         converged[p.component[i]] || (trial[i] = z[i] + δ[i])
     end
-    _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true, uA=pop.uA,
-        weight)
+    _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true, fb=fbt,
+        uA=pop.uA, weight)
     valid = _brm_spl_finite_blocks(p, gt, ht)
     converged = copy(converged)
     for c in eachindex(fc)
@@ -1956,20 +2116,24 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
     for i in 1:n
         λb[p.sblock[i]] += g[i] * δ[i]
     end
-    fb = zeros(nb); fbt = zeros(nb)
+    fb = zeros(nb)
     _brm_spl_assemble!(similar(fc), nothing, nothing, p, pop.A, pop.C, z; derivatives=false,
         fb, uA=pop.uA, weight)
     t = [moving(k) ? 1.0 : 0.0 for k in 1:nb]
     accepted = [!moving(k) for k in 1:nb]
-    trial = copy(z)
-    for _ in 1:60
-        for i in 1:n
-            k = p.sblock[i]
-            accepted[k] || (trial[i] = z[i] + t[k] * δ[i])
+    # The first round's trial is the full step assembled above (the components
+    # that took it are at it in z, the others' blocks step by t = 1), so it
+    # reads that assembly's block values and derivatives.
+    for round in 1:60
+        if round > 1
+            for i in 1:n
+                k = p.sblock[i]
+                accepted[k] || (trial[i] = z[i] + t[k] * δ[i])
+            end
+            _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true,
+                fb=fbt, uA=pop.uA, weight)
+            valid = _brm_spl_finite_blocks(p, gt, ht)
         end
-        _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true,
-            fb=fbt, uA=pop.uA, weight)
-        valid = _brm_spl_finite_blocks(p, gt, ht)
         for k in 1:nb
             moving(k) || continue
             if valid[k] && isfinite(fbt[k]) &&
@@ -1982,6 +2146,7 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
         end
         all(accepted) && break
     end
+    swept = false
     for c in eachindex(fc)
         converged[c] && continue
         if all(accepted[k] for k in 1:nb if p.sblock_component[k] == c) && isfinite(ft[c]) &&
@@ -1992,9 +2157,16 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
         else
             p.sweeps += 1
             _brm_spl_sweep!(p, pop, z, c; weight) || return false
+            swept = true
         end
     end
-    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA, weight)
+    if swept
+        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA,
+            weight)
+    else
+        # Every moving component took the last trial: z is that trial.
+        copyto!(fc, ft); copyto!(g, gt); _brm_spl_copy_precision!(h, ht)
+    end
     true
 end
 
@@ -2161,6 +2333,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     on(t) = active === nothing || active[t]
     S = _brm_spl_conditional_selection(p, state)
     (; rows, crows, taus, gcell, u, v, bad, joint) = _brm_spl_mean_shift(p, state, S, on)
+    dC = _brm_spl_dC(p, state)
     nterms = length(p.family)
     value = joint + length(v) / 2 * log(2π) - _brm_spl_logdet(p, state.F, state.W) / 2
     _brm_spl_sum_implicit!(gcell, p, state, v, on)
@@ -2241,7 +2414,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
                     zc = zs[loc + c - 1]
                     rhs = wk * state.z[zc] + gk * v[zc] + LCS[(k - 1) * m + loc + c - 1]
                     for o in b.omega
-                        gω[o] += rhs * state.dC[o][p.coff[rr] + c]
+                        gω[o] += rhs * dC[o][p.coff[rr] + c]
                     end
                 end
             end
@@ -2304,7 +2477,7 @@ LogDensityProblems.capabilities(::Type{<:BRMSparseLaplaceProblem}) =
     LogDensityProblems.LogDensityOrder{1}()
 LogDensityProblems.dimension(p::BRMSparseLaplaceProblem) = length(p.population)
 LogDensityProblems.logdensity(p::BRMSparseLaplaceProblem, φ::AbstractVector) =
-    _brm_spl_value(p, _brm_spl_mode!(p, φ))
+    _brm_spl_value(p, _brm_spl_mode!(p, φ; tangents=false))
 function LogDensityProblems.logdensity_and_gradient(p::BRMSparseLaplaceProblem,
         φ::AbstractVector)
     state = _brm_spl_mode!(p, φ)

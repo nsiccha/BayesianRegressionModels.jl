@@ -5,8 +5,9 @@
 # grouping, which is the units); the exact marginal of Gaussian models with
 # crossed and with ragged nested groupings, integrated whole or in part (the
 # Laplace is exact there); central differences of its own value on count
-# models, where the curvature moves with the modes; and the exact conditional
-# for its draws.
+# models, where the curvature moves with the modes; the exact conditional
+# for its draws; and, for the mode search's workspaces, a dense assembly of h
+# and a direct factorization.
 #
 # RUN: julia --project=test test/nlme_laplace_sparse.jl [testset-filter...]
 include(joinpath(@__DIR__, "fitting_packages.jl"))
@@ -199,6 +200,15 @@ end
         @test [row.g1, row.g2] ≈ [g1, g2]
         @test [row.h11, row.h12, row.h22] ≈ [-k * ratio, g1, h22]
         @test [row.t111, row.t112, row.t122, row.t222] ≈ [k * ratio, -k * ratio, g1, t222]
+        # A mode search over effects on the mean reads the law without its
+        # terms in b alone, with the same derivatives in a; a value alone
+        # carries no derivative.
+        search = BRM._brm_lap_row(BRM._BRM_LAP_GAMMA, y, 1.0, a, b, false, false)
+        @test search.v ≈ row.v + BRM.loggamma(k) + log(y)
+        @test [search.g1, search.h11] ≈ [row.g1, row.h11]
+        @test BRM._brm_lap_row(BRM._BRM_LAP_GAMMA, y, 1.0, a, b, false, false, true).v ≈ search.v
+        alone = BRM._brm_lap_row(BRM._BRM_LAP_GAMMA, y, 1.0, a, b, true, true, true)
+        @test alone.v == row.v && alone.g1 == 0 && alone.h11 == 0
     end
     for k in (0.7, 1.0, 2.0), y in (-1.0, 0.0, Inf)
         @test BRM._brm_lap_gamma(0.0, log(k), y) == logpdf(Gamma(k, 1 / k), y)
@@ -332,6 +342,128 @@ end
     end
     @test LogDensityProblems.logdensity_and_gradient(q, φ)[1] ≈ expected[1] rtol=1e-12
     @test q.factor[] !== p.factor[]
+end
+
+# h at effects z, dense, by the rows' definition: the prior precision, then
+# every term's curvature along its C rows for every pair of its effects.
+function spl_dense_curvature(p, pop, z)
+    n = length(z)
+    prior = BRM._brm_spl_precision(p)
+    BRM._brm_spl_assemble!(zeros(length(p.components)), zeros(n), prior, p, pop.A, pop.C, z;
+        derivatives=true, uA=pop.uA, weight=0.0)
+    H = Matrix(prior)
+    width = maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family))
+    c1 = zeros(width); c2 = zeros(width)
+    for t in eachindex(p.family)
+        p.term_component[t] == 0 && continue
+        zs = p.tz[p.tptr[t]:(p.tptr[t + 1] - 1)]
+        BRM._brm_spl_crows!(c1, c2, p, pop.C, t)
+        e = p.entry[t]
+        a = pop.A[e]
+        b = BRM._brm_lap_width(p.family[t]) == 2 ? pop.A[e + 1] : 0.0
+        for i in eachindex(zs)
+            a += c1[i] * z[zs[i]]
+            p.moving[t] && (b += c2[i] * z[zs[i]])
+        end
+        r = BRM._brm_lap_row(p.family[t], p.y[t], p.trials[t], a, b, false, p.moving[t])
+        for j in eachindex(zs), i in eachindex(zs)
+            v = r.h11 * c1[i] * c1[j]
+            p.moving[t] &&
+                (v += r.h12 * (c1[i] * c2[j] + c2[i] * c1[j]) + r.h22 * c2[i] * c2[j])
+            H[zs[i], zs[j]] -= v
+        end
+    end
+    H
+end
+
+@stestset "mode-search workspaces: paired curvature lookups, the refreshed factor, value-only states" begin
+    rng = Xoshiro(31)
+    c = SPL_CROSSED
+    n = SPL_NESTED
+    counts_c = [rand(rng, Poisson(exp(1.5 + 0.8e))) for e in c.η]
+    counts_n = [rand(rng, NegativeBinomial(2.0, 2.0 / (2.0 + exp(0.8 + e)))) for e in n.η]
+    cases = (
+        # two effects per level of `a`, crossed with `b`, coefficients integrated
+        (RKBRMI(@brm((; c.a, c.b, c.x, y=counts_c), begin
+            log(mu) ~ 1 + x + (1 + x | a) + (1 | b)
+            effect(mu, :) ~ Normal(0.0, 10.0)
+            y ~ Poisson(mu)
+        end)), (:a, :b, :coefficients)),
+        # a second parameter that moves with the effects
+        (RKBRMI(@brm((; n.g, n.h, n.x, y=counts_n), begin
+            log(mu) ~ 1 + x + (1 | um | g) + (1 | h)
+            log(shape) ~ 1 + (1 | us | g)
+            y ~ NegativeBinomial2(mu, shape)
+        end)), (:g, :h)),
+    )
+    refused = Bool[]
+    for (rk, integrate) in cases
+        p = spl_problem(rk, integrate)
+        m = length(p.integrated); nc = length(p.components)
+        φ = 0.2 .* randn(rng, length(p.population))
+        pop = BRM._brm_spl_population(p, φ)
+
+        # `transpose` names each nonzero's mirror in the symmetric pattern.
+        rows = rowvals(p.pattern)
+        @test all(p.transpose[k] in nzrange(p.pattern, rows[k]) && rows[p.transpose[k]] == j
+            for j in 1:m for k in nzrange(p.pattern, j))
+
+        # One position per pair of a term's effects fills both triangles
+        # exactly as a lookup per ordered pair does, with the positions kept
+        # and with each searched for.
+        z = 0.3 .* randn(rng, m)
+        fc = zeros(nc); g = zeros(m); h = BRM._brm_spl_precision(p)
+        dense = spl_dense_curvature(p, pop, z)
+        @test !isempty(p.pair)
+        BRM._brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
+        @test Matrix(h) == dense
+        empty!(p.pair); empty!(p.pairptr)
+        BRM._brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
+        @test Matrix(h) == dense
+        BRM._brm_spl_pairs!(p)
+
+        # A step whose full Newton step is refused returns the accepted
+        # point's own values and derivatives.
+        z = zeros(m)
+        BRM._brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
+        δ = BRM._brm_spl_direction(p, h, g)
+        before = p.blockwise
+        @test BRM._brm_spl_step!(p, pop, z, δ, g, h, fc, falses(nc))
+        push!(refused, p.blockwise > before)
+        fr = zeros(nc); gr = zeros(m); hr = BRM._brm_spl_precision(p)
+        BRM._brm_spl_assemble!(fr, gr, hr, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
+        @test fc == fr && g == gr && nonzeros(h) == nonzeros(hr)
+
+        # The factor a search leaves, refreshed in place at every Newton step,
+        # is the factor of its final h; so is each shifted one after it, and
+        # the unshifted one again.
+        state = BRM._brm_spl_mode!(p, φ)
+        @test state.finite && p.factor[].F === state.F
+        H = Hermitian(copy(state.h), :L)
+        rhs = randn(rng, m)
+        direct = cholesky(H)
+        @test logdet(state.F) ≈ logdet(direct) rtol=1e-12
+        @test state.F \ rhs ≈ direct \ rhs rtol=1e-10
+        shifted = BRM._brm_spl_factor!(p, state.h; shift=fill(0.5, nc))
+        @test logdet(shifted) ≈ logdet(cholesky(H; shift=0.5)) rtol=1e-12
+        shifted = BRM._brm_spl_factor!(p, state.h; shift=0.25)
+        @test logdet(shifted) ≈ logdet(cholesky(H; shift=0.25)) rtol=1e-12
+        @test logdet(BRM._brm_spl_factor!(p, state.h)) ≈ logdet(direct) rtol=1e-12
+
+        # A search made for a value keeps no ∂C; a gradient asked at the same
+        # point reuses that search and is the gradient of a search of its own.
+        ψ = φ .+ 0.05
+        q = deepcopy(p)
+        value = LogDensityProblems.logdensity(p, ψ)
+        @test p.last.state.dC === nothing
+        kept = LogDensityProblems.logdensity_and_gradient(p, ψ)
+        own = LogDensityProblems.logdensity_and_gradient(q, ψ)
+        @test q.last.state.dC !== nothing
+        @test kept[1] ≈ value rtol=1e-12
+        @test kept[1] ≈ own[1] rtol=1e-12
+        @test kept[2] ≈ own[2] rtol=1e-10 atol=1e-10
+    end
+    @test any(refused)
 end
 
 # Areas "a".."h" (test/car_term.jl's graph): component {a, b, c, d, h} with

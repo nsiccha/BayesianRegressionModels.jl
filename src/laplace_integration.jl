@@ -421,7 +421,7 @@ _brm_lint_start(p::BRMSparseLaplaceProblem) =
     p.last === nothing || !p.last.state.finite ? nothing : copy(p.last.state.z)
 _brm_lint_logdensity(p, φ, start) = LogDensityProblems.logdensity(p, φ)
 _brm_lint_logdensity(p::BRMSparseLaplaceProblem, φ, start) =
-    _brm_spl_value(p, _brm_spl_mode!(p, φ; start))
+    _brm_spl_value(p, _brm_spl_mode!(p, φ; start, tangents=false))
 
 # The last mode search's state, kept for drawing at its point
 # (`_brm_spl_draw_state`); `nothing` where the problem keeps none.
