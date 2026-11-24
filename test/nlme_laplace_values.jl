@@ -12,6 +12,81 @@ function values_fd(f, x; h=1e-5)
     end
 end
 
+@stestset "computed NB2 shape uses regression rows with a fixed conditional dispersion" begin
+    d = (; g=repeat(["a", "b", "c"], 3),
+        exposure=[1, 4, 2, 3, 2, 6, 1, 2, 3], y=[0, 4, 2, 1, 3, 3, 0, 2, 2])
+    rk = RKBRMI(@brm d begin
+        log(mu) ~ 1 + (1 | g)
+        sd(mu, g) = 0.8
+        a ~ LogNormal(0, 1)
+        b ~ LogNormal(0, 1)
+        y ~ NegativeBinomial2(mu, 1 ./ (1 ./ (a .* exposure) .+ 1 ./ b))
+    end)
+    p = brm_laplace_problem(rk; integrate=:g, ad_backend=NLME_AD)
+    named = RKBRMI(@brm d begin
+        log(mu) ~ 1 + (1 | g)
+        sd(mu, g) = 0.8
+        a ~ LogNormal(0, 1)
+        b ~ LogNormal(0, 1)
+        shape = 1 ./ (1 ./ (a .* exposure) .+ 1 ./ b)
+        y ~ NegativeBinomial2(mu, shape)
+    end)
+    q = brm_laplace_problem(named; integrate=:g, ad_backend=NLME_AD)
+    @test p.backend === rk
+    @test length(p.integrated) == 3
+    @test length(p.family) == length(q.family) == length(d.y)
+    @test isempty(p.cells) && isempty(q.cells)
+    @test p.names == q.names && p.integrated == q.integrated
+    @test BRM._brm_spl_concave(p)
+
+    # Each group has a single standard-normal draw. Solve its score equation
+    # and integrate the curvature against the authored joint density.
+    full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    params = BRM._rk_value_reader(rk, (:mu, :a, :b))
+    function oracle(x)
+        u = zeros(length(p.u))
+        u[p.population] .= x
+        law = params(u)
+        shape = @. 1 / (1 / (law.a * d.exposure) + 1 / law.b)
+        correction = 0.0
+        for (j, group) in enumerate(sort(unique(d.g)))
+            rows = findall(==(group), d.g)
+            z = 0.0
+            for iteration in 1:20
+                mu = law.mu[rows] .* exp(0.8z)
+                probability = mu ./ (shape[rows] .+ mu)
+                count_shape = d.y[rows] .+ shape[rows]
+                score = 0.8 * sum(d.y[rows] .- count_shape .* probability) - z
+                precision = 1 + 0.8^2 * sum(count_shape .* probability .* (1 .- probability))
+                if abs(score) < 1e-12
+                    correction += 0.5 * log(2pi / precision)
+                    break
+                end
+                iteration == 20 && error("scalar NB2 reference mode did not converge")
+                z += score / precision
+            end
+            u[p.integrated[j]] = z
+        end
+        LogDensityProblems.logdensity(full, u) + correction
+    end
+    rng = Xoshiro(47)
+    for x in (zeros(length(p.names)), 0.3 .* randn(rng, length(p.names)))
+        v, g = LogDensityProblems.logdensity_and_gradient(p, x)
+        @test v ≈ oracle(x) atol=1e-8
+        @test g ≈ values_fd(oracle, x) rtol=2e-7 atol=2e-8
+        w, h = LogDensityProblems.logdensity_and_gradient(q, x)
+        @test w ≈ v atol=1e-9
+        @test h ≈ g atol=1e-9
+    end
+    latent_shape = RKBRMI(@brm d begin
+        log(mu) ~ 1 + (1 | g)
+        a ~ LogNormal(0, 1)
+        y ~ NegativeBinomial2(mu, a .* mu)
+    end)
+    records = BRM._brm_spl_records(latent_shape, [:g])
+    @test isempty(last(BRM._brm_spl_nb2_rows(latent_shape, records)))
+end
+
 @stestset "non-centered shares retain completion density corrections" begin
     d = (; g=["a", "a", "b", "b"], ids=["a", "b"], total=[5.0, 4.0],
         x=Union{Missing,Float64}[missing, missing, missing, 1.0],

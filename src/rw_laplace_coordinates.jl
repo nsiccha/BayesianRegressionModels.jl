@@ -72,13 +72,18 @@ function _rw2_field_backend(rk, declarations)
         r.sum_to_zero && r.order == 2 && r.declaration in declarations]
     isempty(walks) && return rk, walks
     plan = _rw2_field_plan(rk.plan, Set(r.declaration for r in walks))
+    _brm_laplace_working_backend(rk, plan), walks
+end
+
+# Re-emit a private integration plan with the public model's fitted binding.
+function _brm_laplace_working_backend(rk, plan)
     emitted = _rk_emit_ast(plan; documentation=brm_documentation(brm_source(rk)))
     frozen = rk.fitted === nothing ? nothing : rk.fitted.frozen
     program, bound, model = _rk_fitted_build(emitted, plan, frozen, nothing)
     working = RKBRMI(parent(rk), plan, model; program, bound, source=brm_source(rk), fitted=rk.fitted)
     _rk_layout_coordinate_names(working) == _rk_layout_coordinate_names(rk) ||
-        error("RW2 integration changed the model's coordinate order")
-    working, walks
+        error("Laplace integration changed the model's coordinate order")
+    working
 end
 
 function _rw2_draw_frame(working, walks)
