@@ -521,9 +521,14 @@ struct _RKEmittedProgram
     defs::Vector{Expr}
     main::Expr
     bindings::Vector{Pair{Symbol,Any}}
+    # Definitions, scopes and result types actually supplied by BRM's
+    # constant evaluator. Other providers use the same name space.
+    constant_code::Dict{Symbol,Any}
 end
-_RKEmittedProgram(defs::Vector{Expr}, main::Expr) =
-    _RKEmittedProgram(defs, main, Pair{Symbol,Any}[])
+_RKEmittedProgram(defs, main, bindings=Pair{Symbol,Any}[]) =
+    _RKEmittedProgram(defs, main, bindings, Dict{Symbol,Any}())
+_rk_with_main(p::_RKEmittedProgram, main) =
+    _RKEmittedProgram(p.defs, main, p.bindings, p.constant_code)
 
 # A value computed once, on first use, under its own lock.
 mutable struct _RKOnce

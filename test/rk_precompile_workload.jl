@@ -146,6 +146,7 @@ macro next_value()
 end
 const WITH_MACRO = "c = constant(@next_value()); y ~ Normal(c, 1)"
 const FORMULA = "sigma ~ Exponential(1); mu ~ 1 + center(x); y ~ Normal(mu, sigma)"
+const WITH_CONSTANT = "c = constant(scale); shifted = x - c; sigma ~ Exponential(1); mu ~ 1 + shifted; y ~ Normal(mu, sigma)"
 template(data) = brm(FORMULA; mod=@__MODULE__)(data)
 function exercise_replay()
     data = (; x=[2., 3., 4.], y=[1., 0., 2.])
@@ -153,6 +154,8 @@ function exercise_replay()
     RKBRMI(template(data), state)
     other = brm(CALLABLE; mod=First)(data)
     RKBRMI(other, brm_fitted_state(RKBRMI(other)))
+    constant_model = brm(WITH_CONSTANT; mod=@__MODULE__)(merge(data, (; scale=2.0)))
+    RKBRMI(constant_model, brm_fitted_state(RKBRMI(constant_model)))
     brm(WITH_MACRO; mod=@__MODULE__)
     nothing
 end

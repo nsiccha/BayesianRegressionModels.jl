@@ -364,7 +364,7 @@ function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothin
         foreach(j -> kept[j] = true, closure)
     end
     _rk_drop_unfitted_records!(coordinates, outputs, kept)
-    _RKEmittedProgram(emitted.defs, Expr(:block, statements[kept]...), emitted.bindings)
+    _rk_with_main(emitted, Expr(:block, statements[kept]...))
 end
 # Withholding changes the observation likelihood. Authored priors and their
 # coordinates stay in the program, including priors used only by that response.
@@ -388,7 +388,7 @@ function _rk_emit_ast(plan::_RKHeldOutPlan; kwargs...)
     emitted = _rk_emit_ast(plan.parent; kwargs...)
     conditioned = _rk_observed_names(plan.parent)
     main = _rk_active_observation_source(emitted, conditioned, plan.held_out)
-    _RKEmittedProgram(emitted.defs, main, emitted.bindings)
+    _rk_with_main(emitted, main)
 end
 
 _rk_observed_names(plan::_RKStructuralPlan) = (_rk_structural_responses(plan)...,

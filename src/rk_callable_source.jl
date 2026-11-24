@@ -39,6 +39,7 @@ function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
     pending = copy(emitted.bindings)
     bindings = Pair{Symbol,Any}[]
     claimed = IdDict{Any,Symbol}()
+    constant_code = Dict{Symbol,Any}()
     while !isempty(pending)
         entry, callable = popfirst!(pending)
         haskey(claimed, callable) && error(
@@ -60,12 +61,18 @@ function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
             push!(names, source.name)
         end
         entry in names || error("RK source: callable provider did not define its entry `$entry`")
+        if callable isa _RKConstantEvaluator && length(provider_definitions) == 1
+            constant_code[entry] = only(provider_definitions)
+            for (name, value) in provider_bindings
+                value isa Union{Module,Type} && (constant_code[name] = value)
+            end
+        end
         claimed[callable] = entry
         prepend!(definitions, provider_definitions)
         append!(pending, provider_bindings)
     end
     resolved = _RKEmittedProgram(_rk_unique_source_definitions(definitions),
-        emitted.main, bindings)
+        emitted.main, bindings, constant_code)
     _rk_validate_source_definitions(resolved)
     resolved
 end

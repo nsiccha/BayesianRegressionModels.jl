@@ -32,7 +32,6 @@
     other = replace(W.FORMULA, "center(x)" => "x")
     builder = brm(other; mod=W)
     own = brm_fitted_state(RKBRMI(builder(data)))
-    @test parentmodule(ext._rk_program(RKBRMI(builder(data), own)).mod) === Main
     @test_throws "another model" RKBRMI(builder(data), first(states))
 
     # Changing a returned builder's mutable expressions cannot change its
@@ -59,6 +58,44 @@
     @test parentmodule(ext._rk_program(second_call).mod) === Main
     @test mean_prediction(second_call) ≈ mean_prediction(first_call) .+ data.x
 
+    # Independent opens of a runtime miss converge on one definition, even
+    # across tasks. Every public graph and binding belongs to that open.
+    opens = fetch.([Threads.@spawn RKBRMI(builder(design), own) for _ in 1:4])
+    @test parentmodule(ext._rk_program(first(opens)).mod) === Main
+    @test all(rk -> ext._rk_program(rk).mod === ext._rk_program(first(opens)).mod, opens)
+    @test all(rk -> mean_prediction(rk) == mean_prediction(first(opens)), opens)
+    @test first(opens).model.spec.ports !== last(opens).model.spec.ports
+    @test rk_bound_plan(first(opens)) !== rk_bound_plan(last(opens))
+    function discarded_binding()
+        rk = RKBRMI(builder(design), deepcopy(own))
+        WeakRef(rk.bound), WeakRef(rk.fitted.state.fits)
+    end
+    binding, fits = discarded_binding()
+    GC.gc(true)
+    @test isnothing(binding.value) && isnothing(fits.value)
+
+    # The generated constant's module and type identify code. Its scalar
+    # value comes from the current fit, including in a fresh image process.
+    constant_builder = brm(W.WITH_CONSTANT; mod=W)
+    for scale in (2.0, 5.0)
+        fit = RKBRMI(constant_builder(merge(data, (; scale))))
+        reopened = RKBRMI(constant_builder(design), brm_fitted_state(fit))
+        @test parentmodule(ext._rk_program(reopened).mod) === W
+        @test mean_prediction(reopened) == mean_prediction(reprocess(fit, design))
+    end
+
+    grouped = brm("sigma ~ Exponential(1); mu ~ 1 + (1 | g); y ~ Normal(mu, sigma)"; mod=W)
+    group_fits = map(([1, 2, 1], [1, 2, 3])) do g
+        model = grouped((; g, data.y))
+        fit = RKBRMI(model)
+        state = brm_fitted_state(fit)
+        rk = RKBRMI(model, state)
+        @test BRM._rk_layout_coordinate_names(rk) == state.coordinates
+        @test mean_prediction(rk) == mean_prediction(fit)
+        rk
+    end
+    @test first(group_fits).model.layout.total + 1 == last(group_fits).model.layout.total
+
     table = BRM._brm_image_table(W)
     @test any(entry -> BRM._brm_same_syntax(entry.source, BRM._brm_source_block(W.FORMULA)), table.builders)
     @test !any(entry -> BRM._brm_same_syntax(entry.source, BRM._brm_source_block(other)), table.builders)
@@ -73,4 +110,17 @@
         x
     end))
     @test !ext._rk_image_callable(let captured = data.x; () -> captured end)
+
+    # Touch the oldest entry, then insert one more. Only the second-oldest
+    # should miss. An executing backend still owns its definition on eviction.
+    entries = [BRM._rk_definition_slot("limit-test-$i", Pair{Symbol,Any}[])
+        for i in 1:BRM._RK_RECENT_LIMIT]
+    @test BRM._rk_definition_slot("limit-test-1", Pair{Symbol,Any}[]) === first(entries)
+    BRM._rk_definition_slot("limit-test-extra", Pair{Symbol,Any}[])
+    @test BRM._rk_definition_slot("limit-test-1", Pair{Symbol,Any}[]) === first(entries)
+    @test BRM._rk_definition_slot("limit-test-2", Pair{Symbol,Any}[]) !== entries[2]
+    @test length(BRM._RK_RECENT_DEFINITIONS) == BRM._RK_RECENT_LIMIT
+    expected = mean_prediction(first(opens))
+    delete!(first(opens).model.spec.ports, :mu)
+    @test mean_prediction(last(opens)) == expected
 end

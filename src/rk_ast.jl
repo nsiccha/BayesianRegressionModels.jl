@@ -99,8 +99,7 @@ end
 
 function _rk_documented_program(emitted::_RKEmittedProgram, documentation; kwargs...)
     isempty(documentation) && return emitted
-    _RKEmittedProgram(emitted.defs,
-        _rk_documentation_block(emitted.main, documentation; kwargs...), emitted.bindings)
+    _rk_with_main(emitted, _rk_documentation_block(emitted.main, documentation; kwargs...))
 end
 
 # Source locations are not part of a definition's meaning, so two copies
@@ -613,7 +612,7 @@ function _rk_scalar_lone_intercepts(emitted::_RKEmittedProgram, lone::Dict{Symbo
     main = Expr(:block, (Meta.isexpr(statement, :(=), 2) && first(statement.args) in scalar ?
         Expr(:(=), first(statement.args), lone[first(statement.args)]) : statement
         for statement in statements)...)
-    _RKEmittedProgram(emitted.defs, main, emitted.bindings)
+    _rk_with_main(emitted, main)
 end
 
 # A value computed from a fit-role input alone (an indicator of one of its
