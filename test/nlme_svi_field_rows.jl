@@ -1,11 +1,8 @@
 # One coefficient row of a read-pair field's Vecchia law, as SVI's learned field
 # centering reads it from the emitted RK graph: its values and its derivatives
 # in the two field lengths, on a small and a large field with the same number
-# of parents. The printed cost is a measurement, not an assertion: inside a
-# prepared query one reverse call still copies the fixed footprint geometry, so
-# a row's derivative cost grows with the field. ReactiveKernels 0.1.351 removed
-# that copy for a rule called directly; the prepared-query case is open on the
-# Enzyme side (ReactiveKernels snag native-reverse-r-b8de62b9).
+# of parents. Reading and differentiating one row should allocate for that
+# row's geometry even as the surrounding field grows.
 include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, LinearAlgebra, Random, Statistics
@@ -59,6 +56,8 @@ end
     small = check_field_row(64)
     large = check_field_row(1024)
     @test large.states == 16 * small.states
-    # Reading a row's values does not depend on the field's size.
+    # Allow for small allocation-size differences between the two row reads.
     @test large.value_bytes <= small.value_bytes + 1024
+    @test large.scale_bytes <= small.scale_bytes + 1024
+    @test large.jacobian_bytes <= small.jacobian_bytes + 1024
 end
