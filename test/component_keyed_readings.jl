@@ -308,6 +308,60 @@ const site_model = @brm begin
         channels[entry.id] ~ site_reading(entry, curve)
     end
 end
+
+@stestset "Group redraws preserve a member's observed readings and return its new locations" begin
+    function design(sites, picks)
+        record(id, stack, value) = (; id, stack, site=sites,
+            rows=[fill(i, length(s)) for (i, s) in pairs(stack)],
+            y=[value .+ i .+ 0.1 .* s for (i, s) in pairs(stack)])
+        records = [record(:b, reverse(picks), 2.0), record(:a, picks, 1.0)]
+        (; site=sites, read_time=[[1., 2., 3.] for _ in sites], records, n_margins=3)
+    end
+    training = design([1, 2, 3], [[1], [1, 2], [3]])
+    fit = SBBRMI(site_model(training); mod=@__MODULE__)
+    dir = mkpath(joinpath(tempdir(), "brm-rk-consumer"))
+    fitted = BRM.stan_instantiate(fit; path=joinpath(dir, "member-reading-fit.stan")).model
+    from = BridgeStan.param_unc_names(fitted)
+    point = collect(range(-0.3, 0.3; length=length(from)))
+    for sites in (training.site, [3, 4, 5])
+        dense = design(sites, [[2, 1], [1, 2, 3], [3, 1, 2]])
+        replay = reprocess(fit, dense; resample_groups=[:site])
+        descriptor = brm_descriptor(replay)
+        kinds = Dict(o.name => o.kind for o in descriptor.outputs)
+        @test kinds[:b_p_site_z_flat] === :generated_quantity
+        @test kinds[:b_p_site_L] === kinds[:b_p_site_tau] === :parameter
+        readings = stan_data(replay)[:channels_all_entry_y].mem
+        @test readings == reduce(vcat, [reduce(vcat, r.y) for r in sort(dense.records; by=r -> r.id)])
+
+        model = BRM.stan_instantiate(replay; path=joinpath(dir, "member-reading-redraw.stan")).model
+        to = BridgeStan.param_unc_names(model)
+        @test Set(to) == Set(filter(name -> !startswith(name, "b_p_site_z_flat."), from))
+        transported = vec(transport_draws(fit, replay, reshape(point, 1, :), from, to))
+        @test transported == [point[findfirst(==(name), from)] for name in to]
+        names = BridgeStan.param_names(model; include_tp=true, include_gq=true)
+        draws = [BridgeStan.param_constrain(model, transported; include_tp=true,
+            include_gq=true, rng=BridgeStan.StanRNG(model, seed)) for seed in (7, 13)]
+        level = brm_output_coordinates(descriptor, :level, names)
+        for r in dense.records
+            idx = brm_output_coordinates(descriptor, :loc, names; submodel=(:channels, r.id))
+            @test length(idx) == sum(length, r.stack)
+            @test draws[1][idx] != draws[2][idx]
+            for draw in draws
+                # Within a site both the member offset and the shared margin cancel.
+                # The remaining differences identify the member's actual read times.
+                first_read = 1
+                for (i, rows) in pairs(r.stack)
+                    last_read = first_read + length(rows) - 1
+                    pred = draw[idx[first_read:last_read]]
+                    expected = exp(draw[level[i]]) .* exp.(-0.1 .* dense.read_time[i][rows])
+                    @test diff(pred) ≈ diff(expected)
+                    first_read = last_read + 1
+                end
+            end
+        end
+    end
+end
+
 # The same model without components.
 const site_twin = @brm begin
     level ~ 1 + (1 | p | site)
