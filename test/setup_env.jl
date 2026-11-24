@@ -576,7 +576,15 @@ const PINS = [
     # DifferentiationInterface reuses, so every later gradient of the same
     # `rk_logdensity_problem` kept NaN entries (BRM snag
     # rk-logdensity-pr-a8c1995e; test/rk_nonfinite_gradient_recovery.jl).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b80617bad0ceec1325b5d1bedbc9aabf74bf0093"),  # dogfood
+    # 568d6242 / libEnzyme bfb732a1, the dogfood tip of 2026-11-22, contains
+    # b80617ba and the repair `dense_solve_views` (Enzyme snag
+    # use-ordinary-enz-fd0accd2): ordinary Reverse of a dense real solve
+    # `A \ v` whose right-hand side is a strided view of a packed vector. An
+    # RKBRMI model-scope `eta = A \ b` reads its declared `b` through such a
+    # view; before the repair its gradient raised IllegalTypeAnalysisException
+    # in `QRPivoted.getproperty` (ReactiveKernels snag
+    # reverse-gradient-6b38cade; test/model_scope_dense_solve.jl).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "568d6242733da0cd9149d9796bd0d3de1fbdd0b3"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
