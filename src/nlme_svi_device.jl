@@ -109,7 +109,8 @@ multiplier of the prior standard deviations.
 `run.iteration` and appends one ELBO per iteration to `run.trace`.
 `synchronize!(:histories)` transfers the iterate histories used to assess
 drift and stationarity. `synchronize!(:state)` transfers the complete current
-state before a phase change, save, snapshot, or return. It includes the
+state before a phase change, save, snapshot, or return, and when BRM saves
+or compares a recovery factor. It includes the
 factors, moments, sampling counts, random stream, entropy and polishing
 average. A repeated synchronization at the same iteration must preserve any
 updates BRM has since made to the host state. Providers that already update

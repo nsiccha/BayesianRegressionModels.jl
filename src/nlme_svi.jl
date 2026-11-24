@@ -69,6 +69,7 @@ include("nlme_svi_collapsed.jl")
 include("nlme_svi_centering.jl")
 include("nlme_svi_coupling.jl")
 include("nlme_svi_stationarity.jl")
+include("nlme_svi_recovery.jl")
 
 # ── The minibatch target ─────────────────────────────────────────────────────
 
@@ -1298,32 +1299,16 @@ _brm_svi_field_draws(rng, t, q, batch) = nothing
 _brm_svi_apply_field_draws!(t, q, g, batch, draws::Nothing, ε, η) = nothing
 _brm_svi_global_noise(rng, q) = (randn(rng, length(q.μ)), randn(rng, size(q.Β, 2)))
 
-function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
-        whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
-        sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
-        structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
-        coupling_scale=1.0, coupling_baseline=true, reoptimize=0, reoptimize_newton=true)
-    D = length(t.globals)
+function _brm_svi_sample_target(rng, t, q, sites, batch)
     ε, η = _brm_svi_global_noise(rng, q)
     g = _brm_svi_draw_global(q, ε, η)
     # Under `sparse_globals = :collapsed` the sparse globals draw from their joint
     # factor, from the same ε (src/nlme_svi_collapsed.jl).
     noise = _brm_svi_sparse_draw!(g, ε, sites, q)
-    # Linear coupling: each batch unit's mean at this draw of the globals
-    # (src/nlme_svi_coupling.jl).
-    coupling = _brm_svi_coupling(q)
-    ζs = coupling === nothing ? nothing :
-        [_brm_svi_coupling_noise(coupling, i, noise, η) for i in batch]
     field_draws = _brm_svi_field_draws(rng, t, q, batch)
     _brm_svi_apply_field_draws!(t, q, g, batch, field_draws, noise, η)
     sweep = hasproperty(t, :field_sweep)
     P, gP = sweep ? _brm_svi_global_term(t.prior, t, g) : _brm_svi_global_term(t, g)
-    draws, designs = _brm_svi_local_draws(rng, q, batch, curvature, reoptimize, _brm_svi_unit_design)
-    terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
-        gd::Vector{Float64}}}(undef, length(batch))
-    # The whitened curvature estimate of a unit on an orthogonal design.
-    curvatures = Vector{Union{Nothing,Matrix{Float64}}}(nothing, length(batch))
-    problems = Vector{Union{Nothing,NamedTuple}}(nothing, length(batch))
     # Learned centering: the factors are over each unit's learned coordinates u,
     # and the unit terms read y = T(u) (src/nlme_svi_centering.jl).
     centering = _brm_svi_centering(t)
@@ -1332,6 +1317,27 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         P += first(_brm_svi_sweep_term!(gP, Float64[], centering, frame, t, q, 0,
             g, Float64[], t.plan))
     end
+    (; g, ε, η, noise, P, gP, centering, frame)
+end
+
+function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
+        whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
+        sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
+        structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
+        coupling_scale=1.0, coupling_baseline=true, reoptimize=0, reoptimize_newton=true)
+    D = length(t.globals)
+    (; g, ε, η, noise, P, gP, centering, frame) = _brm_svi_sample_target(rng, t, q, sites, batch)
+    # Linear coupling: each batch unit's mean at this draw of the globals
+    # (src/nlme_svi_coupling.jl).
+    coupling = _brm_svi_coupling(q)
+    ζs = coupling === nothing ? nothing :
+        [_brm_svi_coupling_noise(coupling, i, noise, η) for i in batch]
+    draws, designs = _brm_svi_local_draws(rng, q, batch, curvature, reoptimize, _brm_svi_unit_design)
+    terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
+        gd::Vector{Float64}}}(undef, length(batch))
+    # The whitened curvature estimate of a unit on an orthogonal design.
+    curvatures = Vector{Union{Nothing,Matrix{Float64}}}(nothing, length(batch))
+    problems = Vector{Union{Nothing,NamedTuple}}(nothing, length(batch))
     if reoptimize > 0
         # A checkpoint written before the Newton step re-optimizes the units' own
         # factors in place, with their square-root step.
@@ -1665,8 +1671,8 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
         stationarity=true, coupling_baseline=true, coupling_warmup=true,
-        exploration_drift=stationarity, unit_reoptimize=0, reoptimize_newton=true,
-        sparse_globals=:sites)
+        exploration_drift=stationarity, restore_best=true, unit_reoptimize=0,
+        reoptimize_newton=true, sparse_globals=:sites)
     B = min(batch_size, N)
     W = window === nothing ? max(cld(N, B), 100) : window
     # A default iterate-gated run may need more than 100 windows, especially
@@ -1679,8 +1685,8 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
        trend_skip=patience, stationarity, budget_polish=stationarity,
-       coupling_baseline, coupling_warmup, exploration_drift, unit_reoptimize,
-       reoptimize_newton, sparse_globals)
+       coupling_baseline, coupling_warmup, exploration_drift, restore_best,
+       unit_reoptimize, reoptimize_newton, sparse_globals)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1898,22 +1904,29 @@ function _brm_svi_finish_interval!(run, t, c, phase, synchronize! = identity)
     windows = run.windows
     explore = _brm_svi_windows_after(windows, max(_brm_svi_centering_activation(run.q), 0))
     polishing && return :window
+    recovered = _brm_svi_recover!(run, t, c, synchronize!)
     if phase === :settling
         explored = _brm_svi_explored(run, c)
-        # Polishing continues settling's step and its Adam moments.
-        settled = _brm_svi_settled(windows, explored, c)
+        # A restore starts polishing at the saved factor with fresh moments.
+        settled = !recovered && _brm_svi_settled(windows, explored, c)
         if settled && _brm_svi_stationarity_enabled(c)
             synchronize!(:histories)
             settled = _brm_svi_stationary!(run, c)
         end
         _brm_svi_stationarity_enabled(c) && (_brm_svi_stationarity_state(run).settled = settled)
-        if settled || _brm_svi_budget_polish_due(it, c) ||
+        if settled || recovered || _brm_svi_budget_polish_due(it, c) ||
                 length(windows) - explored >= _brm_svi_settle_windows(c)
             synchronize!(:state)
+            if recovered
+                clipped = run.adam.clipped
+                run.adam = _brm_svi_adam(run.q, c.polish_lr)
+                run.adam.clipped = clipped
+            end
+            _brm_svi_recovery_close!(run)
             _brm_svi_start_polishing!(run, run.q, it)
         end
-    elseif length(explore) >= max(c.min_windows, c.patience + 1) &&
-            _brm_svi_exploration_stalled(explore, length(explore), c)
+    elseif recovered || (length(explore) >= max(c.min_windows, c.patience + 1) &&
+            _brm_svi_exploration_stalled(explore, length(explore), c))
         # A deferred fit's ELBO has stopped climbing: its opening transient has
         # passed, so it centres now and explores on (`LearnedCentering`'s `delay`,
         # src/nlme_svi_centering.jl). The drift gate below governs where exploration
@@ -1922,6 +1935,7 @@ function _brm_svi_finish_interval!(run, t, c, phase, synchronize! = identity)
             synchronize!(:state)
             _brm_svi_activate_centering!(run.q, t, length(windows))
             _brm_svi_centering_activated!(run, c)
+            recovered && _brm_svi_recovered_exploring!(run, c)
             return :window
         end
         # The ELBO test cannot see a global that still drifts steadily, and
@@ -1932,7 +1946,7 @@ function _brm_svi_finish_interval!(run, t, c, phase, synchronize! = identity)
         drift = _brm_svi_exploration_drift(run, c)
         previous_drift = drift === nothing ? nothing :
             get(_brm_svi_stationarity_state(run).report, :drift, nothing)
-        if drift !== nothing && drift.held
+        if !recovered && drift !== nothing && drift.held
             _brm_svi_note_drift!(run, drift, previous_drift)
             return :window
         end
@@ -1945,6 +1959,7 @@ function _brm_svi_finish_interval!(run, t, c, phase, synchronize! = identity)
         # With no settling phase, exploration must pass before averaging starts.
         !stationary && _brm_svi_settle_windows(c) == 0 && return :window
         synchronize!(:state)
+        _brm_svi_recovery_close!(run)
         _brm_svi_stationarity_explored!(run, c)
         clipped = run.adam.clipped
         run.adam = _brm_svi_adam(run.q, c.polish_lr)
@@ -1963,6 +1978,8 @@ function _brm_svi_centering_activated!(run, c)
     end
     run.entropy_sum = sum(run.unit_entropy; init=0.0)
     _brm_svi_stationarity_restart_units!(run, c)
+    # A saved recovery reference is in the frame the units just left.
+    run.sampling = Base.structdiff(run.sampling, NamedTuple{(:reference,)})
     run
 end
 
@@ -2274,7 +2291,7 @@ end
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing,
         global_coordinates=nothing, progress=nothing, stationarity=true,
-        stop_after=nothing, checkpoint_every=nothing, threads=nothing,
+        restore_best=true, stop_after=nothing, checkpoint_every=nothing, threads=nothing,
         kwargs...) -> (; draws, coordinates, diagnostics)
 
 Minibatch stochastic variational inference for a model whose subjects are
@@ -2537,7 +2554,7 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 - `stationarity=true` requires stable parameter iterates before certifying
   convergence. Exploration may reduce its step on an ELBO plateau while
   moments still move; this is a step change, not a convergence certificate.
-  It does not reduce it while a global still drifts steadily: when the ELBO
+  A steady drift can extend exploration. When the ELBO
   test passes, exploration goes on unless some recent window of the globals'
   mean and marginal log sd iterates reads split-Rhat at most 1.5 (a steady
   drift reads about 2), because settling's scale-relative step cannot finish
@@ -2545,6 +2562,24 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `max_iterations`; `diagnostics.stationarity.exploration.drift` reports its
   last reading, the windows it held and whether the half-budget cap ended it.
   It is off with `settle_windows=0` and in checkpoints written before it existed.
+  With this gate enabled and `restore_best=true` (the default), exploration
+  retains the factor at the best mean trimmed ELBO across non-overlapping groups
+  of `max(patience, 4)` windows. If both halves of a later group fall
+  significantly below it, 32 paired draws compare the two factors independently
+  of training, sampling at most 32 units per draw. When the earlier factor
+  scores higher by over three paired standard errors, settling starts from its
+  factors, learned coordinates and sparse sites. A factor restored before a
+  deferred `LearnedCentering` has activated is centred there and explores on;
+  the reference starts afresh whenever centering activates. Settling keeps a
+  reference of its own in the same way. When the comparison confirms that
+  settling has lost it, averaging starts from the saved factor and the fit ends
+  with status `:settle_limit`, not converged. The iteration count and
+  convergence checks continue throughout. A restore warns, naming both
+  iterations and the measured loss. It guards the fit against the step walking
+  away from a better approximation; it does not repair that step.
+  `restore_best=false` keeps the live factor, as before. Comparisons, when made,
+  are in `diagnostics.stationarity.exploration.score_checks` and, for settling,
+  `diagnostics.stationarity.current.score_checks`.
   A fit that ends without converging warns, naming the globals still moving.
   The check reads every global and unit mean and marginal
   log sd, plus learned centering controls and linear coupling coefficients.
@@ -2717,8 +2752,9 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         patience=10, min_windows=40, polish_windows=20,
         settle_windows=nothing, centering=missing, coupling=missing,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=nothing, stationarity=true,
-        unit_reoptimize=0, sparse_globals=:sites, kwargs...)
+        restore_best=true, unit_reoptimize=0, sparse_globals=:sites, kwargs...)
     stationarity isa Bool || throw(ArgumentError("brm_svi_fit: stationarity must be a Bool"))
+    restore_best isa Bool || throw(ArgumentError("brm_svi_fit: restore_best must be a Bool"))
     sparse_globals in (:sites, :collapsed) || throw(ArgumentError(
         "brm_svi_fit: sparse_globals must be :sites or :collapsed, got $(repr(sparse_globals))"))
     unit_reoptimize isa Integer && unit_reoptimize >= 0 || throw(ArgumentError(
@@ -2760,7 +2796,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             steps..., polish_lr, window, patience, min_windows, polish_windows,
             settle_windows, unit_curvature, sd_bound, trend_windows, stationarity,
-            unit_reoptimize=Int(unit_reoptimize), sparse_globals,
+            restore_best, unit_reoptimize=Int(unit_reoptimize), sparse_globals,
             unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))

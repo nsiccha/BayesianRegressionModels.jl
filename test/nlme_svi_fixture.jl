@@ -3,6 +3,7 @@
 # test/nlme_svi_threads.jl).
 include(joinpath(@__DIR__, "fitting_packages.jl"))
 using BayesianRegressionModels, Random
+import Serialization
 using LinearAlgebra: cholesky
 
 # Whether two runs or results are the same to the last bit. The Adam moments
@@ -26,13 +27,23 @@ svi_same_centering(a, b) = hasproperty(a, :centering) == hasproperty(b, :centeri
         isequal(get(a.centering, :active, nothing), get(b.centering, :active, nothing)) &&
         length(a.centering.opt) == length(b.centering.opt) &&
         all(svi_same_adam.(a.centering.opt, b.centering.opt)))
+# A recovery reference contains detached mutable optimizer and site arrays.
+function svi_same_sampling(a, b)
+    keys(a) == keys(b) || return false
+    rest(x) = Base.structdiff(x, NamedTuple{(:reference,)})
+    isequal(rest(a), rest(b)) || return false
+    hasproperty(a, :reference) || return true
+    bytes(r) = (io = IOBuffer(); Serialization.serialize(io, r); take!(io))
+    bytes(a.reference) == bytes(b.reference)
+end
+
 svi_same_run(a, b) = svi_same_adam(a.adam, b.adam) && svi_same_q(a.q, b.q) &&
     (a.average === nothing ? b.average === nothing :
         b.average !== nothing && svi_same_q(a.average, b.average)) &&
     all(n -> isequal(getfield(a.sampler, n), getfield(b.sampler, n)),
-        fieldnames(typeof(a.sampler))) && a.rng == b.rng &&
+        fieldnames(typeof(a.sampler))) && a.rng == b.rng && svi_same_sampling(a.sampling, b.sampling) &&
     all(n -> isequal(getfield(a, n), getfield(b, n)),
-        (:iteration, :trace, :windows, :polish_start, :converged, :sampling,
+        (:iteration, :trace, :windows, :polish_start, :converged,
          :unit_gradient_calls, :averaged_through, :unit_entropy, :entropy_sum))
 svi_same_state(a, b) = svi_same_run(a.run, b.run) && isequal(a.identity, b.identity) &&
     isequal(a.controls, b.controls)

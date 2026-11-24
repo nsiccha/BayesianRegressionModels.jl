@@ -67,7 +67,14 @@ svi_stationarity_roundtrip(x) = (io = IOBuffer(); serialize(io, x); seekstart(io
     # The overall budget also reserves final averaging after settling starts.
     # A non-round limit consumes its last partial window, without certifying
     # stationarity or changing the stream when resumed across the transition.
-    budget_options = merge(options, (; max_iterations=d.stages.exploring + 2403))
+    # The drift gate's cap is half the budget, so under a small budget exploration
+    # ends at its ELBO test's first pass, before the full fit's gated end. The
+    # budget is counted from that end.
+    probe = brm_svi_fit(m; rng=Xoshiro(802), options..., ndraws=0,
+        max_iterations=d.stages.exploring + 2403, stop_after=d.stages.exploring)
+    explored = probe.diagnostics.stages.exploring
+    @test 2403 < explored <= d.stages.exploring
+    budget_options = merge(options, (; max_iterations=explored + 2403))
     empty!(statuses)
     budget = brm_svi_fit(m; rng=Xoshiro(802), budget_options...,
         snapshot=s -> push!(statuses, s.status))
@@ -121,4 +128,95 @@ end
     @test svi_same_state(brm_svi_optimizer_checkpoint(resumed),
         brm_svi_optimizer_checkpoint(full))
     @test isequal(resumed.diagnostics.stationarity, full.diagnostics.stationarity)
+end
+
+@stestset "exploration restores an independently higher-scoring factor and resumes exactly" begin
+    data = svi_gauss_data(Xoshiro(801), 8; nobs=12)
+    m = brm_nlme_model(RKBRMI(svi_gauss_model(data)); ad_backend=NLME_AD)
+    fit = brm_svi_fit(m; rng=Xoshiro(802), window=8, patience=4, min_windows=16,
+        max_iterations=256, batch_size=8, centering=LearnedCentering(; delay=false),
+        stop_after=96, ndraws=0)
+    state = brm_svi_optimizer_checkpoint(fit)
+    reference = state.run.sampling.reference
+    @test reference.q !== state.run.q
+    unperturbed = deepcopy(state.run.q)
+    # Inflate the residual scale well beyond its saved fit. No unit can absorb
+    # that, and exploration's step undoes little of it in four windows, so the
+    # loss is sustained. All training windows so far are genuine.
+    slot = only(findall(==("sigma"), string.(m.view.coordinates[fit.diagnostics.globals])))
+    state.run.q.μ[slot] += 3
+    restored = brm_svi_resume(m, state; stop_after=32, ndraws=0)
+    d = restored.diagnostics
+    score = only(d.stationarity.exploration.score_checks)
+    @test score.restored && score.loss > 3score.se
+    @test score.reference_iteration == reference.iteration && score.iteration == 128
+    @test score.unit_evaluations == 2score.draws * 8
+    @test svi_same_q(d.q, reference.q)
+    @test d.stages.exploring == 128 && !d.converged
+    @test !hasproperty(d.optimizer.run.sampling, :reference)
+
+    before = brm_svi_resume(m, state; stop_after=17, ndraws=0)
+    mid = svi_stationarity_roundtrip(brm_svi_optimizer_checkpoint(before))
+    resumed = brm_svi_resume(m, mid; stop_after=27, ndraws=7)
+    direct = brm_svi_resume(m, state; stop_after=44, ndraws=7)
+    @test svi_same_result(resumed, direct)
+    @test svi_same_state(resumed.diagnostics.optimizer, direct.diagnostics.optimizer)
+    @test svi_same_state(mid, before.diagnostics.optimizer)
+
+    old = brm_svi_optimizer_checkpoint(state)
+    old.run.sampling = Base.structdiff(old.run.sampling, NamedTuple{(:reference,)})
+    controls = Base.structdiff(old.controls, NamedTuple{(:restore_best,)})
+    legacy = BRMSVIOptimizerState(old.format, old.identity, old.previous, controls, old.run)
+    previous = brm_svi_resume(m, legacy; stop_after=32, ndraws=0)
+    @test previous.diagnostics.q.μ[slot] > reference.q.μ[slot] + 2
+    @test !hasproperty(previous.diagnostics.optimizer.run.sampling, :reference)
+
+    # The public switch: no reference is kept and the live factor stays.
+    plain = brm_svi_fit(m; rng=Xoshiro(802), window=8, patience=4, min_windows=16,
+        max_iterations=256, batch_size=8, centering=LearnedCentering(; delay=false),
+        stop_after=96, ndraws=0, restore_best=false)
+    @test !plain.diagnostics.optimizer.controls.restore_best
+    @test !hasproperty(plain.diagnostics.optimizer.run.sampling, :reference)
+    @test svi_same_q(plain.diagnostics.q, unperturbed)
+    @test_throws ArgumentError brm_svi_fit(m; restore_best=:on, max_iterations=8)
+end
+
+@stestset "a factor restored before deferred centering activates is centred and explores on" begin
+    BRM = BayesianRegressionModels
+    data = svi_gauss_data(Xoshiro(801), 8; nobs=12)
+    m = brm_nlme_model(RKBRMI(svi_gauss_model(data)); ad_backend=NLME_AD)
+    fit = brm_svi_fit(m; rng=Xoshiro(802), window=8, patience=4, min_windows=16,
+        max_iterations=256, batch_size=8, stop_after=96, ndraws=0)
+    state = brm_svi_optimizer_checkpoint(fit)
+    @test BRM._brm_svi_centering_deferred(state.run.q)
+    reference = state.run.sampling.reference
+    @test BRM._brm_svi_centering_deferred(reference.q)
+    slot = only(findall(==("sigma"), string.(m.view.coordinates[fit.diagnostics.globals])))
+    state.run.q.μ[slot] += 3
+    restored = brm_svi_resume(m, state; stop_after=32, ndraws=0)
+    d = restored.diagnostics
+    run = d.optimizer.run
+    score = only(run.sampling.score_checks)
+    @test score.restored && score.reference_iteration == reference.iteration
+    # The restored factor is centred where the abandoned one would have been, and
+    # exploration goes on from it with a fresh reference.
+    @test BRM._brm_svi_centering_activation(run.q) == 16
+    @test run.q.μ == reference.q.μ
+    @test d.stages.exploring == 128 && d.stages.settling == 0 && !d.converged
+    @test !hasproperty(run.sampling, :reference)
+    @test BRM._brm_svi_stationarity_state(run).globals.count == 0
+
+    # No reference outlives centering's activation, restored or not.
+    later = brm_svi_resume(m, restored; stop_after=32, ndraws=0).diagnostics.optimizer.run
+    if hasproperty(later.sampling, :reference)
+        @test later.sampling.reference.iteration > 128
+        @test !BRM._brm_svi_centering_deferred(later.sampling.reference.q)
+    end
+
+    before = brm_svi_resume(m, state; stop_after=17, ndraws=0)
+    mid = svi_stationarity_roundtrip(brm_svi_optimizer_checkpoint(before))
+    resumed = brm_svi_resume(m, mid; stop_after=27, ndraws=7)
+    direct = brm_svi_resume(m, state; stop_after=44, ndraws=7)
+    @test svi_same_result(resumed, direct)
+    @test svi_same_state(resumed.diagnostics.optimizer, direct.diagnostics.optimizer)
 end

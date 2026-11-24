@@ -75,6 +75,146 @@ end
 using Test, Random, LinearAlgebra, Serialization
 const SU = SVIUnitArithmetic
 
+@testset "a sustained loss must survive independent rescoring before restoring" begin
+    t = SU.GaussianUnits([1], [[2]], (; footprints=[[1, 2]]))
+    q = SU._brm_svi_params(t, [0.0], SU.MeanFieldGlobal(); global_scale=0.2, unit_scale=1.0)
+    q0 = deepcopy(q)
+    c = SU._brm_svi_controls(1; batch_size=1, max_iterations=500, lr_global=0.0,
+        unit_step=0.0, polish_lr=0.01, window=4, patience=4, min_windows=8, polish_windows=2)
+    run = SU._brm_svi_run(Xoshiro(84), q, c, t)
+    for _ in 1:4c.window
+        SU._brm_svi_advance!(run, t, c)
+    end
+    reference = deepcopy(run.sampling.reference)
+    @test reference.iteration == run.iteration
+    # An apparently better training trace alone is insufficient. Identical
+    # factors get exactly matching draws and the optimizer's RNG stays put.
+    held_rng = copy(run.rng)
+    same = SU._brm_svi_compare(run, t, c, reference)
+    @test same.loss == same.se == 0 && !same.restored
+    @test run.rng == held_rng
+
+    run.q.μ[1] += 30
+    run.q.M[1][1] -= 10
+    old = Base.structdiff(c, NamedTuple{(:restore_best,)})
+    saved = deepcopy(run)
+    buf = IOBuffer()
+    serialize(buf, saved)
+    seekstart(buf)
+    resumed = deserialize(buf)
+    for r in (run, resumed)
+        for _ in 1:4c.window
+            SU._brm_svi_advance!(r, t, c)
+        end
+        report = SU._brm_svi_stationarity_state(r).exploration
+        check = only(report.score_checks)
+        @test check.reference_iteration == 16 && check.iteration == 32
+        @test check.restored && check.loss > 3check.se
+        @test check.unit_evaluations == 2check.draws
+        @test r.q.μ == reference.q.μ && r.q.M == reference.q.M
+        @test !hasproperty(r.sampling, :reference) && SU._brm_svi_settling(r, c)
+        @test !r.converged
+        SU._brm_svi_fit!(r, t, c; stop_after=11)
+    end
+    @test run.q.μ == resumed.q.μ && run.q.M == resumed.q.M
+    @test run.rng == resumed.rng && run.trace == resumed.trace
+    # A checkpoint produced before references existed retains its old policy.
+    saved.sampling = Base.structdiff(saved.sampling, NamedTuple{(:reference,)})
+    for _ in 1:4c.window
+        SU._brm_svi_advance!(saved, t, old)
+    end
+    @test saved.q.μ != reference.q.μ && !hasproperty(saved.sampling, :reference)
+    # Switched off, exploration keeps no reference and compares nothing.
+    off = SU._brm_svi_controls(1; batch_size=1, max_iterations=500, lr_global=0.0,
+        unit_step=0.0, polish_lr=0.01, window=4, patience=4, min_windows=8, polish_windows=2,
+        restore_best=false)
+    plain = SU._brm_svi_run(Xoshiro(84), deepcopy(q0), off, t)
+    for _ in 1:8c.window
+        SU._brm_svi_advance!(plain, t, off)
+    end
+    @test !hasproperty(plain.sampling, :reference) && !hasproperty(plain.sampling, :score_checks)
+end
+
+@testset "a sustained loss during settling ends it at the saved factor" begin
+    t = SU.GaussianUnits([1], [[2]], (; footprints=[[1, 2]]))
+    q = SU._brm_svi_params(t, [0.0], SU.MeanFieldGlobal(); global_scale=0.2, unit_scale=1.0)
+    c = SU._brm_svi_controls(1; batch_size=1, max_iterations=500, lr_global=0.0,
+        unit_step=0.0, polish_lr=0.0, window=4, patience=4, min_windows=8, polish_windows=2)
+    run = SU._brm_svi_run(Xoshiro(84), q, c, t)
+    # Exploration loses its factor and settling starts from the saved one.
+    for _ in 1:4c.window
+        SU._brm_svi_advance!(run, t, c)
+    end
+    run.q.μ[1] += 30
+    for _ in 1:4c.window
+        SU._brm_svi_advance!(run, t, c)
+    end
+    @test SU._brm_svi_settling(run, c) && !hasproperty(run.sampling, :reference)
+    explored = SU._brm_svi_explored(run, c)
+    # Settling's first complete group becomes its own reference.
+    for _ in 1:4c.window
+        SU._brm_svi_advance!(run, t, c)
+    end
+    reference = deepcopy(run.sampling.reference)
+    @test reference.iteration == run.iteration == (explored + 4) * c.window
+    @test !hasproperty(run.sampling, :score_checks)
+    run.q.μ[1] -= 30
+    saved = deepcopy(run)
+    buf = IOBuffer(); serialize(buf, saved); seekstart(buf)
+    resumed = deserialize(buf)
+    for r in (run, resumed)
+        for _ in 1:4c.window
+            SU._brm_svi_advance!(r, t, c)
+        end
+        h = SU._brm_svi_stationarity_state(r)
+        check = only(h.report.score_checks)
+        @test check.phase === :settling && check.restored && check.loss > 3check.se
+        @test check.reference_iteration == reference.iteration
+        # Averaging starts at the saved factor; nothing is certified.
+        @test SU._brm_svi_polishing(r) && r.polish_start == r.iteration
+        @test r.q.μ == reference.q.μ && r.q.M == reference.q.M
+        @test !hasproperty(r.sampling, :reference) && !hasproperty(r.sampling, :score_checks)
+        @test only(h.exploration.score_checks).phase === :exploring
+        SU._brm_svi_fit!(r, t, c)
+        @test !r.converged && SU._brm_svi_end_status(r, c) === :settle_limit
+        @test r.iteration == r.polish_start + c.polish_windows * c.window
+    end
+    @test run.rng == resumed.rng && run.trace == resumed.trace
+    @test run.average.μ == resumed.average.μ
+end
+
+@testset "a device block supplies its current factor when recovery needs it" begin
+    t = SU.GaussianUnits([1], [[2]], (; footprints=[[1, 2]]))
+    q = SU._brm_svi_params(t, [0.0], SU.MeanFieldGlobal(); global_scale=0.2, unit_scale=1.0)
+    c = SU._brm_svi_controls(1; batch_size=1, max_iterations=500, lr_global=0.0,
+        unit_step=0.0, polish_lr=0.01, window=4, patience=4, min_windows=8, polish_windows=2)
+    run = SU._brm_svi_run(Xoshiro(84), q, c, t)
+    pulled = Int[]
+    device_mean = Ref(0.0)
+    function step!(n, phase)
+        in_reference_group = mod(run.iteration, 8c.window) < 4c.window
+        if run.iteration == 8c.window
+            @test phase === :settling
+            @test only(run.q.μ) == 1.0
+        end
+        device_mean[] = (phase === :exploring ? 1.0 : 2.0) + (in_reference_group ? 0.0 : 30.0)
+        append!(run.trace, fill(in_reference_group ? 0.0 : -100.0, n))
+        run.iteration += n
+    end
+    function synchronize!(what)
+        if what === :state && (isempty(pulled) || last(pulled) != run.iteration)
+            push!(pulled, run.iteration)
+            run.q.μ[1] = device_mean[]
+        end
+    end
+    SU._brm_svi_fit!(run, t, c; stop_after=16c.window, device_step! = step!, synchronize!)
+    @test pulled == [16, 32, 48, 64]
+    @test SU._brm_svi_polishing(run) && !run.converged
+    @test only(run.q.μ) == only(run.average.μ) == 2.0
+    h = SU._brm_svi_stationarity_state(run)
+    @test only(h.exploration.score_checks).restored && only(h.report.score_checks).restored
+end
+
 # Fits `SU.TightUnit` for `iterations` at a structured step: the factor's KL from the target
 # and its largest marginal sd in target sds.
 function tight_unit_fit(t, rank, step; iterations=5000, dense_step=1.0, rank_step=1.0)

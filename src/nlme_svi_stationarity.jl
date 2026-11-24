@@ -340,7 +340,7 @@ function _brm_svi_stationarity_report(run)
        checks=h.checks, exploration=h.exploration, current=h.report, settled=h.settled))
 end
 
-_brm_svi_sampling_report(run) = Base.structdiff(run.sampling, NamedTuple{(:stationarity,)})
+_brm_svi_sampling_report(run) = Base.structdiff(run.sampling, NamedTuple{(:stationarity, :reference, :score_checks)})
 
 function _brm_svi_stationarity_consistent(run, c)
     _brm_svi_stationarity_enabled(c) || return true

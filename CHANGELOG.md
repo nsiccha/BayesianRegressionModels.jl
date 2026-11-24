@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.393
+
+- Minibatch SVI keeps the best factor of exploration and of settling and can
+  return to it when the objective falls. A comparison on fresh paired draws
+  checks the loss first. After a loss in exploration, settling starts from the
+  saved factor; after one in settling, averaging starts from it and the fit
+  ends unconverged with status `:settle_limit`. A restore warns, and each
+  comparison records its phase, the two iterations, the scores and the Monte
+  Carlo standard error. `brm_svi_fit(...; restore_best=false)` keeps the live
+  factor, as before.
+
 ## 0.2.392
 
 - `brm_svi_fit` and `brm_svi_resume` accept `device=:gpu` with a loaded
