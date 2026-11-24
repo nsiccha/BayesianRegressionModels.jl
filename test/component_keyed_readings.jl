@@ -193,6 +193,43 @@ end
     end
 end
 
+const calibrated_sensors = @brm begin
+    gain ~ Normal(0, 1)
+    @plate for s in eachindex(x)
+        signal[s] = gain .* x[s]
+    end
+    for record in records
+        sensors[record.id] ~ reading_sensor(record, signal)
+    end
+    @plate for s in eachindex(calibration)
+        calibration[s] .~ Normal.(signal[s], 1)
+    end
+end
+
+@stestset "A fitted ragged calibration keeps each sensor's reading axis" begin
+    x = [[2., 1.], [3.]]
+    calibration = [[0.2, -0.1], [0.4]]
+    record = (; id=:a, picks=[[2, 1], Int[]], y=[[0.1, 0.8], Float64[]], scale=0.7)
+    rk, problem = consumer_problem(calibrated_sensors((; records=[record], x, calibration)))
+    names = coordinate_names(rk.model.layout)
+    bias = Symbol("sensors_member_all.offset.1")
+    @test Set(names) == Set([:gain, bias])
+    function oracle(u)
+        gain, offset = u[coordinate(names, :gain)], u[coordinate(names, bias)]
+        score = sum(logpdf.(Normal(), u))
+        for s in eachindex(x)
+            for (input, y) in zip(x[s], calibration[s])
+                score += logpdf(Normal(gain * input, 1), y)
+            end
+            for (row, y) in zip(record.picks[s], record.y[s])
+                score += logpdf(Normal(gain * x[s][row] + offset, record.scale), y)
+            end
+        end
+        score
+    end
+    check_consumer_point(problem, [0.3, -0.2], oracle)
+end
+
 @stestset "Repeated sensors score and return their own readings on replay" begin
     a = (; id=:a, picks=[[2, 1], Int[]], y=[[.3, -.2], Float64[]], scale=.7)
     b = (; id=:b, picks=[[1], [2]], y=[[.4], [.8]], scale=1.2)

@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.396
+
+- The ReactiveKernels backend now requires ReactiveKernelsPPL 0.1.259 or
+  later. A record component can score each subject's readings with a broadcast
+  likelihood alongside a second ragged response that uses a fitted predictor.
+
 ## 0.2.395
 
 - A plate cell can call `ode_rk45(rhs, y0, t0, ts, args...)` or `ode_bdf`
