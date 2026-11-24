@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.398
+
+- On the ReactiveKernels backend, a likelihood can read a named expression
+  that combines a data column with sampled parameters. For example,
+  `scale = sigma .* exposure` can supply the scale in `y ~ Normal(mu, scale)`.
+  The fitted model exposes `scale` to draw queries and recomputes it on new rows.
+
 ## 0.2.397
 
 - Stan replay with `resample_groups` now supports a record member that
