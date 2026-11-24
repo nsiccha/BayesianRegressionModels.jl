@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.392
+
+- `brm_svi_fit` and `brm_svi_resume` accept `device=:gpu` with a loaded
+  minibatch SVI runtime. BRM supplies its observation partition and authored
+  prior and Jacobian buckets, schedules optimizer windows and checkpoints,
+  and records the executor in `diagnostics.execution`. Julia on the CPU
+  remains the default. A GPU fit stops with an error when a low-rank
+  factor's diagonal scale becomes so small that the CPU fit switches to its
+  QR geometry (0.2.382). Continue from its last checkpoint with `device=:cpu`.
+  JAX fitting needs ReactiveKernels 0.1.369 and ReactiveKernelsPPL 0.1.256
+  or later.
+- `brm_fixed_hyper_fit(...; device=:gpu)` dispatches to the supplied
+  sampler's GPU method with the same free coordinates and fixed values used
+  by the CPU fit. The result includes the accelerator name in `execution`.
+
 ## 0.2.391
 
 - `brm_laplace_mode` accepts an L-BFGS step on Hager and Zhang's approximate

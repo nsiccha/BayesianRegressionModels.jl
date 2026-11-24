@@ -7,6 +7,8 @@
 # stationarity checks read MCMCDiagnosticTools' split-Rhat.
 include(joinpath(@__DIR__, "fitting_packages.jl"))
 import Serialization, MCMCDiagnosticTools, SparseArrays, SelectedInversion
+# The standalone module includes the optimizer without loading BRM's extension.
+_brm_rank_ess_rhat(x) = MCMCDiagnosticTools.ess_rhat(x; kind=:rank)
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange,
     blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract

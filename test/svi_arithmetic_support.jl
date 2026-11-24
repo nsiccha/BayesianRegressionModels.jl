@@ -1,5 +1,7 @@
 # Included inside the analytic-target test modules; drive the same production
 # run/advance/result path that public fits and optimizer checkpoints use.
+include(joinpath(@__DIR__, "..", "src", "nlme_svi_field_centering.jl"))  # packed diagnostic points
+
 function arithmetic_fit(rng, t, q; kwargs...)
     c = _brm_svi_controls(length(t.units); kwargs...)
     run = _brm_svi_run(rng, q, c, t)

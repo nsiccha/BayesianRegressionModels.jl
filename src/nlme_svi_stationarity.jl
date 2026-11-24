@@ -88,14 +88,14 @@ function _brm_svi_record_global!(h, q)
     slot[1:d] .= q.μ
     for j in 1:d
         # Marginal log SD: invariant to rotations of the low-rank loadings.
-        slot[d+j] = log(hypot(exp(q.ρ[j]), norm(view(q.Β, j, :))))
+        slot[d+j] = _svi_marginal_logsd(q.ρ[j], view(q.Β, j, :))
     end
 end
 
-_brm_svi_marginal_logsd(Λ::AbstractMatrix) = log.(diag(_brm_svi_unit_covariance(Λ))) ./ 2
+_brm_svi_marginal_logsd(Λ::AbstractMatrix) = _svi_dense_logsd(Λ)
 function _brm_svi_marginal_logsd(Λ::_BRMSVIUnitPrecision)
     f = Λ.factor
-    [log(hypot(exp(f.ρ[j]), norm(view(f.Β, j, :)))) for j in eachindex(f.ρ)]
+    [_svi_marginal_logsd(f.ρ[j], view(f.Β, j, :)) for j in eachindex(f.ρ)]
 end
 function _brm_svi_record_unit!(h, q, i)
     slot = _brm_svi_iterate_slot!(h)
@@ -111,7 +111,7 @@ function _brm_svi_record_unit!(h, q, i)
     if coupling !== nothing
         V = coupling.V[i]
         for (k, j) in enumerate(coupling.rows[i])
-            slot[d+j] = log(hypot(exp(slot[d+j]), norm(view(V, k, :))))
+            slot[d+j] = _svi_marginal_logsd(slot[d+j], view(V, k, :))
         end
         # Stable marginal widths can conceal a moving global-unit dependence.
         # Keep the represented coupling coefficients too, on this unit's clock.

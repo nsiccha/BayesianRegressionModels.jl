@@ -69,9 +69,9 @@ function Base.getindex(a::_BRMSVIUnitOperator, i::Int, j::Int)
     (a * e)[i]
 end
 
-_brm_svi_unit_logdet_root(U::AbstractMatrix) = sum(log, diag(U); init=0.0)
+_brm_svi_unit_logdet_root(U::AbstractMatrix) = -_svi_unit_entropy(U)
 _brm_svi_unit_logdet_root(U::_BRMSVIUnitRoot) =
-    -_brm_svi_global_logdet(_brm_svi_global_geometry(U.factor)) / 2
+    -_brm_svi_factor_logdet(U.factor) / 2
 
 function _brm_svi_unit_factors(d, scale, dense_limit, rank)
     if d <= dense_limit
@@ -88,16 +88,14 @@ _brm_svi_unit_noise(rng, U::_BRMSVIUnitRoot) =
 
 function _brm_svi_unit_offset(U::_BRMSVIUnitRoot, ε)
     f, d = U.factor, size(U, 1)
-    exp.(f.ρ) .* view(ε, 1:d) + f.Β * view(ε, d+1:length(ε))
+    _svi_structured_offset(f.ρ, f.Β, view(ε, 1:d), view(ε, d+1:length(ε)))
 end
 
 function _brm_svi_lowrank_gradient(f, gz, gd, ε)
     d = length(f.ρ)
     e, η = view(ε, 1:d), view(ε, d+1:length(ε))
-    h = _brm_svi_global_geometry(f)
-    δ = h.s .* e + f.Β * η
-    score = gd + _brm_svi_global_precision(h, δ)
-    vcat(gz, score .* h.s .* e, vec(score * η'))
+    _brm_svi_narrow(f) && return _brm_svi_narrow_gradient(f, gz, gd, e, η)
+    _svi_structured_gradient(f.ρ, f.Β, gz, gd, e, η)
 end
 
 function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β; rank=1.0)
@@ -108,18 +106,8 @@ function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β; rank=1.0)
     x = copy(old)
     # A unit's own Adam steps only when the unit is drawn, so its bound needs no √w.
     _brm_svi_whitened_global_step!(opt, q, x, gradient, β; clip=_BRM_SVI_GLOBAL_CLIP, rank)
-    Δ = x - old
-    d = length(mean)
-    h = _brm_svi_global_geometry(f)
-    # Bound mean displacement in old posterior sds and factor/scale changes
-    # relative to the old diagonal. One scalar shortens the whole Adam step.
-    δμ, δρ = view(Δ, 1:d), view(Δ, d+1:2d)
-    δΒ = reshape(view(Δ, 2d+1:length(Δ)), size(f.Β))
-    distance = sqrt(max(0.0, dot(δμ, _brm_svi_global_precision(h, δμ))))
-    relative = max(maximum(abs, δρ; init=0.0),
-        maximum(abs, δΒ ./ h.s; init=0.0))
-    fraction = min(1.0, 1 / distance, 0.5 / relative)
-    x .= old .+ fraction .* Δ
+    x .= _brm_svi_narrow(f) ? _brm_svi_narrow_trust(f, old, x) :
+        _svi_structured_trust(f.ρ, f.Β, old, x)
     all(isfinite, x) || error("brm_svi_fit: nonfinite low-rank unit parameters")
     _brm_svi_set_global!(q, x)
     nothing
@@ -131,8 +119,8 @@ function _brm_svi_unit_step!(Λ::_BRMSVIUnitPrecision, q, i, gz, gd, ε, β; ran
 end
 
 function _brm_svi_unit_average!(a::_BRMSVIUnitPrecision, x::_BRMSVIUnitPrecision, weight)
-    @. a.factor.ρ += weight * (x.factor.ρ - a.factor.ρ)
-    @. a.factor.Β += weight * (x.factor.Β - a.factor.Β)
+    a.factor.ρ .= _svi_weighted_average.(a.factor.ρ, x.factor.ρ, weight)
+    a.factor.Β .= _svi_weighted_average.(a.factor.Β, x.factor.Β, weight)
     a
 end
 
@@ -147,10 +135,9 @@ end
 # the raw iterate does. While polishing, a dense unit's `Λ` slot of the running
 # average therefore holds a covariance; `_brm_svi_unit_from_average!` turns it
 # back into a precision and its Cholesky factor.
-_brm_svi_unit_covariance(Λ::AbstractMatrix) =
-    isempty(Λ) ? copy(Λ) : inv(cholesky(Symmetric(Λ)))
+_brm_svi_unit_covariance(Λ::AbstractMatrix) = _svi_unit_covariance(Λ)
 function _brm_svi_unit_average!(a::AbstractMatrix, x::AbstractMatrix, weight)
-    a .+= weight .* (_brm_svi_unit_covariance(x) .- a)
+    a .= _svi_weighted_average.(a, _brm_svi_unit_covariance(x), weight)
     a
 end
 _brm_svi_unit_average_start!(a::_BRMSVIUnitPrecision) = a

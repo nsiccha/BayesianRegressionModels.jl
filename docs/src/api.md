@@ -47,6 +47,7 @@ BRMCoordinateTransportError
 BRMCutFamily
 BRMFilter
 BRMFilterSMC
+BRMFixedHyperProblem
 BRMFittedState
 BRMLaplacePlan
 BRMLaplaceProblem
@@ -89,6 +90,11 @@ brm_filter_checkpoint
 brm_filter_step
 brm_filter_stream
 brm_filter_tune
+brm_fixed_hyper_fit
+brm_fixed_hyper_point
+brm_fixed_hyper_problem
+BayesianRegressionModels.brm_fixed_hyper_sample
+brm_hyperparameters
 brm_fitted_state
 brm_laplace_integration
 brm_laplace_mode
@@ -123,6 +129,7 @@ brm_stan_logdensity_to_rk
 brm_start
 brm_svi_centeredness
 brm_svi_combine
+BayesianRegressionModels.brm_svi_device_runner
 brm_svi_fit
 brm_svi_optimizer_checkpoint
 brm_svi_resume

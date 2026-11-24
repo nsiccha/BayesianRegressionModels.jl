@@ -60,6 +60,7 @@ end
 _brm_svi_rank(::MeanFieldGlobal) = 0
 _brm_svi_rank(f::LowRankGlobal) = f.rank
 
+include("nlme_svi_kernels.jl")
 include("nlme_svi_sampling.jl")
 include("nlme_svi_workspace.jl")
 include("nlme_svi_units.jl")
@@ -360,6 +361,7 @@ end
 # `owner` (the unit owning each packed coordinate, 0 for none), the packed
 # coordinates each differentiates, and one query's value and compact gradient.
 function _rk_svi_factor_queries end
+function _rk_svi_factor_buckets end
 function _rk_svi_factor_coordinates end
 function _rk_svi_factor_value_gradient end
 
@@ -440,15 +442,15 @@ _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
 
 include("nlme_svi_geometry_qr.jl")
 
-# For ordinary scales the determinant lemma needs only an r × r Cholesky.
-# Switch before the roundoff in V'V costs half the precision of the identity
-# term. tr(V'V) bounds its largest eigenvalue.
+# For ordinary scales the determinant lemma needs only an r × r Cholesky, and
+# the shared kernels (nlme_svi_kernels.jl) hold that form for every runtime.
+# `_svi_narrow_geometry` names the factors that need the QR geometry instead.
+_brm_svi_narrow(f) = _svi_narrow_geometry(f.ρ, f.Β)
 function _brm_svi_global_geometry(q)
     s = exp.(q.ρ)
     V = q.Β ./ s
-    gram = V' * V
-    tr(gram) >= inv(sqrt(eps(Float64))) && return _brm_svi_qr_geometry(s, V)
-    K = cholesky(Symmetric(I + gram))
+    _brm_svi_narrow(q) && return _brm_svi_qr_geometry(s, V)
+    K = cholesky(Symmetric(I + V' * V))
     (; s, V, K)
 end
 
@@ -458,9 +460,12 @@ function _brm_svi_global_precision(h, x)
 end
 
 _brm_svi_global_logdet(h) = 2sum(log, h.s; init=0.0) + logdet(h.K)
+function _brm_svi_factor_logdet(f)
+    _brm_svi_narrow(f) || return _svi_global_logdet(f.ρ, f.Β)
+    _brm_svi_global_logdet(_brm_svi_global_geometry(f))
+end
 
 _brm_svi_entropy_diagonal(h) = 1 .- vec(sum(abs2, h.V / h.K.U; dims=2))
-_brm_svi_entropy_gradients(h, Β) = _brm_svi_entropy_diagonal(h), _brm_svi_global_precision(h, Β)
 
 # C = diag(s) (I + V A V'), C C' = diag(s²) + ΒΒ'. The stable divided
 # difference 1/(sqrt(1+λ)+1) also works when a rank column is initially zero.
@@ -469,25 +474,22 @@ function _brm_svi_sqrt_axes(h)
     h.V * E.vectors, sqrt.(1 .+ max.(E.values, 0))
 end
 function _brm_svi_global_sqrt(h)
-    W, root = _brm_svi_sqrt_axes(h)
-    (; s=h.s, W, a=1 ./ (root .+ 1))
+    W, a = _svi_structured_sqrt_basis(h.V)
+    (; s=h.s, W, a)
 end
-_brm_svi_global_sqrt_mul(c, x) = c.s .* (x + c.W * (c.a .* (c.W' * x)))
-_brm_svi_global_sqrt_tmul(c, x) = begin
-    y = c.s .* x
-    y + c.W * (c.a .* (c.W' * y))
-end
+_brm_svi_global_sqrt_mul(c, x) = _svi_structured_sqrt_action(c.s, c.W, c.a, x, false)
+_brm_svi_global_sqrt_tmul(c, x) = _svi_structured_sqrt_action(c.s, c.W, c.a, x, true)
 
 # A draw of the globals from its two standard normal parts.
-_brm_svi_draw_global(q, ε, η) = q.μ .+ exp.(q.ρ) .* ε .+ q.Β * η
+_brm_svi_draw_global(q, ε, η) = _svi_global_draw(q.μ, q.ρ, q.Β, ε, η)
 # A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
 # factor of the precision Λ_i.
-_brm_svi_unit_offset(U::AbstractMatrix, ε) = LowerTriangular(U)' \ ε
+_brm_svi_unit_offset(U::AbstractMatrix, ε) = _svi_unit_offset(U, ε)
 _brm_svi_unit_offset(q, i, εi) = _brm_svi_unit_offset(q.U[i], εi)
 _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
-_brm_svi_entropy(q) = _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 -
+_brm_svi_entropy(q) = _brm_svi_factor_logdet(q) / 2 -
     sum(_brm_svi_unit_logdet_root, q.U; init=0.0)
 _brm_svi_unit_entropy(q, i) = -_brm_svi_unit_logdet_root(q.U[i])
 
@@ -531,11 +533,7 @@ const _BRM_SVI_GLOBAL_CLIP = 10.0
 function _brm_svi_clip(opt::_BRMSVIAdam, g, clip)
     isfinite(clip) && opt.t > 0 || return g
     b2 = 1 - opt.β2^opt.t
-    bounded = map(g, opt.v) do gi, vi
-        iszero(vi) && return gi
-        limit = clip * sqrt(vi / b2)
-        clamp(gi, -limit, limit)
-    end
+    bounded = _svi_clip_gradient(g, opt.v, b2, clip)
     bounded == g || (opt.clipped += 1)
     bounded
 end
@@ -544,10 +542,11 @@ end
 function _brm_svi_step!(opt::_BRMSVIAdam, x, g, lr=opt.lr; clip=Inf)
     g = _brm_svi_clip(opt, g, clip)
     opt.t += 1
-    @. opt.m = opt.β1 * opt.m + (1 - opt.β1) * g
-    @. opt.v = opt.β2 * opt.v + (1 - opt.β2) * g^2
     b1, b2 = 1 - opt.β1^opt.t, 1 - opt.β2^opt.t
-    @. x += lr * (opt.m / b1) / (sqrt(opt.v / b2) + 1e-8)
+    for k in eachindex(x, opt.m, opt.v, g)
+        x[k], opt.m[k], opt.v[k] = _svi_adam(x[k], opt.m[k], opt.v[k], g[k],
+            opt.β1, opt.β2, b1, b2, lr)
+    end
     x
 end
 
@@ -564,11 +563,10 @@ end
 # The gradient of the global vector from w, the ELBO's gradient in the global
 # coordinates, the draw's (ε, η), and the entropy's own gradient.
 function _brm_svi_global_gradient(q, w, ε, η)
-    h = _brm_svi_global_geometry(q)
-    diagonal, loading = _brm_svi_entropy_gradients(h, q.Β)
-    gρ = w .* ε .* h.s .+ diagonal
-    gΒ = w * η' .+ loading
-    vcat(w, gρ, vec(gΒ))
+    diagonal, loading = _brm_svi_narrow(q) ?
+        _brm_svi_entropy_gradients(_brm_svi_global_geometry(q), q.Β) :
+        _svi_global_entropy(q.ρ, q.Β)
+    _svi_global_gradient(w, ε, η, exp.(q.ρ), diagonal, loading)
 end
 
 # A scale-preconditioned ("whitened") step: μ moves in units of a square root of
@@ -578,17 +576,14 @@ end
 # factor (`_brm_svi_polish_global_step!`) and steps a structured unit factor
 # (`_brm_svi_lowrank_step!`).
 function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
-    D = length(q.μ)
-    C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
-    scale = vcat(ones(D), rank .* vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
-    grad = copy(grad)
-    grad[1:D] .= _brm_svi_global_sqrt_tmul(C, view(grad, 1:D))
-    rest = D+1:length(x)
-    grad[rest] .*= scale
-    step = zeros(length(x))
-    _brm_svi_step!(opt, step, grad, lr; clip)
-    x[1:D] .+= _brm_svi_global_sqrt_mul(C, view(step, 1:D))
-    x[rest] .+= scale .* view(step, rest)
+    _brm_svi_narrow(q) && return _brm_svi_narrow_whitened_step!(opt, q, x, grad, lr; clip, rank)
+    proposed, m, v, t, clipped = _svi_structured_adam(q.ρ, q.Β, x, grad, opt.m, opt.v,
+        opt.t, opt.β1, opt.β2, lr, rank, clip)
+    x .= proposed
+    opt.m .= m
+    opt.v .= v
+    opt.t = t
+    opt.clipped += clipped
     x
 end
 
@@ -613,14 +608,10 @@ function _brm_svi_exploration_global_step!(opt, q, x, grad, lr; clip=Inf)
     r = size(q.Β, 2)
     r == 0 && return _brm_svi_step!(opt, x, grad, lr; clip)
     D = length(q.μ)
-    scale = repeat(exp.(q.ρ), r)
-    rank = 2D+1:length(x)
-    grad = copy(grad)
-    grad[rank] .*= scale
+    scale = _svi_global_step_scale(q.ρ, q.Β, ones(D), 1.0)
     step = zeros(length(x))
-    _brm_svi_step!(opt, step, grad, lr; clip)
-    x[1:2D] .+= view(step, 1:2D)
-    x[rank] .+= scale .* view(step, rank)
+    _brm_svi_step!(opt, step, grad .* scale, lr; clip)
+    x .+= scale .* step
     x
 end
 
@@ -631,11 +622,7 @@ end
 #
 #
 function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
-    r = size(q.Β, 2)
-    r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
-    D = length(q.μ)
-    s = exp.(q.ρ)
-    scale = vcat(s, ones(D), rank .* repeat(s, r))
+    scale = _svi_global_step_scale(q.ρ, q.Β, exp.(q.ρ), rank)
     step = zeros(length(x))
     _brm_svi_step!(opt, step, grad .* scale, lr; clip)
     x .+= scale .* step
@@ -653,16 +640,11 @@ _brm_svi_rank_step_ratio(c) = min(1.0, c.lr_global / c.polish_lr)
 # whose only nonzero eigenvalues are (wᵀε ± ‖w‖‖ε‖)/2, on ŵ ± ε̂, so it needs no
 # eigensolver and costs O(d²) for the triangular solve.
 function _brm_svi_unit_curvature(U, gd, εi)
-    w = -(U \ gd)
-    a, b = norm(w), norm(εi)
-    (iszero(a) || iszero(b)) && return 0.0, zero(w)
-    λ = (dot(w, εi) + a * b) / 2
+    w = _svi_whitened_difference(U, gd)
+    λ, e = _svi_curvature_axis(w, εi)
     isfinite(λ) || throw(ArgumentError(
         "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
-    e = w ./ a .+ εi ./ b
-    n = norm(e)
-    # ŵ = -ε̂: the estimate is negative semidefinite, its positive part zero.
-    iszero(n) ? (0.0, zero(w)) : (λ, e ./ n)
+    λ, e
 end
 
 # The largest relative change of a subject's precision in one step: no
@@ -722,18 +704,17 @@ function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β; rank=1.0)
     isempty(q.M[i]) && return q
     U = LowerTriangular(q.U[i])
     λ, e = _brm_svi_unit_curvature(U, gd, εi)
-    v = U * e
-    G = Symmetric(λ .* (v * v') .- q.Λ[i])
     # U⁻¹ G U⁻ᵀ = λ e eᵀ - I: its eigenvalues are λ - 1 and, above d = 1, -1.
-    r = max(abs(λ - 1), length(e) > 1 ? 1.0 : 0.0)
-    β = min(β, _BRM_SVI_UNIT_TRUST / r)
-    R = qr(vcat(Matrix(U'), U \ (q.Λ[i] .+ β .* G))).R
-    L = LowerTriangular(R' * Diagonal(sign.(diag(R))) ./ sqrt(2))
-    Δ = β .* (L' \ (L \ gz))
-    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
-    q.U[i] .= L
-    q.Λ[i] .= L * L'
-    q.M[i] .+= Δ
+    stack, step = _svi_pair_stack(U, q.Λ[i], λ, e, β, _BRM_SVI_UNIT_TRUST)
+    _brm_svi_commit_dense_step!(q, i, U, stack, gz, step)
+end
+
+function _brm_svi_commit_dense_step!(q, i, root, stack, gradient, step)
+    mean, precision, next_root = _svi_dense_update(q.M[i], root, stack, gradient,
+        step, _BRM_SVI_UNIT_MEAN_TRUST)
+    copyto!(q.M[i], mean)
+    copyto!(q.Λ[i], precision)
+    copyto!(q.U[i], next_root)
     q
 end
 
@@ -769,16 +750,25 @@ _brm_svi_dense_unit(q, i) = !(q.U[i] isa _BRMSVIUnitRoot) && !isempty(q.M[i])
 # The whitened draws of unit i for one iteration: a vector for a pair, the
 # d × d design E = √d Q for an orthogonal design. Drawn in batch order from the
 # run's `rng`, before any unit is evaluated.
-_brm_svi_unit_draws(rng, q, i, curvature) =
+_brm_svi_unit_draws(rng, q, i, curvature, design=_brm_svi_unit_design) =
     curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
-        _brm_svi_unit_design(rng, length(q.M[i])) : _brm_svi_unit_noise(rng, q.U[i])
+        design(rng, length(q.M[i])) : _brm_svi_unit_noise(rng, q.U[i])
 
+_brm_svi_design_normals(rng, d) = randn(rng, d, d)
 function _brm_svi_unit_design(rng, d)
-    F = qr(randn(rng, d, d))
     # Q from Householder QR is Haar-distributed once each column takes the sign
     # of R's diagonal (Mezzadri 2007, "How to generate random matrices from the
     # classical compact groups").
-    Matrix(F.Q) .* (sqrt(d) .* [r < 0 ? -1.0 : 1.0 for r in diag(F.R)]')
+    _svi_unit_design(_brm_svi_design_normals(rng, d))
+end
+
+function _brm_svi_local_draws(rng, q, batch, curvature, reoptimize, design)
+    units = [_brm_svi_unit_draws(rng, q, i, curvature, design) for i in batch]
+    # All primary unit draws precede the re-optimization draws in the saved stream.
+    reoptimization = reoptimize == 0 ? nothing :
+        [curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
+            [design(rng, length(q.M[i])) for _ in 1:reoptimize] : nothing for i in batch]
+    (; units, reoptimization)
 end
 
 # Unit-gradient attempts per visit, including the auxiliary baseline and the
@@ -883,9 +873,9 @@ function _brm_svi_newton_factor(U, gz, S; positive=true)
     b = _BRM_SVI_REOPT_PRECISION_BOUND
     f = clamp.(F.values, 1 / b, b)
     R = qr(Matrix((U * F.vectors * Diagonal(sqrt.(f)))')).R
-    L = LowerTriangular(R' * Diagonal(sign.(diag(R))))
+    L = LowerTriangular(_svi_precision_root(R, 1.0))
     Δ = L' \ (L \ gz)
-    Δ .*= min(1.0, _BRM_SVI_REOPT_MEAN_TRUST / norm(U' * Δ))
+    Δ .*= _svi_mean_trust(U, Δ, _BRM_SVI_REOPT_MEAN_TRUST)
     Matrix(L), Δ
 end
 function _brm_svi_unit_step_newton!(q, i, gz, S; positive=true)
@@ -983,27 +973,15 @@ function _brm_svi_unit_step_full!(q, i, gz, S, β; positive=true)
     U = LowerTriangular(q.U[i])
     all(isfinite, S) || throw(ArgumentError(
         "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
-    Ŝ = Symmetric((S .+ S') ./ 2)
-    Ĝ = Symmetric((positive ? _brm_svi_positive_part(Ŝ) : Ŝ) - I)
-    r = maximum(abs, eigvals(Ĝ))
-    β = r > 0 ? min(β, _BRM_SVI_UNIT_TRUST / r) : β
+    Ĝ, r = _svi_orthogonal_gap(S, positive)
     # U⁻¹(Λ + βG) = (I + βĜ) Uᵀ.
-    R = qr(vcat(Matrix(U'), (I + β .* Ĝ) * Matrix(U'))).R
-    L = LowerTriangular(R' * Diagonal(sign.(diag(R))) ./ sqrt(2))
-    Δ = β .* (L' \ (L \ gz))
-    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
-    q.U[i] .= L
-    q.Λ[i] .= L * L'
-    q.M[i] .+= Δ
-    q
+    stack, step = _svi_orthogonal_stack(U, Ĝ, r, β, _BRM_SVI_UNIT_TRUST)
+    _brm_svi_commit_dense_step!(q, i, U, stack, gz, step)
 end
 
 # A symmetric matrix's positive part; itself, to the last bit, when it has no
 # negative eigenvalue.
-function _brm_svi_positive_part(S::Symmetric)
-    F = eigen(S)
-    first(F.values) >= 0 ? S : Symmetric(F.vectors * Diagonal(max.(F.values, 0.0)) * F.vectors')
-end
+_brm_svi_positive_part(S::Symmetric) = Symmetric(_svi_positive_curvature(S))
 
 # Unit i's terms on the orthogonal design `E` (columns ε_k): the value and the
 # gradients averaged over the 2d draws, `gg` in the pair's convention (the sum
@@ -1027,8 +1005,8 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
     gc, adjoint = nothing, nothing
     problem = nothing
     for k in 1:d
-        δ = U' \ view(E, :, k)
-        z₊, z₋ = m .+ δ, m .- δ
+        δ = _svi_unit_offset(U, view(E, :, k))
+        z₊, z₋ = _svi_antithetic_pair(m, δ)
         fill!(gz₊, 0.0)
         fill!(gz₋, 0.0)
         if centering === nothing
@@ -1057,9 +1035,9 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
         problem === nothing || break
         value += (v₊ + v₋) / 2d
         gz .+= (gz₊ .+ gz₋) ./ 2d
-        W[:, k] .= -(U \ ((gz₊ .- gz₋) ./ 2))
+        W[:, k] .= _svi_whitened_difference(U, (gz₊ .- gz₋) ./ 2)
     end
-    S = (W * E' .+ E * W') ./ 2d
+    S = _svi_design_curvature(W, E)
     centered = centering === nothing ? nothing :
         (; gc=something(gc, Float64[]), adjoints=adjoint === nothing ? () : (adjoint,),
            weight=1 / d)
@@ -1316,7 +1294,9 @@ end
 # come from `rng` here, in batch order, before any unit is evaluated, each unit's
 # result stays in its own slot and is summed in batch order, and a unit's step
 # reads and writes only that unit's factor.
-_brm_svi_field_prepare!(rng, t, q, g, batch, ε=nothing, η=nothing) = nothing
+_brm_svi_field_draws(rng, t, q, batch) = nothing
+_brm_svi_apply_field_draws!(t, q, g, batch, draws::Nothing, ε, η) = nothing
+_brm_svi_global_noise(rng, q) = (randn(rng, length(q.μ)), randn(rng, size(q.Β, 2)))
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
@@ -1324,7 +1304,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
         coupling_scale=1.0, coupling_baseline=true, reoptimize=0, reoptimize_newton=true)
     D = length(t.globals)
-    ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
+    ε, η = _brm_svi_global_noise(rng, q)
     g = _brm_svi_draw_global(q, ε, η)
     # Under `sparse_globals = :collapsed` the sparse globals draw from their joint
     # factor, from the same ε (src/nlme_svi_collapsed.jl).
@@ -1334,10 +1314,11 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     coupling = _brm_svi_coupling(q)
     ζs = coupling === nothing ? nothing :
         [_brm_svi_coupling_noise(coupling, i, noise, η) for i in batch]
-    _brm_svi_field_prepare!(rng, t, q, g, batch, noise, η)
+    field_draws = _brm_svi_field_draws(rng, t, q, batch)
+    _brm_svi_apply_field_draws!(t, q, g, batch, field_draws, noise, η)
     sweep = hasproperty(t, :field_sweep)
     P, gP = sweep ? _brm_svi_global_term(t.prior, t, g) : _brm_svi_global_term(t, g)
-    draws = [_brm_svi_unit_draws(rng, q, i, curvature) for i in batch]
+    draws, designs = _brm_svi_local_draws(rng, q, batch, curvature, reoptimize, _brm_svi_unit_design)
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
         gd::Vector{Float64}}}(undef, length(batch))
     # The whitened curvature estimate of a unit on an orthogonal design.
@@ -1351,12 +1332,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         P += first(_brm_svi_sweep_term!(gP, Float64[], centering, frame, t, q, 0,
             g, Float64[], t.plan))
     end
-    designs = nothing
     if reoptimize > 0
-        # Drawn serially, from the run's stream, before the threaded unit loop.
-        designs = [curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
-            [_brm_svi_unit_design(rng, length(q.M[i])) for _ in 1:reoptimize] : nothing
-            for i in batch]
         # A checkpoint written before the Newton step re-optimizes the units' own
         # factors in place, with their square-root step.
         reoptimize_newton || _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling,
@@ -1412,7 +1388,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         gg₊, gg₋ = _brm_svi_global_buffers(work, D)
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         δ = _brm_svi_unit_offset(q, i, εi)
-        z₊, z₋ = zmean .+ δ, zmean .- δ
+        z₊, z₋ = _svi_antithetic_pair(zmean, δ)
         if centering === nothing
             v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
             v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
@@ -1471,7 +1447,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
     # carries weight about 1 / π, so its coordinates' gradients are about √w times
     # their rms when drawn, and the batch's largest weight bounds every unit in it.
-    clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
+    clip = _svi_batch_clip(weights, _BRM_SVI_GLOBAL_CLIP)
     whiten ? _brm_svi_polish_global_step!(global_opt, q, x, grad, lr_global; clip, rank=rank_step) :
         _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
@@ -1820,14 +1796,52 @@ end
 # end of a window. Returns `:converged` when polishing completed with it,
 # `:window` when it completed a window, `:iteration` otherwise.
 function _brm_svi_advance!(run, t, c)
-    N, W = length(t.units), c.window
-    it = run.iteration + 1
-    polishing = _brm_svi_polishing(run)
-    settling = !polishing && _brm_svi_settling(run, c)
-    scale = polishing ? 1 / sqrt(1 + (it - run.polish_start) / W) : 1.0
+    phase = _brm_svi_phase(run, c)
+    _brm_svi_numerical_step!(run, t, c, phase)
+    _brm_svi_finish_interval!(run, t, c, phase)
+end
+
+function _brm_svi_iteration_controls(run, c, phase, it)
+    polishing, settling = phase === :polishing, phase === :settling
+    scale = polishing ? 1 / sqrt(1 + (it - run.polish_start) / c.window) : 1.0
     # Establish the independent factors before learning their dependence. Older
     # checkpoints lack this control and retain their immediate coupling updates.
     coupling_scale = get(c, :coupling_warmup, false) && !(polishing || settling) ? 0.0 : scale
+    (; lr=scale * (polishing || settling ? c.polish_lr : c.lr_global), β=scale * c.unit_step,
+       whiten=polishing || settling, site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
+       positive_part=_brm_svi_unit_positive_part(c), site_step=scale * _brm_svi_site_step(c),
+       structured_step=scale * _brm_svi_structured_unit_step(c),
+       structured_rank=_brm_svi_structured_rank_step(c),
+       rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
+       sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
+       coupling_baseline=_brm_svi_coupling_baseline(c), reoptimize=_brm_svi_unit_reoptimize(c),
+       reoptimize_newton=_brm_svi_reoptimize_newton(c))
+end
+
+_brm_svi_batch_calls(run, t, c, indices) =
+    sum(i -> _brm_svi_unit_calls(run.q, i, c), indices; init=0) +
+        _brm_svi_collapsed_calls(run.sites, t, indices)
+
+function _brm_svi_iteration_draws(t, run, c, phase, n; rng=run.rng)
+    n isa Integer && n >= 0 || throw(ArgumentError("iteration_draws needs a nonnegative iteration count"))
+    curvature = _brm_svi_unit_curvature_mode(c)
+    reoptimize = _brm_svi_unit_reoptimize(c)
+    map(1:n) do _
+        batch = _brm_svi_batch(rng, run.sampler, c.batch_size)
+        epsilon, eta = _brm_svi_global_noise(rng, run.q)
+        field = _brm_svi_field_draws(rng, t, run.q, batch.indices)
+        units, reoptimization = _brm_svi_local_draws(rng, run.q, batch.indices,
+            curvature, reoptimize, _brm_svi_design_normals)
+        (; batch, epsilon, eta, field, units, reoptimization,
+           unit_gradient_calls=_brm_svi_batch_calls(run, t, c, batch.indices))
+    end
+end
+
+function _brm_svi_numerical_step!(run, t, c, phase)
+    it = run.iteration + 1
+    polishing = phase === :polishing
+    steps = _brm_svi_iteration_controls(run, c, phase, it)
+    options = Base.structdiff(steps, (; steps.lr, steps.β))
     q = run.q
     batch = _brm_svi_batch(run.rng, run.sampler, c.batch_size)
     polishing && _brm_svi_average_units!(run.average, q, run.averaged_through,
@@ -1836,22 +1850,10 @@ function _brm_svi_advance!(run, t, c)
         run.sampling.visits[i] += 1
         run.sampling.draws[i] += batch.multiplicities[k]
     end
-    run.unit_gradient_calls += sum(i -> _brm_svi_unit_calls(q, i, c), batch.indices; init=0) +
-        _brm_svi_collapsed_calls(run.sites, t, batch.indices)
+    run.unit_gradient_calls += _brm_svi_batch_calls(run, t, c, batch.indices)
     value = try
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
-            scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
-            whiten=polishing || settling, weights=batch.weights, sites=run.sites,
-            site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
-            positive_part=_brm_svi_unit_positive_part(c),
-            site_step=scale * _brm_svi_site_step(c),
-            structured_step=scale * _brm_svi_structured_unit_step(c),
-            structured_rank=_brm_svi_structured_rank_step(c),
-            rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
-            sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
-            coupling_baseline=_brm_svi_coupling_baseline(c),
-            reoptimize=_brm_svi_unit_reoptimize(c),
-            reoptimize_newton=_brm_svi_reoptimize_newton(c))
+            steps.lr, steps.β; weights=batch.weights, sites=run.sites, options...)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -1869,43 +1871,56 @@ function _brm_svi_advance!(run, t, c)
         run.unit_entropy[i] = entropy
     end
     push!(run.trace, value + run.entropy_sum +
-        _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 +
+        _brm_svi_factor_logdet(q) / 2 +
         _brm_svi_sparse_entropy(run.sites, q))
     run.iteration = it
     polishing || _brm_svi_record_iterates!(run, batch.indices, c)
-    polished = false
     if polishing
         k = it - run.polish_start
         for name in (:μ, :ρ, :Β)
             _brm_svi_average!(getfield(run.average, name), getfield(q, name), k)
         end
-        polished = k >= _brm_svi_polish_iterations(run, c)
     end
+    nothing
+end
+
+# The native loop and an accelerator finishing a block of iterations use the
+# same window statistics, centering activation, phase changes and stopping test.
+function _brm_svi_finish_interval!(run, t, c, phase, synchronize! = identity)
+    it, W = run.iteration, c.window
+    polishing = phase === :polishing
     it % W == 0 && push!(run.windows, _brm_svi_window(view(run.trace, it-W+1:it)))
-    if polished
+    if polishing && it - run.polish_start >= _brm_svi_polish_iterations(run, c)
         run.converged = !_brm_svi_stationarity_enabled(c) || _brm_svi_stationarity_state(run).settled
         return run.converged ? :converged : :window
     end
     it % W == 0 || return :iteration
     windows = run.windows
-    explore = _brm_svi_windows_after(windows, max(_brm_svi_centering_activation(q), 0))
+    explore = _brm_svi_windows_after(windows, max(_brm_svi_centering_activation(run.q), 0))
     polishing && return :window
-    if settling
+    if phase === :settling
         explored = _brm_svi_explored(run, c)
         # Polishing continues settling's step and its Adam moments.
-        settled = _brm_svi_settled(windows, explored, c) && _brm_svi_stationary!(run, c)
+        settled = _brm_svi_settled(windows, explored, c)
+        if settled && _brm_svi_stationarity_enabled(c)
+            synchronize!(:histories)
+            settled = _brm_svi_stationary!(run, c)
+        end
         _brm_svi_stationarity_enabled(c) && (_brm_svi_stationarity_state(run).settled = settled)
-        (settled || _brm_svi_budget_polish_due(it, c) ||
-            length(windows) - explored >= _brm_svi_settle_windows(c)) &&
-            _brm_svi_start_polishing!(run, q, it)
+        if settled || _brm_svi_budget_polish_due(it, c) ||
+                length(windows) - explored >= _brm_svi_settle_windows(c)
+            synchronize!(:state)
+            _brm_svi_start_polishing!(run, run.q, it)
+        end
     elseif length(explore) >= max(c.min_windows, c.patience + 1) &&
             _brm_svi_exploration_stalled(explore, length(explore), c)
         # A deferred fit's ELBO has stopped climbing: its opening transient has
         # passed, so it centres now and explores on (`LearnedCentering`'s `delay`,
         # src/nlme_svi_centering.jl). The drift gate below governs where exploration
         # ends, not this: a global's slow drift is no transient.
-        if _brm_svi_centering_deferred(q)
-            _brm_svi_activate_centering!(q, t, length(windows))
+        if _brm_svi_centering_deferred(run.q)
+            synchronize!(:state)
+            _brm_svi_activate_centering!(run.q, t, length(windows))
             _brm_svi_centering_activated!(run, c)
             return :window
         end
@@ -1913,6 +1928,7 @@ function _brm_svi_advance!(run, t, c)
         # settling's scale-relative step cannot finish its move: exploration goes on
         # while the drift gate reads one, up to half the budget
         # (src/nlme_svi_stationarity.jl).
+        _brm_svi_stationarity_enabled(c) && synchronize!(:histories)
         drift = _brm_svi_exploration_drift(run, c)
         previous_drift = drift === nothing ? nothing :
             get(_brm_svi_stationarity_state(run).report, :drift, nothing)
@@ -1928,11 +1944,12 @@ function _brm_svi_advance!(run, t, c)
         # without certifying it. It does not gate this step-size improvement.
         # With no settling phase, exploration must pass before averaging starts.
         !stationary && _brm_svi_settle_windows(c) == 0 && return :window
+        synchronize!(:state)
         _brm_svi_stationarity_explored!(run, c)
         clipped = run.adam.clipped
-        run.adam = _brm_svi_adam(q, c.polish_lr)
+        run.adam = _brm_svi_adam(run.q, c.polish_lr)
         run.adam.clipped = clipped
-        _brm_svi_settle_windows(c) > 0 || _brm_svi_start_polishing!(run, q, it)
+        _brm_svi_settle_windows(c) > 0 || _brm_svi_start_polishing!(run, run.q, it)
     end
     :window
 end
@@ -1977,16 +1994,32 @@ _brm_svi_phase(run, c) = _brm_svi_polishing(run) ? :polishing :
 # Neither advances the random stream or writes to the run.
 function _brm_svi_fit!(run, t, c; stop_after=typemax(Int), checkpoint_every=c.window,
         save=nothing, checkpoint=identity, node=nothing, observe=nothing,
-        observe_every=c.window)
+        observe_every=c.window, device_step! = nothing, synchronize! = identity)
     commit() = save === nothing || save(checkpoint(run))
     taken = 0
     while !_brm_svi_finished(run, c) && taken < stop_after
-        status = _brm_svi_advance!(run, t, c)
-        taken += 1
+        before = run.iteration
+        status = if device_step! === nothing
+            _brm_svi_advance!(run, t, c)
+        else
+            n = min(stop_after - taken, c.max_iterations - before, c.window - mod(before, c.window))
+            save === nothing || (n = min(n, checkpoint_every - mod(before, checkpoint_every)))
+            observe === nothing || (n = min(n, observe_every - mod(before, observe_every)))
+            phase = _brm_svi_phase(run, c)
+            if phase === :polishing
+                n = min(n, _brm_svi_polish_iterations(run, c) - (before - run.polish_start))
+            end
+            device_step!(n, phase)
+            run.iteration == before + n && length(run.trace) == run.iteration ||
+                error("SVI accelerator did not synchronize the requested $n iterations")
+            _brm_svi_finish_interval!(run, t, c, phase, synchronize!)
+        end
+        taken += run.iteration - before
         if status === :window
             try
                 _brm_throw_if_interrupted(node)
             catch
+                synchronize!(:state)
                 commit()
                 observe === nothing || observe(:interrupted)
                 rethrow()
@@ -1994,9 +2027,15 @@ function _brm_svi_fit!(run, t, c; stop_after=typemax(Int), checkpoint_every=c.wi
             _brm_update_progress!(node, _brm_svi_progress_message(run, c))
         end
         (_brm_svi_finished(run, c) || taken >= stop_after) && continue
-        save === nothing || run.iteration % checkpoint_every != 0 || commit()
-        observe === nothing || run.iteration % observe_every != 0 || observe(:running)
+        saving = save !== nothing && run.iteration % checkpoint_every == 0
+        observing = observe !== nothing && run.iteration % observe_every == 0
+        if saving || observing
+            synchronize!(:state)
+            saving && commit()
+            observing && observe(:running)
+        end
     end
+    synchronize!(:state)
     commit()
     observe === nothing || observe(_brm_svi_end_status(run, c))
     run
@@ -2086,7 +2125,7 @@ end
 
 # The running mean `a` of iterates `x`, at the k-th: an array, or one array
 # per subject.
-_brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (@. a += (x - a) / k; a)
+_brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (a .= _svi_running_average.(a, x, k); a)
 _brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
     (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
 
@@ -2110,7 +2149,7 @@ function _brm_svi_average_units!(average, q, through, indices, iteration)
         count == 0 && continue
         weight = count / iteration
         a, x = average.M[i], q.M[i]
-        @. a += weight * (x - a)
+        a .= _svi_weighted_average.(a, x, weight)
         _brm_svi_unit_average!(average.Λ[i], q.Λ[i], weight)
         _brm_svi_coupling_average!(average, q, i, weight)
         through[i] = iteration
@@ -2230,7 +2269,7 @@ function _brm_svi_start(m::BRMNLMEModel, start, inits)
 end
 
 """
-    brm_svi_fit([save,] x; laplace=nothing, batch_size=32, rng=Random.default_rng(),
+    brm_svi_fit([save,] x; device=:cpu, laplace=nothing, batch_size=32, rng=Random.default_rng(),
         family=MeanFieldGlobal(), unit_sampling=nothing, ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing,
@@ -2270,6 +2309,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   cells' local latent coordinates, including the K − 1 coordinates of a
   `Dirichlet` simplex read only by that unit. Dotted cell latents under a
   transformed univariate law such as `LogNormal` can still enter the global factor.
+- `device=:cpu` runs native Julia updates. Use `device=:gpu` with a loaded
+  runtime implementing [`BayesianRegressionModels.brm_svi_device_runner`](@ref).
+  The fit records the actual device and backend in `diagnostics.execution`.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
   `LowRankGlobal(r)` (diagonal plus rank `r`).
 - `centering` — fresh fits default to [`LearnedCentering`](@ref), jointly
@@ -2458,11 +2500,12 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   (the unit partition gradient and the start), Stochastic optimization (its
   message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
   next window.
-- `threads` — how many tasks evaluate a batch's subjects and step their factors,
+- `threads` — how many Julia tasks evaluate a CPU batch's subjects and step their factors,
   capped at the batch size. Each further task prepares its own copy of the
   compact cell samplers before the first iteration, which costs time and retained
   memory. The default is `Threads.nthreads()`, or 1 on an Enzyme without the
-  concurrent-GC repair, which refuses an explicit `threads` above one.
+  concurrent-GC repair, which refuses an explicit `threads` above one. A GPU
+  fit prepares one host worker and the device runtime batches the subjects.
   The result does not depend on it: the draws come from the one `rng` in batch
   order and the subjects' results are summed in batch order, so a run and its
   checkpoints are the same to the last bit at any `threads`, and
@@ -2649,8 +2692,9 @@ target on every call.
 """
 brm_svi_fit(x; kwargs...) = _brm_svi_initial_fit(nothing, x; kwargs...)
 brm_svi_fit(save::Function, x; kwargs...) = _brm_svi_initial_fit(save, x; kwargs...)
-function _brm_svi_initial_fit(save, x; laplace=nothing, kwargs...)
-    laplace === nothing && return _brm_svi_fit(save, x, nothing; kwargs...)
+function _brm_svi_initial_fit(save, x; device=:cpu, laplace=nothing, kwargs...)
+    laplace === nothing && return _brm_svi_fit(save, x, nothing; device, kwargs...)
+    _brm_svi_laplace_device(device)
     get(kwargs, :sparse_globals, :sites) === :sites || throw(ArgumentError(
         "brm_svi_fit: sparse_globals = :collapsed updates the minibatch engine's sparse " *
         "globals from their readers' sites; laplace=GaussianBlockLaplace() integrates " *
@@ -2789,7 +2833,7 @@ end
 function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=1000,
         stop_after=nothing, checkpoint_every=nothing, progress=nothing,
         snapshot=nothing, snapshot_every=nothing, snapshot_draws=0,
-        ad_backend=nothing, shared_point=nothing, subject_group=nothing,
+        device=:cpu, ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
         max_unit_work=1_000_000, max_promoted_coordinates=128, cell_units=nothing,
@@ -2798,7 +2842,13 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
     _brm_svi_check_snapshot(caller, snapshot, snapshot_every, snapshot_draws)
-    threads = _brm_svi_threads(caller, threads, ad_backend)
+    runner = _brm_svi_runner(device)
+    if runner === nothing
+        threads = _brm_svi_threads(caller, threads, ad_backend)
+    else
+        _brm_svi_threads(caller, threads, ad_backend; repaired=true)
+        threads = 1
+    end
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             lowered = _brm_svi_lowered(x, phases.lower; completions=checkpoint_completions,
@@ -2826,15 +2876,20 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 target_seconds = time() - started
                 optimizing = true
                 run, c = state.run, state.controls
-                seconds, draws = _brm_with_serial_blas() do
-                    seconds = @elapsed _brm_enter_phase(phases.fit) do phase
-                        _brm_svi_fit!(run, t, c; stop_after=something(stop_after, typemax(Int)),
-                            checkpoint_every=something(checkpoint_every, c.window), save,
-                            checkpoint=_ -> _brm_svi_detach(state), node=phase,
-                            observe=_brm_svi_observer(snapshot, t, state, snapshot_draws),
-                            observe_every=something(snapshot_every, c.window))
+                seconds, execution, draws = _brm_with_serial_blas() do
+                    started_fit = time_ns()
+                    execution = _brm_enter_phase(phases.fit) do phase
+                        _brm_svi_execute!(runner, t, run, c) do step!, synchronize!
+                            _brm_svi_fit!(run, t, c; stop_after=something(stop_after, typemax(Int)),
+                                checkpoint_every=something(checkpoint_every, c.window), save,
+                                checkpoint=_ -> _brm_svi_detach(state), node=phase,
+                                observe=_brm_svi_observer(snapshot, t, state, snapshot_draws),
+                                observe_every=something(snapshot_every, c.window), device_step! = step!,
+                                synchronize!)
+                        end
                     end
-                    seconds, _brm_run_phase(phases.draws) do _
+                    seconds = (time_ns() - started_fit) / 1e9
+                    seconds, execution, _brm_run_phase(phases.draws) do _
                         _brm_svi_draws(copy(run.rng), t, _brm_svi_result_q(run), ndraws;
                             sites=run.sites)
                     end
@@ -2848,7 +2903,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 _brm_svi_warn_sd_bound(bound; caller)
                 _brm_svi_warn_unconverged(run, c, string.(m.view.coordinates[t.globals]); caller)
                 (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
-                    threads=length(t.plans), target=(; reuse..., seconds=target_seconds),
+                    execution, threads=length(t.plans), target=(; reuse..., seconds=target_seconds),
                     elbo=run.trace, elbo_windows=first.(run.windows),
                     elbo_windows_trimmed=[w.center for w in run.windows],
                     clipped_steps=run.adam.clipped, sd_bound=bound,

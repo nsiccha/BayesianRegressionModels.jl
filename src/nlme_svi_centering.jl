@@ -145,7 +145,7 @@ function _brm_svi_resolve_centering(previous, centering)
 end
 
 # The logistic of a control's unconstrained value, and its inverse.
-_brm_svi_control(x::Real) = x >= 0 ? inv(1 + exp(-x)) : (e = exp(x); e / (1 + e))
+_brm_svi_control(x::Real) = _svi_centering_control(x)
 _brm_svi_control_logit(c::Real) = log(c) - log1p(-c)
 
 # One cell: y = T(u) and log |∂y/∂u|, through the shared primitive.

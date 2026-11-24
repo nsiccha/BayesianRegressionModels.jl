@@ -188,24 +188,32 @@ end
 
 # A step's reading of the world outside its batch: the laws at `g`, the global states, and
 # one draw of every unit a batch's conditionals read. Serial, before any task.
-function _brm_svi_field_prepare!(rng, t::NamedTuple, q, g, batch, ε=nothing, η=nothing)
+function _brm_svi_field_draws(rng, t::NamedTuple, q, batch)
     if get(t, :field_sweep, nothing) !== nothing
-        return _brm_svi_sweep_prepare!(rng, t, q, g, batch, ε, η)
+        return _brm_svi_sweep_draws(rng, t.field_sweep, q, batch)
     end
     state = get(t, :fields, nothing)
     state === nothing && return nothing
+    readers = reduce(vcat, (state.blanket[i + 1] for i in batch); init=copy(state.blanket[1]))
+    indices = Int.(sort!(unique!(readers)))
+    (; readers=indices, noise=[_brm_svi_unit_noise(rng, q.U[i]) for i in indices])
+end
+
+function _brm_svi_apply_field_draws!(t, q, g, batch, draws::NamedTuple, ε, η)
+    if get(t, :field_sweep, nothing) !== nothing
+        return _brm_svi_sweep_prepare!(t, q, g, batch, draws, ε, η)
+    end
+    state = t.fields
     _brm_svi_field_laws!(state, g)
     for field in state.fields, (position, p) in field.global_states
         state.others[position] = g[p]
     end
-    readers = reduce(vcat, (state.blanket[i + 1] for i in batch); init=copy(state.blanket[1]))
-    for u in sort!(unique!(readers))
-        u = Int(u)
+    for (u, normal) in zip(draws.readers, draws.noise)
         # Under linear coupling, at the unit's mean for this draw of the globals.
         coupling = ε === nothing ? nothing : _brm_svi_coupling(q)
         ζ = coupling === nothing ? nothing : _brm_svi_coupling_noise(coupling, u, ε, η)
         state.others[t.units[u]] .= _brm_svi_coupled_mean(coupling, q, u, ζ) .+
-            _brm_svi_unit_offset(q, u, _brm_svi_unit_noise(rng, q.U[u]))
+            _brm_svi_unit_offset(q, u, normal)
     end
     nothing
 end

@@ -89,6 +89,6 @@ function _brm_svi_weighted_batch(draws, p)
     end
     indices = sort!(collect(keys(counts)))
     multiplicities = [counts[i] for i in indices]
-    weights = [counts[i] / (length(draws) * p[i]) for i in indices]
+    weights = [_svi_work_weight(counts[i], length(draws), p[i]) for i in indices]
     (; indices, weights, multiplicities)
 end

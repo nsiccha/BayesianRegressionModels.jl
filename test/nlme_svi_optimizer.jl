@@ -54,6 +54,9 @@ end
     m = brm_nlme_model(RKBRMI(svi_gauss_model(svi_gauss_data(Xoshiro(101), 12)));
         ad_backend=NLME_AD)
     full, states = svi_reference(m; rng=Xoshiro(102), SVI_OPT..., ndraws=40)
+    @test full.diagnostics.execution == (; device=:cpu, backend=:julia)
+    @test_throws "device must be" brm_svi_fit(m; device=:gup)
+    @test_throws "loaded GPU fitting runtime" brm_svi_fit(m; device=:gpu)
     @test full.diagnostics.converged && full.diagnostics.finished
     P = full.diagnostics.optimizer.run.polish_start
     @test P >= 120

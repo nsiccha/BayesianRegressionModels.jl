@@ -143,12 +143,11 @@ end
 end
 
 # The snag's mechanism, exactly Gaussian: units of 48 coordinates whose scale's
-# optimum reads their widths. The production loop under the default schedule
-# (7,100 iterations, each unit visited about 890 times); the scale against the
-# profile optimum. Measured: log σ 0.0345 against 0.0334 with the units' factors
-# 0.002 nats from q*(σ) in all; the single pair at 0.1 (BRM 0.2.242) ends at log
-# σ 0.507, its factors 100.6 nats from q*(σ): wide factors make the prior's
-# scale look larger, as they made a chain's length scale look short.
+# optimum reads their widths. With the ELBO stopping rule the orthogonal design
+# reaches log σ 0.0345 (profile optimum 0.0334) in 8,100 iterations, with a
+# total KL of 0.0016 nats from the optimal unit factors at that scale. The
+# single-pair control ends at log σ 0.2504 in 15,100 iterations with a total
+# KL of 97.2 nats. Wide unit factors make the prior's scale look larger.
 @testset "a scale that reads dense units' widths reaches its optimum" begin
     rng, d, N = Xoshiro(13), 48, 32
     Ci = ar1_precision(d, 0.95)
@@ -162,7 +161,7 @@ end
         fit = UC.arithmetic_fit(Xoshiro(14), t, q; batch_size=4, max_iterations=40_000,
             lr_global=0.01, unit_step=UC._brm_svi_default_unit_step(curvature),
             polish_lr=0.05, window=nothing, patience=10, min_windows=40, polish_windows=20,
-            unit_curvature=curvature)
+            unit_curvature=curvature, stationarity=false)
         # Exact KL of each unit's factor from its optimum q*(σ) at the fitted scale.
         σ2 = exp(2fit.q.μ[1])
         P = Symmetric(Ci ./ σ2 + I)

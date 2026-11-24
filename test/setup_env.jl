@@ -470,7 +470,10 @@ const PINS = [
     # (`indexed_value`), which SVI uses for a field state's conditional.
     # RKPPL 0.1.249 keeps shared data whole and identifies each joint cell latent’s packed block.
     # RKPPL 0.1.252 emits a joint cell's geometry and constrained rows in JAX.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "c22de37b46fea7c7a713d8e89229694f02687952"),
+    # RKPPL 0.1.255 binds indexed station densities with categorical labels.
+    # RK 0.1.365 differentiates their constrained factors and exports the dense SVI updates.
+    # RK 0.1.369 and RKPPL 0.1.256 read ragged matrix rows, runtime checks and loops per station.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "7f387b534a1ada37b879569a9c6675eb6be39ce6"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

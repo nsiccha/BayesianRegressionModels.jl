@@ -3,8 +3,9 @@
 # it (`_BRMSVIAuthoredPrior`, src/nlme_svi.jl). Unit membership is supplied
 # here as an independent oracle beside production structural ownership.
 # Run: julia --startup-file=no --project=test test/nlme_svi_authored_factors.jl
-include(joinpath(@__DIR__, "fitting_packages.jl"))
 using Test, Random, LinearAlgebra, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+using CategoricalArrays: categorical
+include(joinpath(@__DIR__, "jax_module_driver.jl"))
 using ADTypes: AutoEnzyme
 import Enzyme
 
@@ -115,6 +116,7 @@ function check_authored_factor_split(rk; constrained=false)
     @test sum(length, buckets) == length(events)
     @test length(unique(vcat(buckets...))) == length(events)
     @test all(!isempty, buckets)
+    @test BRM._rk_svi_factor_buckets(owner, n, BRM._rk_svi_factors(rk, u0)) == buckets
 
     tau = factor_coordinates(select_factors(catalogue; kind=:prior, site=:tau))
     z1 = select_factors(catalogue; kind=:prior, site=:z, entries=1:1)
@@ -157,6 +159,66 @@ function check_authored_factor_split(rk; constrained=false)
         " unit_sizes=", length.(units), " events=", length(events))
 end
 
+# Check the labelled densities on the exact packed points a device runner passes.
+function check_device_partition(target, problem)
+    c = problem.partition
+    out = jax_source(c.built, c.bound, c.observations; c.by, c.partitioned,
+        problem.global_factors, problem.unit_factors, problem.expected_layout)
+    @test collect(out.partition_data.labels) == collect(eachindex(target.units))
+    brm_jax_require_python() || return
+    raw = problem.bound_data(out.source)
+    mktempdir() do dir
+        write(joinpath(dir, "station_model.py"), out.source)
+        script = joinpath(dir, "partition.py")
+        open(script, "w") do io
+            println(io, "import numpy as np, json, jax\nimport station_model as m")
+            println(io, "jax.config.update('jax_enable_x64', True)")
+            println(io, "raw = {", join((repr(String(k)) * ": " * _py(v) for (k,v) in pairs(raw)), ", "), "}")
+            println(io, "p = m.prepare_data(**raw)")
+            println(io, "q = m.prepare_partition(p, json.loads(", _py(JSON.json(out.partition_data)), "))")
+            println(io, "batch = jax.jit(jax.vmap(jax.value_and_grad(lambda x,i: m.unit_log_density(x,i,**q))))")
+            println(io, "shared = jax.jit(jax.value_and_grad(lambda x: m.global_log_density(x,**q)))")
+            # Repeated labels at distinct points distinguish one unit's contribution
+            # from slicing or rescaling the total density.
+            rows = map(enumerate((4, 1, 4))) do (lane, i)
+                x = [0.17sin(k) + 0.1lane * cos(k) for k in eachindex(problem.point)]
+                g = x[target.globals]
+                gg, gz = zeros(length(g)), zeros(length(target.units[i]))
+                value = BRM._brm_svi_unit_term!(gg, gz, target, i, g, x[target.units[i]])
+                grad = zeros(length(x))
+                grad[target.globals] = gg
+                grad[target.units[i]] = gz
+                shared_value, shared_grad = BRM._brm_svi_global_term(target, g)
+                packed = zeros(length(x))
+                packed[target.globals] = shared_grad
+                (x, i, value, grad, shared_value, packed)
+            end
+            println(io, "rows = [", join(_py.(rows), ", "), "]")
+            println(io, """
+                xs, labels, values, gradients, shared_values, shared_gradients = zip(*rows)
+                actual, grad = batch(np.stack(xs), np.asarray(labels))
+                np.testing.assert_allclose(actual, values, rtol=1e-10, atol=1e-8)
+                np.testing.assert_allclose(grad, gradients, rtol=1e-10, atol=1e-8)
+                for x, v, g in zip(xs, shared_values, shared_gradients):
+                    actual, grad = shared(x)
+                    np.testing.assert_allclose(actual, v, rtol=1e-10, atol=1e-8)
+                    np.testing.assert_allclose(grad, g, rtol=1e-10, atol=1e-8)
+
+                all_labels = np.asarray(q["labels"])
+                full = jax.jit(jax.value_and_grad(lambda x: m.log_density(x, **p)))
+                for x in (np.zeros_like(xs[0]), xs[0]):
+                    points = np.broadcast_to(x, (len(all_labels), len(x)))
+                    unit_values, unit_gradients = batch(points, all_labels)
+                    global_value, global_gradient = shared(x)
+                    full_value, full_gradient = full(x)
+                    np.testing.assert_allclose(global_value + unit_values.sum(), full_value, rtol=1e-10, atol=1e-8)
+                    np.testing.assert_allclose(global_gradient + unit_gradients.sum(axis=0), full_gradient, rtol=1e-10, atol=1e-8)
+                """)
+        end
+        @test success(pipeline(`$BRM_JAX_PYTHON $script`; stdout, stderr))
+    end
+end
+
 # The same split as SVI's prior term evaluates it (`_BRMSVIAuthoredPrior`,
 # src/nlme_svi.jl). On the strict subject units it equals the standard-normal
 # split term by term; with each subject also owning its coefficients, the
@@ -165,6 +227,18 @@ end
 function check_svi_authored_prior(rk; constrained=false)
     m = brm_nlme_model(rk; ad_backend=FACTOR_AD)
     target = BRM._brm_svi_target(m)
+    device_problem = BRM._brm_svi_device_problem(target)
+    constrained && check_device_partition(target, device_problem)
+    @test device_problem.expected_layout === rk.model.layout
+    @test device_problem.owner == target.ownership.owner
+    @test device_problem.observation_units == target.plan.labels
+    @test Set(keys(device_problem.unit_factors)) == Set(eachindex(target.units))
+    for (selection, bucket) in zip((device_problem.global_factors,
+            (device_problem.unit_factors[i] for i in eachindex(target.units))...),
+            device_problem.factor_buckets)
+        @test factor_coordinates(selection) == factor_coordinates(
+            select_factors(target.ownership.factors.catalogue, bucket))
+    end
     t = merge(target, (; globals=BRM._brm_svi_globals(m),
         units=m.view.subject_coordinates, prior=nothing))
     u0 = [0.17sin(k) for k in eachindex(m.unit)]
@@ -285,6 +359,50 @@ end
         rk = RKBRMI(standard_vector_model(authored_factor_data()))
         check_authored_factor_split(rk)
         check_svi_authored_prior(rk)
+    end
+    @testset "categorical groups in the station density export" begin
+        g = categorical(repeat(["a", "b", "c", "d", "e"]; inner=6))
+        data = (; g, y=repeat([-0.5, 0.4, 0.7, 1.6, 2.0]; inner=6) + 0.2randn(Xoshiro(17), 30))
+        rk = RKBRMI(@brm data begin
+            mu ~ 1 + (1 | g)
+            effect(mu, Intercept) ~ Normal(0, 2)
+            sd(:, g) ~ Exponential(1)
+            y ~ Normal(mu, 0.3)
+        end)
+        m = brm_nlme_model(rk; subject_group=:g, ad_backend=FACTOR_AD)
+        target = BRM._brm_svi_target(m)
+        check_device_partition(target, BRM._brm_svi_device_problem(target))
+    end
+    @testset "a station simplex mixing its rows of a shared matrix" begin
+        # Stations of different lengths. Each mixes its own rows of the
+        # cluster curves by a Dirichlet simplex it owns.
+        series = [1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4]
+        N, n = length(series), 2
+        t = collect(range(0.0, 1.0; length=N))
+        data = (; series, N, n, alpha=0.5, tg=repeat(t, n), cg=repeat(["c1", "c2"]; inner=N),
+            y=0.3 .* sin.(4 .* t) .+ 0.1 .* randn(Xoshiro(29), N))
+        clustered = @brm begin
+            Omega ~ LKJCholesky(n, 2.0)
+            tau ~ LogNormal(0.0, 1.0)
+            g ~ 0 + hsgp(tg; k=4, domain=(-0.3, 1.3), by=cg, cor=multigroup(Omega, tau),
+                orthogonal_to=:intercept)
+            length_scale(g, hsgp(tg)) ~ LogNormal(0.0, 1.0)
+            sd(g, hsgp(tg)) ~ restricted(Normal(0.0, 0.3); lower=0.0)
+            G = reshape(g, N, n)
+            mu ~ 1 + (1 | series)
+            effect(mu, Intercept) ~ Normal(0.0, 1.0)
+            sd(mu, series) ~ restricted(Normal(0.0, 0.5); lower=0.0)
+            @plate for p in groups(series)
+                theta ~ Dirichlet(n, alpha)
+                y[p] ~ Normal(mu[p] .+ G[p, :] * theta, 0.2)
+            end
+        end
+        rk = RKBRMI(clustered(data))
+        m = brm_nlme_model(rk; subject_group=:series, ad_backend=FACTOR_AD)
+        target = BRM._brm_svi_target(m)
+        # A station owns its level and the free coordinate of its simplex.
+        @test length.(target.units) == fill(2, 4)
+        check_device_partition(target, BRM._brm_svi_device_problem(target))
     end
     @testset "non-unit dependent and constrained priors" begin
         rk = RKBRMI(dependent_constrained_model(authored_factor_data()))

@@ -208,6 +208,11 @@ function _brm_fixed_hyper_indices(caller, names, fixed)
     sort!(unique!(out))
 end
 
+"""
+    brm_fixed_hyper_problem(rk, start; ad_backend, fixed=brm_hyperparameters(rk))
+
+Prepare a [`BRMFixedHyperProblem`](@ref) at a packed point or SVI fit.
+"""
 function brm_fixed_hyper_problem(rk::RKBRMI, start;
         ad_backend, fixed=brm_hyperparameters(rk))
     caller = "brm_fixed_hyper_problem"
@@ -268,7 +273,7 @@ function LogDensityProblems.logdensity_and_gradient(p::BRMFixedHyperProblem, x)
 end
 
 """
-    brm_fixed_hyper_fit(sampler, rk::RKBRMI, start; ad_backend,
+    brm_fixed_hyper_fit(sampler, rk::RKBRMI, start; ad_backend, device=:cpu,
         fixed = brm_hyperparameters(rk), rng = Random.default_rng())
         -> (; draws, problem, point, fixed)
 
@@ -285,14 +290,47 @@ with WarmupHMC.
 coordinates at their values, so every reader of packed RK draws takes them
 (`rk_restore_draws`, the coordinate transport to SBBRMI). `fixed = ()` samples
 the full model from the start instead.
+
+`device=:cpu` calls the Julia sampler. With `device=:gpu`, pass a sampler
+whose runtime implements [`BayesianRegressionModels.brm_fixed_hyper_sample`](@ref).
+The GPU fit includes `execution.device`, `execution.backend` and
+`execution.device_name`.
 """
-function brm_fixed_hyper_fit(sampler, rk::RKBRMI, start; ad_backend,
+function brm_fixed_hyper_fit(sampler, rk::RKBRMI, start; ad_backend, device=:cpu,
         fixed=brm_hyperparameters(rk), rng=Random.default_rng())
+    device === :cpu || device === :gpu || throw(ArgumentError(
+        "brm_fixed_hyper_fit: device must be :cpu or :gpu, got $(repr(device))"))
     problem = brm_fixed_hyper_problem(rk, start; ad_backend, fixed)
-    X = sampler(problem, copy(problem.position), rng)
+    execution = if device === :gpu
+        result = brm_fixed_hyper_sample(Val(:gpu), sampler, problem, rng)
+        result isa NamedTuple && get(result, :draws, nothing) isa AbstractMatrix || throw(ArgumentError(
+            "brm_fixed_hyper_sample must return a free-coordinate draw matrix and its device information"))
+        X = result.draws
+        _brm_gpu_execution(Base.structdiff(result, (; draws=nothing)))
+    else
+        X = sampler(problem, copy(problem.position), rng)
+        nothing
+    end
     size(X, 1) == length(problem.free) || throw(DimensionMismatch(
         "brm_fixed_hyper_fit: the sampler returned $(size(X, 1)) rows for " *
         "$(length(problem.free)) free coordinates"))
-    (; draws=brm_fixed_hyper_point(problem, X), problem, point=copy(problem.point),
+    fit = (; draws=brm_fixed_hyper_point(problem, X), problem, point=copy(problem.point),
        fixed=copy(problem.fixed_names))
+    execution === nothing ? fit : merge(fit, (; execution))
 end
+
+"""
+    BayesianRegressionModels.brm_fixed_hyper_sample(::Val{:gpu}, sampler, problem, rng)
+
+A GPU sampler implements this method for its own sampler type. Use
+`problem.backend` to export the full data log density. At each evaluation insert
+the free coordinates into `problem.point` at `problem.free` and differentiate
+with respect to the free vector. Initialize at `problem.position`, including
+when every coordinate is free. The result is a named tuple containing
+`draws` (free coordinates × draws on the host), `device=:gpu`, `backend`,
+and `device_name`. Additional sampler diagnostics may accompany these fields.
+BRM restores complete packed draws and records the device information under
+`execution`. Native Julia sampler callbacks keep their usual three arguments.
+"""
+brm_fixed_hyper_sample(::Val, sampler, problem, rng) = throw(ArgumentError(
+    "brm_fixed_hyper_fit: device=:gpu requires a GPU sampling method for $(typeof(sampler))"))
