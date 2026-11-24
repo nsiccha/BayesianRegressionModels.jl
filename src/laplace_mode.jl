@@ -11,19 +11,33 @@
 
 The mode of the embedded-Laplace marginal of `target`, any problem
 [`brm_laplace_problem`](@ref) returns: the population point that maximizes its
-log density, by L-BFGS (Optim) with a backtracking line search on the
-problem's own value and gradient, from `init` (population coordinates, in
-`target.names` order) or, by default, the population coordinates' prior
-medians. It is a point fit: the mode of the marginal over the population, the
-integrated effects at their conditional modes there. It never puts a
-Gaussian over the population.
+log density, by L-BFGS (Optim) on the problem's own value and gradient, from
+`init` (population coordinates, in `target.names` order) or, by default, the
+population coordinates' prior medians. It is a point fit: the mode of the
+marginal over the population, the integrated effects at their conditional
+modes there. It never puts a Gaussian over the population.
 
 `draws` is one complete RK packed point (coordinates × 1, the shape of
 [`brm_laplace_draws`](@ref)): the population coordinates at the mode and every
-integrated effect at its conditional mode. `diagnostics` holds the log density
-there (`value`), whether L-BFGS converged (`converged`; a warning names a run
-that did not), its `iterations`, the gradient's norm (`gradient_norm`) and how
-many evaluations scored `-Inf` (`nonfinite`).
+integrated effect at its conditional mode. `diagnostics` holds:
+
+- `value`: the log density there;
+- `gradient_norm`: the gradient's largest absolute component there;
+- `converged`: whether `gradient_norm <= g_abstol` (a warning names a run
+  where it is not);
+- `stop`: what ended the search. `:tol` is the gradient tolerance,
+  `:iterations` the limit of `iterations`, and `:stalled` neither: no step
+  changed the point or the value any more, or none was acceptable (the
+  warning names Optim's reason). A `:stalled` stop with a small
+  `gradient_norm` is the mode to the gradient's own rounding; pass a
+  `g_abstol` above it;
+- `iterations`: the L-BFGS iterations taken;
+- `nonfinite`: how many evaluations scored `-Inf`.
+
+A step is accepted on Hager and Zhang's approximate Wolfe conditions, which
+test the slope along the step where the value changes by less than its
+rounding. A large problem's value carries more rounding than its gradient,
+and a test on values alone cannot tell a step near the mode from none.
 
 Needs Optim loaded (`using WarmupHMC` loads it through Pathfinder).
 """

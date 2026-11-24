@@ -43,6 +43,7 @@ end
     @test fit.ladder[1].finite
     # rung 2: a stationary maximum of the marginal
     @test fit.ladder[2].converged && fit.ladder[2].gradient_norm < 1e-4
+    @test fit.ladder[2].stop === :tol
     @test fit.point == fit.rungs[2].point
     v, g = LogDensityProblems.logdensity_and_gradient(p, fit.point)
     @test norm(g) < 1e-4

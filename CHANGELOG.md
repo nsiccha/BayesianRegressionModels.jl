@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.391
+
+- `brm_laplace_mode` accepts an L-BFGS step on Hager and Zhang's approximate
+  Wolfe conditions (Optim's default line search for L-BFGS) instead of a
+  backtracking test on the value alone. On a large problem, such as a mesh
+  field with thousands of integrated effects, the marginal's value carries
+  more rounding than a step near the mode gains. The old search then stalled
+  above `g_abstol` after many null steps and still reported `converged`.
+- `diagnostics.converged` is now true only when `gradient_norm <= g_abstol`.
+  The new `diagnostics.stop` names what ended the search: `:tol`,
+  `:iterations` or `:stalled`. `brm_ladder_fit` records it for rung 2. A
+  returned mode can move, within the tolerance, from the one 0.2.385 found.
+
 ## 0.2.390
 
 - A keyed component can return multiple variable-length reading vectors from
