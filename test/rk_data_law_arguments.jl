@@ -398,6 +398,62 @@ end
         law_oracle("constant", frozen, merge(rows, (; half=data.half)), u) atol=1e-10 rtol=1e-11
 end
 
+@stestset "a named rowwise dispersion agrees with the inline law on fitted and replay rows" begin
+    named = @brm begin
+        log(mu) ~ 0 + offset(log_mean)
+        unit ~ LogNormal(0, 1)
+        residual ~ LogNormal(0, 1)
+        batch = unit .* exposure
+        shape = 1 ./ (1 ./ batch .+ 1 ./ residual)
+        count ~ NegativeBinomial2(mu, shape)
+    end
+    inline = @brm begin
+        log(mu) ~ 0 + offset(log_mean)
+        unit ~ LogNormal(0, 1)
+        residual ~ LogNormal(0, 1)
+        count ~ NegativeBinomial2(mu, 1 ./ (1 ./ (unit .* exposure) .+ 1 ./ residual))
+    end
+    data = (; log_mean=log.([1.2, 2.5, 3.0]), exposure=[1, 3, 8], count=[0, 3, 1])
+    new_rows = (; log_mean=log.([1.8, 0.5]), exposure=[5, 2], count=[2, 0])
+    # A whole-column reduction and a scalar field already have a scalar
+    # program. Keep that program for fitted models and checkpoint replay.
+    scalar = @brm begin
+        log(mu) ~ 0 + offset(log_mean)
+        unit ~ LogNormal(0, 1)
+        shape = unit * multiplier * sum(exposure)
+        count ~ NegativeBinomial2(mu, shape)
+    end
+    @test BRM._brm_rk_plan(scalar(merge(data, (; multiplier=0.5)))) isa BRM._RKStructuralPlan
+    fit = check_rk_source_roundtrip(RKBRMI(named(data)))
+    twin = RKBRMI(inline(data))
+    @test_throws "column length" RKBRMI(named(merge(data, (; exposure=[1, 2]))))
+    @test_throws "kernel has no port :shape" rk_draw_values(twin, zeros(2, 1), (:shape,))
+    ad = AutoEnzyme(; mode=Enzyme.Reverse)
+    for (rk, reference, rows) in ((fit, twin, data),
+            (reprocess(fit, new_rows), reprocess(twin, new_rows), new_rows))
+        names = coordinate_names(rk.model.layout)
+        @test names == coordinate_names(reference.model.layout)
+        @test Set(names) == Set((:unit, :residual))
+        i, j = coordinate(names, :unit), coordinate(names, :residual)
+        dispersion(u) = inv.(inv.(exp(u[i]) .* rows.exposure) .+ exp(-u[j]))
+        function oracle(u)
+            shape = dispersion(u)
+            prob = shape ./ (shape .+ exp.(rows.log_mean))
+            sum(logpdf.(NegativeBinomial.(shape, prob), rows.count)) + sum(logpdf.(Normal(), u))
+        end
+        p = rk_logdensity_problem(rk; ad_backend=ad)
+        q = rk_logdensity_problem(reference; ad_backend=ad)
+        for u in law_probes(2)
+            values = rk_draw_values(rk, reshape(u, :, 1), (:shape,))
+            @test only(values.shape) ≈ dispersion(u)
+            value, gradient = check_consumer_point(p, u, oracle)
+            inline_value, inline_gradient = LogDensityProblems.logdensity_and_gradient(q, u)
+            @test value ≈ inline_value
+            @test gradient ≈ inline_gradient
+        end
+    end
+end
+
 @stestset "every response family reads a data argument at run time" begin
     data = law_family_data()
     for case in FAMILIES

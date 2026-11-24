@@ -669,11 +669,13 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
     value_parents = union(assignments, predictors)
     any(op -> op.role === :predictor && any(in(value_parents), op.dependencies),
         program.operations) && return true
+    row_assignments = Set{Symbol}()
     for op in program.operations
         op.role === :assignment || continue
         any(in(predictors), op.dependencies) && return true
         expression = _brm_prepare_expr(last(getargs(op.expression)))
         _rk_has_value_call(expression) && return true
+        _rk_assignment_reads_rows(expression, program.context.data) && push!(row_assignments, op.name)
     end
     for observation in observations
         rhs = observation.rhs
@@ -730,6 +732,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
             reachable = _brm_reachable_operations(program,
                 _brm_prepared_references(_brm_prepare_expr(family)))
             isempty(intersect(predictors, reachable)) && return true
+            # A law reading a named rowwise expression needs the same value
+            # emitter as its inline spelling, including through assignment chains.
+            isdisjoint(row_assignments, reachable) || return true
             # A location or scale computed inline from model values
             # (`NegativeBinomial2(exp(dev) * s, phi)`) is the value it would be
             # assigned first (`mu = exp(dev) * s`), which this route lowers.
@@ -957,6 +962,18 @@ _rk_formula_shape_argument(::Type{<:Beta}, arg, predictors) =
         _rk_is_predictor_ref(factor, predictors) ||
             any(p -> _rk_beta_is_complement(factor, p), predictors)
     end
+
+# A bare-column reduction is scalar on the structural route. A computed
+# operand such as `sum(sigma .* x)` still needs elementwise arithmetic first.
+_rk_assignment_reads_rows(_, _data) = false
+_rk_assignment_reads_rows(ref::_BRMPreparedRef, data) =
+    _brm_has_row_ref(ref) && get(data, ref.name, nothing) isa AbstractVector
+function _rk_assignment_reads_rows(expr::_BRMPreparedExpr, data)
+    expr.callable in _RK_ASSIGNMENT_REDUCTIONS && length(expr.args) == 1 &&
+        only(expr.args) isa _BRMPreparedRef && return false
+    any(arg -> _rk_assignment_reads_rows(arg, data), expr.args) ||
+        any(arg -> _rk_assignment_reads_rows(arg, data), values(expr.kwargs))
+end
 
 _rk_has_value_call(_) = false
 function _rk_has_value_call(expression::_BRMPreparedExpr)
