@@ -1469,7 +1469,11 @@ function _brm_plate_observed_name(observed, i)
     Meta.isexpr(observed, :ref, 2) || return nothing
     _brm_plate_indexed(observed, i) || _brm_plate_indexed(observed.args[2], i) ||
         return _brm_plate_observed_name(observed.args[1], i)
-    observed.args[1] isa Symbol ? observed.args[1] : nothing
+    base = observed.args[1]
+    base isa Symbol && return base
+    Meta.isexpr(base, :., 2) || return nothing
+    names = _brm_documentation_lhs(base)
+    isempty(names) ? nothing : only(names)
 end
 
 # A kernel closure ending in `nothing` has no collected result; backends emit its
@@ -1745,12 +1749,40 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             push!(rewritten, target)
         end
     end
-    source = _brm_plate_source(i, range,
-        first(_brm_plate_outputs(_brm_plate_loop(authored)[3], i)), cell_groupings, groupings)
+    cell = _brm_plate_loop(authored)[3]
+    authored_stmts = Meta.isexpr(cell, :block) ? cell.args : Any[cell]
+    source = _brm_plate_source(i, range, authored_stmts, cell_groupings, groupings)
+    plate = (; index=i, anchor=isnothing(header) ? _brm_plate_range_input(range) : nothing,
+        header, bindings=Tuple((; name, groupings[name]...) for name in cell_groupings),
+        authored_reads=_brm_plate_authored_reads(cell, i, groupings))
     lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...),
-                  (; source, outputs=Tuple(outputs)))
+                  (; source, outputs=Tuple(outputs), plate))
     call = Expr(:call, :kernel, lambda, positionals...)
     Expr(:call, :~, target, call)
+end
+
+# `x => (; rows, target, zero)` for each `x[rows[i]]` and
+# `indexin(x[rows[i]], target[i])` read in the authored cell statements.
+function _brm_plate_authored_reads(body, i, groupings)
+    reads = Dict{Symbol,NamedTuple}()
+    function visit(ex)
+        ex isa Expr || return
+        indexed = _brm_plate_indexin_read(ex, i, groupings)
+        if indexed !== nothing
+            name, rows, target, zero = indexed
+            reads[name] = (; rows, target, zero)
+            return
+        end
+        read = _brm_plate_binding_read(ex, i, groupings)
+        if read !== nothing
+            name, rows = read
+            haskey(reads, name) || (reads[name] = (; rows, target=nothing, zero=false))
+            return
+        end
+        foreach(visit, ex.args)
+    end
+    visit(body)
+    reads
 end
 
 # The cell as written, for `show`: the model-scope bindings it reads, then the
@@ -2746,12 +2778,14 @@ struct _BRMInlineBody
     scope::Module
     # The authored `@plate for` cell this lambda was rewritten from, rendered
     # with the model-scope `groups` bindings it reads, or `nothing`. `show` and
-    # the model description read it; every backend lowers `expression`.
+    # source listings read it; every backend lowers `expression`.
     source::Union{String,Nothing}
     # The cell's indexed outputs (`name[i] = …`) in authored order. The lambda
     # binds each as a cell value, exactly like a bare local, and returns the
     # last; RKBRMI collects every one of them as a graph value of its name.
     outputs::Tuple{Vararg{Symbol}}
+    # Plate facts captured before printing can turn a callable into a listing.
+    plate::Union{Nothing,NamedTuple}
 end
 # `_brm_plate_kernel` hands the rendered cell and its indexed outputs to `_x` as
 # a third `->` argument, which `parselocals!` never reads; split it off here so
@@ -2760,8 +2794,8 @@ function _BRMInlineBody(expression::Expr, scope::Module)
     expression.args[2] isa Expr && _brm_warn_legacy_ode(expression.args[2], scope)
     Meta.isexpr(expression, :->, 3) ?
         _BRMInlineBody(Expr(:->, expression.args[1], expression.args[2]), scope,
-                       expression.args[3].source, expression.args[3].outputs) :
-        _BRMInlineBody(expression, scope, nothing, ())
+                       expression.args[3].source, expression.args[3].outputs, expression.args[3].plate) :
+        _BRMInlineBody(expression, scope, nothing, (), nothing)
 end
 _brm_inline_expr(x) = x
 _brm_inline_expr(x::_BRMInlineBody) = x.expression
@@ -2773,7 +2807,7 @@ Base.show(io::IO, x::_BRMInlineBody) =
     print(io, Base.remove_linenums!(deepcopy(x.expression)))
 Base.deepcopy_internal(x::_BRMInlineBody, stack::IdDict) =
     _BRMInlineBody(Base.deepcopy_internal(x.expression, stack), x.scope, x.source,
-                   x.outputs)
+                   x.outputs, Base.deepcopy_internal(x.plate, stack))
 
 # `name = constant(expr)` keeps `expr` unevaluated. The builder binds each name
 # the expression reads, either to a field of the data or to a value in the

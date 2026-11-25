@@ -2268,6 +2268,11 @@ group term. It runs under the test project:
 julia --startup-file=no --project=test test/description_comparisons.jl
 ```
 
+`description_record_members.jl` checks shared and distinct observation equations,
+keyed prior links, record-field documentation, callable hooks and replay for
+repeated record components. Run it with
+`julia --startup-file=no --project=test test/description_record_members.jl`.
+
 `description_plate_cells.jl` checks that a `@plate for` cell is described as
 written, in its own index. It covers:
 

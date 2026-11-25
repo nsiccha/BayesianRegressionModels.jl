@@ -27,6 +27,10 @@ context's notation. Rendering an unknown call does not establish coverage.
 function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReference)
     x.logical isa Tuple && any(n -> n.name==x.logical,c.notation) &&
         return brm_description_symbol(c,x.logical)
+    if x.logical isa Tuple && length(x.logical) >= 4 && first(x.logical) === :member &&
+            get(c.provenance,:member,nothing) == x.logical[2:3]
+        return brm_description_math(c,BRMDescriptionReference(x.name,x.axis,x.logical[4:end]))
+    end
     if x.axis===:cell
         output=_brmd_plate_output_math(c,x.name)
         isnothing(output) || return output
@@ -420,7 +424,7 @@ _brmd_transformed_math(::typeof(standardize),c,x) = _brmd_scale_math(c,x,:standa
 
 _brmd_beta(c,label) = "\\beta_{" * _brmd_escape(c.provenance.owner) * "," * _brmd_escape(label) * "}"
 function _brmd_factor_math(c,name)
-    ps=filter(p -> length(p.id)>=3 && p.id[1]===:population && p.id[2]===c.provenance.owner &&
+    ps=filter(p -> first(_brmd_local_id(p))===:population && _brmd_local_id(p)[2]===c.provenance.owner &&
                   get(p.source,:predictor,nothing)===name,c.priors)
     isempty(ps) && return nothing
     join((_brmd_beta(c,string(name)*"="*string(p.source.level)) *
@@ -1162,7 +1166,7 @@ _brmd_correlation_text(::Val{:identity}) = :identity_correlation
 _brmd_correlation_text(::Val{:none}) = :uncorrelated_margins
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords
-    id=_brmd_block_math(c,c.id)
+    id=_brmd_block_math(c,_brmd_local_id(c))
     subscript=k.by===nothing ? id : id*",s(i)"
     D="D_{"*subscript*"}"; omega="\\Omega_{"*subscript*"}"; L="L_{"*subscript*"}"; C="C_{"*subscript*"}"
     # A correlation held at the identity leaves the margins independent.
@@ -1273,28 +1277,17 @@ function _brmd_hook(c,hooks)
     fragment
 end
 
-"""
-    brm_description(d::BRMDescriptor; hooks=(), labels=Dict(), prior_anchors=Dict(), texts=description_texts())
-    brm_description(prepared::Union{SBBRMI,GenerativePlan}; ...)
-
-Describe the selected prepared model without fitting or sampling. Per-call hooks
-are actual-callable => context -> fragment pairs. `labels` binds logical symbols
-and supplied meanings/units. `prior_anchors` maps logical prior tuple IDs to
-report links. `texts` selects the language BRM writes in, e.g.
-`description_texts(:de)`; the description keeps it for its Markdown and hooks
-read it with `brm_description_texts(context)`. Unsupported semantic nodes remain
-explicit coverage gaps; an incomplete result is never labeled a complete model
-description.
-"""
-function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=Dict(),
-        texts::BRMDescriptionTexts=_BRMD_EN_TEXTS)
+function _brmd_model_parts(d, labels, prior_anchors, texts)
     notation=_brmd_notation(d,labels)
     groups=_brmd_ranef_metadata(d)
     notation=_brmd_block_notation(notation,groups,labels,texts)
     notation=_brmd_allocation_notation(d,notation,labels,texts)
     constants=_brmd_constants(d.plan)
-    priors,groups=_brmd_priors(d,prior_anchors,notation,texts;groups)
-    roots=collect(_brmd_components(d,priors,constants,notation,texts;groups))
+    collections=_brm_collection_axes(d.plan.parent)
+    priors,groups=_brmd_priors(d,prior_anchors,notation,texts;groups,
+        collections=Set(axis.path for axis in collections))
+    members=_brmd_members(d,collections,labels,prior_anchors,texts,priors,constants,notation)
+    roots=collect(_brmd_components(d,priors,constants,notation,texts;groups,collections,members))
     # Inventory allocation semantics explicitly; a Gaussian conditional prior
     # alone must never establish coverage of an unexplained hierarchical scale.
     append!(roots,_brmd_allocation_components(d,priors,constants,notation,texts,groups))
@@ -1326,15 +1319,40 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
     for prior in priors
         prior.distribution isa BRMDescriptionComponent && push!(roots,prior.distribution)
     end
+    member_roots = filter(c -> haskey(c.provenance,:member), roots)
+    member_priors = Tuple(p for c in member_roots for p in c.priors if get(p.provenance,:member,nothing) == c.provenance.member)
+    member_notation = Tuple(n for c in member_roots for n in c.notation)
+    (; roots, constants, priors=(priors..., member_priors...), notation=Tuple(unique((notation...,member_notation...))))
+end
+
+"""
+    brm_description(d::BRMDescriptor; hooks=(), labels=Dict(), prior_anchors=Dict(), texts=description_texts())
+    brm_description(prepared::Union{SBBRMI,GenerativePlan}; ...)
+
+Describe the selected prepared model without fitting or sampling. Per-call hooks
+are actual-callable => context -> fragment pairs. `labels` binds logical symbols
+and supplied meanings/units. `prior_anchors` maps logical prior tuple IDs to
+report links. `texts` selects the language BRM writes in, e.g.
+`description_texts(:de)`; the description keeps it for its Markdown and hooks
+read it with `brm_description_texts(context)`. Unsupported semantic nodes remain
+explicit coverage gaps; an incomplete result is never labeled a complete model
+description.
+"""
+function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=Dict(),
+        texts::BRMDescriptionTexts=_BRMD_EN_TEXTS)
+    (; roots,priors,notation)=_brmd_model_parts(d,labels,prior_anchors,texts)
     inventory=Tuple(node for root in roots for node in brm_description_components(root))
     ids=Set(c.id for c in inventory)
     length(ids)==length(inventory) || error("description: duplicate logical semantic component IDs")
     covered=Set{Tuple}()
-    prose=String[]; equations=String[]; added_notation=NamedTuple[]; sections=NamedTuple[]
+    fragments=Dict{Tuple,BRMDescriptionFragment}()
+    numbers=Dict{Tuple,Int}()
     for (index,c) in enumerate(inventory)
         fragment=_brmd_hook(c,hooks)
         if isnothing(fragment)
-            rendered=_brmd_render_context(c;provenance=merge(c.provenance,(;description_number=index)))
+            number=haskey(c.provenance,:member) ? get!(numbers,
+                (c.provenance.variant,c.provenance.local_id),index) : index
+            rendered=_brmd_render_context(c;provenance=merge(c.provenance,(;description_number=number)))
             fragment=_brmd_builtin_fragment(rendered)
         end
         isnothing(fragment) && continue
@@ -1344,17 +1362,17 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
             id in subtree || throw(ArgumentError("description hook claimed a component outside its subtree: $id"))
             push!(covered,id)
         end
-        append!(prose,fragment.prose); append!(equations,fragment.equations)
-        append!(added_notation,fragment.notation)
-        isempty(fragment.prose) && isempty(fragment.equations) ||
-            push!(sections,(;id=c.id,prose=fragment.prose,equations=fragment.equations))
+        fragments[c.id]=fragment
     end
+    sections,added_notation=_brmd_sections(inventory,fragments,covered,texts)
+    prose=Tuple(p for section in sections for p in section.prose)
+    equations=Tuple(e for section in sections for e in section.equations)
     coverage=Tuple(BRMDescriptionCoverage(c.id,c.id in covered ? :covered : :unsupported,
         c.id in covered ? "" : _brmd_text(texts,:coverage_gap;callable=_brmd_gap_name(c),id=c.id),
         c.provenance) for c in inventory)
     diagnostics=Tuple(x.reason for x in coverage if x.status !== :covered)
-    BRMDescription(d.id,Tuple(roots),Tuple(prose),Tuple(equations),
-        (notation...,added_notation...),priors,coverage,diagnostics,isempty(diagnostics),texts,Tuple(sections),
+    BRMDescription(d.id,Tuple(roots),prose,equations,
+        (notation...,added_notation...),priors,coverage,diagnostics,isempty(diagnostics),texts,sections,
         brm_documentation(d))
 end
 brm_description(prepared::Union{SBBRMI,GenerativePlan};kwargs...) =

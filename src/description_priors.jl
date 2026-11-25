@@ -425,7 +425,7 @@ function _brmd_declared_prior(d,logical,declaration,anchors,notation,texts;cell=
         (; kind=:declaration, family=f),anchors,notation,texts;cell)
 end
 
-function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d))
+function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d), collections=())
     priors = BRMPriorDescription[]
     _brmd_population_priors!(priors,d,anchors,notation,texts)
     _brmd_ranef_priors!(priors,d,groups,anchors,notation,texts)
@@ -448,6 +448,8 @@ function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d)
     end
     kernels=nothing
     for declaration in d.plan.declarations
+        # A repeated component contributes the priors of its selected members.
+        (declaration.context..., declaration.target) in collections && continue
         role = _brm_declaration_role(declaration,d.plan.bindings)
         role in (:population_effect,:random_effect) && continue
         declaration.target in categories && continue

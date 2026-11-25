@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.403
+
+- `brm_description` describes observations inside repeated record components.
+  Shared observation equations list their member keys. Each member retains its
+  own effective priors, outputs, callable hooks and coverage diagnostics.
+
 ## 0.2.402
 
 - Independent `RKBRMI(template, state)` opens reuse eligible fitted-model

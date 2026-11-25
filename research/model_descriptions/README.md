@@ -204,6 +204,16 @@ units, symbols, hooks and links are presentation metadata. They do not alter
 source, data, draws or inference caches. Units and biological meanings must be
 supplied; a name such as `log_CL` does not establish a log transformation.
 
+In a record collection such as `shifts[item.key] ~ instrument(item)`, hooks
+receive a context for each selected member. `context.provenance.member` is
+`(:shifts, key)`. Its observations retain their response roles and outputs.
+`brm_description_prior_references(context)` returns the addresses to pass to
+`brm_description_prior` or `brm_description_prior_anchor`. Member-local prior
+IDs start with `(:member, :shifts, key)`. Members with the same selected
+declaration and explanation share a printed equation labelled with their keys.
+Each such section lists its collection/key pairs in `section.members`.
+Coverage and prior links remain available for each key.
+
 `prose` and `equations` hold every sentence and equation in inventory order.
 `sections` holds the same sentences and equations per described component, as
 `(; id, prose, equations)`; the Markdown writes each part's sentences followed

@@ -205,16 +205,18 @@ Base.deepcopy_internal(component::BRMComponent, ::IdDict) = component
 brm_source(component::BRMComponent) = deepcopy(component.source)
 brm_columns(component::BRMComponent) = component.inputs
 
-function _brm_component_own_documentation(component::BRMComponent)
+function _brm_component_own_documentation(component::BRMComponent, body=nothing)
     header = Tuple(BRMDocumentation((), component.name, doc.markdown,
         doc.statement, doc.file, doc.line) for doc in _brm_source_documentation(brm_source(component)))
-    (header..., _brm_documentation(component.builder)...)
+    (header..., (isnothing(body) ? _brm_documentation(component.builder) : body)...)
 end
 Base.@nospecializeinfer function _brm_component_documentation(@nospecialize(model))
+    selected = Dict((axis.collection,k) => axis.documentation for axis in
+        (model isa BRMI ? _brm_collection_axes(model) : ()) for k in axis.keys)
     Tuple(BRMDocumentation((call.path..., doc.path...), first(call.path),
         doc.markdown, doc.statement, doc.file, doc.line)
         for call in brm_components(model) if !isempty(call.path)
-        for doc in _brm_component_own_documentation(call.definition))
+        for doc in _brm_component_own_documentation(call.definition,get(selected,call.path,nothing)))
 end
 _brm_documentation(component::BRMComponent) =
     (_brm_component_own_documentation(component)..., _brm_component_documentation(component)...)

@@ -569,7 +569,7 @@ function _brmd_constants(plan)
     Tuple((; input=key, kind=entry.kind, source=_brmd_snapshot(entry.raw_ref),
              value=_brmd_snapshot(entry.const_), dimension_coupled=entry.dim_coupled)
           for (key,entry) in sort!(collect(plan.preproc); by=p -> string(first(p)))
-          if entry.kind !== :submodel_hook)
+          if !(entry.kind in (:submodel_hook, :collection_cells)))
 end
 
 function _brmd_environment(d, owner, kind, priors, constants, notation, texts;groups=())
@@ -626,11 +626,16 @@ function _brmd_design_column(d,c)
       effect_block=c.effect_block,preprocess,term=_brmd_snapshot(get(c,:term,nothing)))
 end
 
-function _brmd_components(d, priors, constants, notation, texts;groups=())
+function _brmd_components(d, priors, constants, notation, texts;groups=(), collections=(), members=Dict())
     program = _brm_prepare_program(d.plan.parent)
     byname = Dict(op.name => op for op in program.operations)
     result = BRMDescriptionComponent[]
     for key in program.order
+        if haskey(members, key)
+            append!(result, members[key])
+            continue
+        end
+        any(axis -> key in axis.returns, collections) && continue
         op = byname[key]
         op.role === :prior_modifier && continue
         op.expression isa ExprColumn || continue

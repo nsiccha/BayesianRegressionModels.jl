@@ -3,34 +3,10 @@
 # input, each bound to what the cell reads at entry `i`: an entry `x[i]`, a
 # vector at a model-scope binding's rows `x[rows[i]]`, positions
 # `indexin(idx[rows[i]], target[i])`, or, in a `groups(g)` plate, the group's
-# rows `x[p]`. The kernel keeps the authored cell (`_BRMInlineBody.source`), so
+# rows `x[p]`. The kernel keeps the authored indices and bindings, so
 # the plate is read from it and the cell's statements render in its indices
 # instead of through the formals' bindings. A kernel without that source, the
 # deprecated `kernel(...) do`, keeps its input-binding rendering.
-
-# `x => (; rows, target, zero)` for each `x[rows[i]]` and
-# `indexin(x[rows[i]], target[i])` read in the authored cell statements.
-function _brmd_plate_authored_reads(body, i, groupings)
-    reads = Dict{Symbol,NamedTuple}()
-    function visit(ex)
-        ex isa Expr || return
-        indexed = _brm_plate_indexin_read(ex, i, groupings)
-        if indexed !== nothing
-            name, rows, target, zero = indexed
-            reads[name] = (; rows, target, zero)
-            return
-        end
-        read = _brm_plate_binding_read(ex, i, groupings)
-        if read !== nothing
-            name, rows = read
-            haskey(reads, name) || (reads[name] = (; rows, target=nothing, zero=false))
-            return
-        end
-        foreach(visit, ex.args)
-    end
-    visit(body)
-    reads
-end
 
 # What the formal `name`, bound to the kernel argument `value`, reads at the
 # plate index, or `nothing` when the authored cell does not say.
@@ -49,20 +25,13 @@ _brmd_plate_read(_name, _value, _header, _authored) = nothing
 # the model-scope `bindings` it reads in authored order, its `outputs`
 # (`name[i] = …`) and one `reads` record per kernel formal.
 function _brmd_plate(body, params, outer)
-    source = body isa _BRMInlineBody ? body.source : nothing
-    source === nothing && return nothing
-    statements = [s for s in Meta.parseall(source).args if !(s isa LineNumberNode)]
-    bindings = Tuple((; name=first(s.args), _brm_plate_binding(last(s.args))...)
-        for s in statements if _is_brm_plate_binding(s))
-    groupings = Dict{Symbol,_BRMPlateGrouping}(b.name => (; b.group, b.cells, b.order) for b in bindings)
-    i, range, cell = _brm_plate_loop(only(filter(_is_brm_plate, statements)))
-    header = _brm_plate_header_grouping(range)
-    authored = _brmd_plate_authored_reads(cell, i, groupings)
-    reads = map((name, value) -> _brmd_plate_read(name, value, header, get(authored, name, nothing)),
-        Tuple(params), outer)
+    plate = body isa _BRMInlineBody ? body.plate : nothing
+    plate === nothing && return nothing
+    reads = map(Tuple(params), outer) do name, value
+        _brmd_plate_read(name, value, plate.header, get(plate.authored_reads, name, nothing))
+    end
     any(isnothing, reads) && return nothing
-    (; index=i, anchor=header === nothing ? _brm_plate_range_input(range) : nothing,
-       header, bindings, outputs=Tuple(last(_brm_plate_outputs(cell, i))), reads)
+    (; plate.index, plate.anchor, plate.header, plate.bindings, body.outputs, reads)
 end
 
 _brmd_cell_plate(c) = get(c.provenance, :cell_plate, nothing)
