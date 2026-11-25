@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.402
+
+- Independent `RKBRMI(template, state)` opens reuse eligible fitted-model
+  definitions and graph construction from a package workload or the 16 most
+  recently used runtime definitions. Each open binds its current fit and
+  design and owns its graph and coordinate layout. Reopening after a provider
+  edits a package-owned child kernel observes the edit.
+
 ## 0.2.401
 
 - `adaptive_centering_problem(rk, target, ad_backend)` supports sparse Laplace

@@ -207,7 +207,8 @@ function _rk_observed_anchor_source(value::Expr, observations)
     if Meta.isexpr(value, :call, 2) && first(value.args) === :_brm_observed_values
         return observations[value.args[2]]
     end
-    Expr(value.head, map(arg -> _rk_observed_anchor_source(arg, observations), value.args)...)
+    args = map(arg -> _rk_observed_anchor_source(arg, observations), value.args)
+    all(i -> args[i] === value.args[i], eachindex(args)) ? value : Expr(value.head, args...)
 end
 _rk_observed_anchor_source(value, _observations) = value
 

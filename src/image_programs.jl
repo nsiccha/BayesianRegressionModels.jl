@@ -22,8 +22,7 @@ end
 struct _RKImageDefinition
     digest::String
     bindings::Vector{Pair{Symbol,Any}}
-    mod::Module
-    inputs::_RKSourceInputs
+    code::_RKOnce
 end
 struct _BRMImagePrograms
     builders::Vector{_BRMImageBuilder}
@@ -38,6 +37,11 @@ _brm_image_matches(entry::_RKImageDefinition, (digest, bindings)) =
 const _BRM_IMAGE_PROGRAMS_NAME = Symbol("#BayesianRegressionModels_image_programs")
 const _BRM_IMAGE_PROGRAMS_LOCK = ReentrantLock()
 const _BRM_LOADED_PROGRAMS = _BRMImagePrograms[]
+
+# Workload entries live for the lifetime of their image. Independent fitted
+# opens outside a workload retain only the most recently used definitions.
+const _RK_RECENT_DEFINITIONS = _RKImageDefinition[]
+const _RK_RECENT_LIMIT = 16
 
 function _brm_image_table(owner)
     isdefined(owner, _BRM_IMAGE_PROGRAMS_NAME) || return nothing
@@ -91,6 +95,30 @@ function _brm_image_record(field, entry)
         push!(getfield(table, field), entry)
     end
     nothing
+end
+
+function _rk_definition_slot(digest, bindings)
+    key = (digest, bindings)
+    lock(_BRM_IMAGE_PROGRAMS_LOCK) do
+        entry = _brm_image_find(:definitions, key)
+        isnothing(entry) || return entry.code
+        if isnothing(_brm_image_target())
+            i = findfirst(e -> _brm_image_matches(e, key), _RK_RECENT_DEFINITIONS)
+            if !isnothing(i)
+                entry = splice!(_RK_RECENT_DEFINITIONS, i)
+                push!(_RK_RECENT_DEFINITIONS, entry)
+                return entry.code
+            end
+        end
+        entry = _RKImageDefinition(digest, copy(bindings), _RKOnce())
+        if isnothing(_brm_image_target())
+            push!(_RK_RECENT_DEFINITIONS, entry)
+            length(_RK_RECENT_DEFINITIONS) > _RK_RECENT_LIMIT && popfirst!(_RK_RECENT_DEFINITIONS)
+        else
+            _brm_image_record(:definitions, entry)
+        end
+        entry.code
+    end
 end
 
 # A source block may interpolate arbitrary Julia objects, including data arrays
