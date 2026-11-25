@@ -164,7 +164,7 @@ macro next_value()
 end
 const WITH_MACRO = "c = constant(@next_value()); y ~ Normal(c, 1)"
 const FORMULA = "sigma ~ Exponential(1); mu ~ 1 + center(x); y ~ Normal(mu, sigma)"
-const WITH_CONSTANT = "c = constant(scale); shifted = x - c; sigma ~ Exponential(1); mu ~ 1 + shifted; y ~ Normal(mu, sigma)"
+const WITH_CONSTANT = "c = constant(scale); shifted = x - c; sigma ~ Uniform(0, 3); mu ~ 1 + shifted; y ~ Normal(mu, sigma)"
 const WITH_CELL = quote
     c = constant(scale)
     shifted = x - c

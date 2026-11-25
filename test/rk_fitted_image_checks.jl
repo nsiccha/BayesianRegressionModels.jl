@@ -85,7 +85,10 @@
     for scale in (2.0, 5.0)
         fit = RKBRMI(constant_builder(merge(data, (; scale))))
         reopened = RKBRMI(constant_builder(design), brm_fitted_state(fit))
-        @test parentmodule(ext._rk_program(reopened).mod) === W
+        program = ext._rk_program(reopened)
+        @test parentmodule(program.mod) === W
+        @test !isnothing(image_constructors[program.builds]) &&
+            program.builds.entry === image_constructors[program.builds]
         @test mean_prediction(reopened) == mean_prediction(reprocess(fit, design))
     end
 
