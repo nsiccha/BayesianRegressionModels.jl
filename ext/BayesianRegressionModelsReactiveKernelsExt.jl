@@ -325,9 +325,14 @@ struct _RKProgram
     mod::Module
     captured::BRM._RKOnce
     inputs::BRM._RKSourceInputs
+    builds::Union{Nothing,KernelBuildCache}
+    child_revisions::Tuple
 end
+_rk_child_revisions(emitted) = Tuple(kernel_revision(value) for (_, value) in
+    emitted.bindings if value isa KernelSpec)
 _RKProgram(emitted::BRM._RKEmittedProgram) =
-    _RKProgram(emitted, _rk_emit_module(emitted), BRM._RKOnce(), BRM._RKSourceInputs(emitted))
+    _RKProgram(emitted, _rk_emit_module(emitted), BRM._RKOnce(), BRM._RKSourceInputs(emitted),
+        nothing, _rk_child_revisions(emitted))
 # A program is code, as a compiled function is: a copy of a backend (a
 # per-chain copy) shares it with the original, and its replays share it too.
 # Julia refuses to deepcopy the module it holds.
@@ -359,6 +364,19 @@ function _rk_constant_code_binding(t::DataType)
 end
 _rk_constant_code_binding(@nospecialize(x)) = false
 
+# A provider may bind a package constant under a different name in the
+# emitted module. An ad-hoc graph could close over fit data.
+function BRM._rk_record_provider_binding!(code, name, child::KernelSpec, provider_args)
+    scope = which(BRM._rk_callable_source!, Base.typesof(provider_args...)).module
+    Base.PkgId(scope).uuid === nothing && return
+    owns(sym) = isdefined(scope, sym) && isconst(scope, sym) &&
+        !Base.isdeprecated(scope, sym) && getglobal(scope, sym) === child
+    if owns(name) || any(owns, names(scope; all=true, imported=true))
+        code[name] = child
+    end
+    nothing
+end
+
 # Reuse declarative submodels and kernels. An ordinary Julia definition can
 # evaluate a signature or keep mutable globals in its definition module. It
 # must keep the fresh namespace it would get outside a workload.
@@ -380,26 +398,31 @@ function _rk_image_definition(def, constant_code)
         get(constant_code, first(sig.args), nothing) === def && _rk_image_definition(body)
 end
 
-function _rk_image_binding((name, value), constant_code)
+function _rk_image_binding((name, value), reusable_code)
     _rk_image_callable(value) ||
-        (get(constant_code, name, nothing) === value && _rk_constant_code_binding(value))
+        (get(reusable_code, name, nothing) === value &&
+            (value isa KernelSpec || _rk_constant_code_binding(value)))
 end
 
 # Only definitions and their bound globals are evaluated in this module.
 # The main block may call a generated constant with this fit's scalar
 # literal. Lower that block with its own input names on every open.
-function _rk_fitted_program(emitted, declaration)
-    if !all(d -> _rk_image_definition(d, emitted.constant_code), emitted.defs) ||
+function _rk_fitted_program(emitted, declaration, revisions)
+    if !all(d -> _rk_image_definition(d, emitted.reusable_code), emitted.defs) ||
             !BRM._brm_image_syntax(emitted.main) ||
-            !all(b -> _rk_image_binding(b, emitted.constant_code), emitted.bindings)
+            !all(b -> _rk_image_binding(b, emitted.reusable_code), emitted.bindings)
         return _RKProgram(emitted)
     end
     digest = BRM._brm_value_digest((declaration, emitted.defs))
     slot = BRM._rk_definition_slot(digest, emitted.bindings)
-    mod = BRM._rk_once!(slot) do
-        _rk_emit_module(emitted)
+    code = lock(slot.lock) do
+        if isnothing(slot.value) || slot.value.revisions != revisions
+            slot.value = (; mod=_rk_emit_module(emitted), builds=KernelBuildCache(), revisions)
+        end
+        slot.value
     end
-    _RKProgram(emitted, mod, BRM._RKOnce(), BRM._RKSourceInputs(emitted))
+    _RKProgram(emitted, code.mod, BRM._RKOnce(), BRM._RKSourceInputs(emitted),
+        code.builds, revisions)
 end
 
 # Lowering reads the data values' shapes (rkppl-use §1), so each binding
@@ -459,14 +482,16 @@ BRM._rk_frozen_values(backend::BRM.RKBRMI, names) =
 # the same, as `reprocess` shares a fit's.
 function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram, plan, frozen, previous;
         declaration=emitted.main)
-    if previous !== nothing && BRM._rk_same_callables(BRM._rk_retained_program(previous), emitted)
+    revisions = _rk_child_revisions(emitted)
+    if previous !== nothing && _rk_program(previous).child_revisions == revisions &&
+            BRM._rk_same_callables(BRM._rk_retained_program(previous), emitted)
         program = _rk_program(previous)
         bound = _rk_bind_program(program, plan; frozen)
         return previous.program, BRM._RKOnce(bound), previous.model
     end
-    program = _rk_fitted_program(emitted, declaration)
+    program = _rk_fitted_program(emitted, declaration, revisions)
     bound = _rk_bind_program(program, plan; frozen)
-    BRM._RKOnce(program), BRM._RKOnce(bound), build_kernel(bound)
+    BRM._RKOnce(program), BRM._RKOnce(bound), build_kernel(bound; cache=program.builds)
 end
 BRM._rk_retained_program(backend::BRM.RKBRMI) = _rk_program(backend).emitted
 

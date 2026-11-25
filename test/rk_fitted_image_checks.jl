@@ -102,18 +102,46 @@
     child_fit = RKBRMI(child_template(data))
     child_state = brm_fitted_state(child_fit)
     reopen() = RKBRMI(child_template(design), child_state)
+    image_constructors = IdDict(def.code.value.builds => def.code.value.builds.entry
+        for def in BRM._brm_image_table(W).definitions)
+    fixed = W.RKImageModels.fixed_child(data)
+    fixed_rk = RKBRMI(fixed, brm_fitted_state(RKBRMI(fixed)))
+    fixed_builds = ext._rk_program(fixed_rk).builds
+    @test parentmodule(ext._rk_program(fixed_rk).mod) === W
+    @test !isnothing(fixed_builds.entry) && fixed_builds.entry === image_constructors[fixed_builds]
     before = reopen()
+    @test parentmodule(ext._rk_program(before).mod) === W
+    builds = ext._rk_program(before).builds
+    # RKPPL 0.1.260 builds the positive-scale graph fresh. BRM still
+    # shares its definitions and observes a child edit on the next open.
+    @test !isnothing(builds)
+    @test ext._rk_program(reopen()).builds === builds
+    # A provider returning a graph created for this call must not root it
+    # in a package image or in the runtime definitions table.
+    code = Dict{Symbol,Any}()
+    BRM._rk_record_provider_binding!(code, :package_shift, before.model.spec,
+        (Expr[], Pair{Symbol,Any}[], :shift_parameter, W.RKImageModels.shift_parameter))
+    @test isempty(code)
     expected_child = mean_prediction(before)
     @test mean_prediction(reprocess(child_fit, design)) == expected_child
     child = W.RKImageModels.shifted_input
     original = child.ports[:z]
     try
         child.ports[:z] = child.ports[:a]
-        @test mean_prediction(reopen()) ≈ expected_child .- 1
+        changed = reopen()
+        @test ext._rk_program(changed).mod !== ext._rk_program(before).mod
+        @test mean_prediction(changed) ≈ expected_child .- 1
+        @test mean_prediction(reprocess(before, design)) ≈ expected_child .- 1
         @test mean_prediction(before) == expected_child
     finally
         child.ports[:z] = original
     end
+
+    cell_builder = brm(W.WITH_CELL; mod=W)
+    cell_fit = RKBRMI(cell_builder(merge(data, (; scale=5.0))))
+    cell_open = RKBRMI(cell_builder(design), brm_fitted_state(cell_fit))
+    @test parentmodule(ext._rk_program(cell_open).mod) === W
+    @test mean_prediction(cell_open) == mean_prediction(reprocess(cell_fit, design))
 
     table = BRM._brm_image_table(W)
     @test any(entry -> BRM._brm_same_syntax(entry.source, BRM._brm_source_block(W.FORMULA)), table.builders)

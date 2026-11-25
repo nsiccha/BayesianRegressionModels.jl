@@ -475,7 +475,8 @@ const PINS = [
     # RK 0.1.369 and RKPPL 0.1.256 read ragged matrix rows, runtime checks and loops per station.
     # RKPPL 0.1.258 keeps sums with parameter-dependent row checks in the outer likelihood.
     # RKPPL 0.1.259 preserves nested reading axes when a sibling response uses a fitted predictor.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "169bdb0f642e92d17717f618b8f272c348743af8"),
+    # RK 0.1.384 and RKPPL 0.1.260 support independent fitted graph construction.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b64d5fb87501d7ba9059e126b2030d86b7d4b755"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

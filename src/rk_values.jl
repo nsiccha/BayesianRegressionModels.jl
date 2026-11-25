@@ -1601,7 +1601,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
     union!(densities, (a.name for a in plan.assignments if a isa _RKPreparedSubmodelAssignment &&
             !isempty(a.observed)))
     emitted = _rk_scalar_lone_intercepts(
-        _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
+        _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken;
+                reusable_code=regression.reusable_code),
             _rk_observed_names(plan); retained=authored, coordinates,
             densities),
         lone_intercepts)

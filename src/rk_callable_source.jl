@@ -34,12 +34,15 @@ Extend with `import BayesianRegressionModels: _rk_callable_source!`.
 """
 _rk_callable_source!(definitions, bindings, entry, f) = nothing
 
+# The RK extension recognizes package-owned kernel graphs supplied as leaves.
+_rk_record_provider_binding!(code, name, value, provider_args) = nothing
+
 function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
     definitions = copy(emitted.defs)
     pending = copy(emitted.bindings)
     bindings = Pair{Symbol,Any}[]
     claimed = IdDict{Any,Symbol}()
-    constant_code = Dict{Symbol,Any}()
+    reusable_code = copy(emitted.reusable_code)
     while !isempty(pending)
         entry, callable = popfirst!(pending)
         haskey(claimed, callable) && error(
@@ -62,9 +65,14 @@ function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
         end
         entry in names || error("RK source: callable provider did not define its entry `$entry`")
         if callable isa _RKConstantEvaluator && length(provider_definitions) == 1
-            constant_code[entry] = only(provider_definitions)
+            reusable_code[entry] = only(provider_definitions)
             for (name, value) in provider_bindings
-                value isa Union{Module,Type} && (constant_code[name] = value)
+                value isa Union{Module,Type} && (reusable_code[name] = value)
+            end
+        else
+            for (name, value) in provider_bindings
+                _rk_record_provider_binding!(reusable_code, name, value,
+                    (provider_definitions, provider_bindings, entry, callable))
             end
         end
         claimed[callable] = entry
@@ -72,16 +80,16 @@ function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
         append!(pending, provider_bindings)
     end
     resolved = _RKEmittedProgram(_rk_unique_source_definitions(definitions),
-        emitted.main, bindings, constant_code)
+        emitted.main, bindings, reusable_code)
     _rk_validate_source_definitions(resolved)
     resolved
 end
 
 # `taken` holds the emitter's reserved names, including data columns the
 # source may never spell but the program binds by name.
-_rk_source_program(definitions, main, bindings, taken=()) =
+_rk_source_program(definitions, main, bindings, taken=(); reusable_code=Dict{Symbol,Any}()) =
     _rk_resolve_callable_sources(_rk_name_callable_bindings(
-        _RKEmittedProgram(definitions, main, bindings), taken))
+        _RKEmittedProgram(definitions, main, bindings, reusable_code), taken))
 
 # An opaque callable is bound under a placeholder while the program is
 # emitted; `#` keeps it out of every authored and generated name.
@@ -164,7 +172,7 @@ function _rk_name_callable_bindings(emitted::_RKEmittedProgram, taken=())
         Expr[_rk_rename_symbols(definition, renames) for definition in emitted.defs],
         _rk_rename_symbols(emitted.main, renames),
         Pair{Symbol,Any}[get(renames, name, name) => callable
-            for (name, callable) in emitted.bindings])
+            for (name, callable) in emitted.bindings], emitted.reusable_code)
 end
 
 _rk_rename_symbols(value, renames) = value
