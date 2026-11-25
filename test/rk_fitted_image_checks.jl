@@ -13,7 +13,7 @@
         bound = rk_bound_data(rk)
         query = ReactiveKernels.prepare(rk.model.spec;
             have=(:unconstrained, keys(bound)...), want=(:mu,), bound)
-        u = collect(range(-0.6, 0.8; length=rk.model.layout.total))
+        u = collect(range(-0.6; step=0.2, length=rk.model.layout.total))
         result = Base.invokelatest(query, u)
         result isa Tuple ? only(result) : result
     end
@@ -105,7 +105,9 @@
     image_constructors = IdDict(def.code.value.builds => def.code.value.builds.entry
         for def in BRM._brm_image_table(W).definitions)
     fixed = W.RKImageModels.fixed_child(data)
-    fixed_rk = RKBRMI(fixed, brm_fitted_state(RKBRMI(fixed)))
+    fixed_state = brm_fitted_state(RKBRMI(fixed))
+    fixed_rk = RKBRMI(fixed, fixed_state)
+    fixed_prediction = mean_prediction(fixed_rk)
     fixed_builds = ext._rk_program(fixed_rk).builds
     @test parentmodule(ext._rk_program(fixed_rk).mod) === W
     @test !isnothing(fixed_builds.entry) && fixed_builds.entry === image_constructors[fixed_builds]
@@ -133,6 +135,10 @@
         @test mean_prediction(changed) ≈ expected_child .- 1
         @test mean_prediction(reprocess(before, design)) ≈ expected_child .- 1
         @test mean_prediction(before) == expected_child
+        fixed_changed = RKBRMI(fixed, fixed_state)
+        @test !isnothing(ext._rk_program(fixed_changed).builds.entry)
+        @test mean_prediction(fixed_changed) ≈ fixed_prediction .- 1
+        @test mean_prediction(fixed_rk) == fixed_prediction
     finally
         child.ports[:z] = original
     end
