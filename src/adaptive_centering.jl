@@ -2135,8 +2135,11 @@ Base.show(io::IO, b::_CDARAdaptiveCenteringBlock) = print(
     ", ", b.n_groups, "×", b.n_steps, " walk cells)",
 )
 
+_adaptive_cdar_sigma(block, x) =
+    _adaptive_constrain(x[block.sigma], block.sigma_lower, block.sigma_upper)
+
 function _adaptive_cdar_physical(block::_CDARAdaptiveCenteringBlock, x::AbstractVector)
-    sigma = _adaptive_constrain(x[block.sigma], block.sigma_lower, block.sigma_upper)
+    sigma = _adaptive_cdar_sigma(block, x)
     rho = _adaptive_constrain(x[block.rho], block.rho_lower, block.rho_upper)
     sigma, rho
 end

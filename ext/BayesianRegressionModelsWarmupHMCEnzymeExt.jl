@@ -295,7 +295,7 @@ function LogDensityProblems.logdensity_and_gradient(
         return _blockwise_logdensity_and_gradient(problem, state.ranef, x)
     end
     invoke(LogDensityProblems.logdensity_and_gradient,
-        Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
+        Tuple{AC_EXT._WalkProblem,AbstractVector}, problem, x)
 end
 
 # The blockwise objective reads each pair's control from the state's flat

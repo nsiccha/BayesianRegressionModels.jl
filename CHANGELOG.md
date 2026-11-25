@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.400
+
+- An adaptive-centering target returns `-Inf` when a finite proposal for a
+  `cdar` walk gives a zero or infinite marginal standard deviation. Warm-up
+  can reject that proposal and continue from the previous position.
+
 ## 0.2.399
 
 - Sparse Laplace evaluation can use analytic negative-binomial rows when
