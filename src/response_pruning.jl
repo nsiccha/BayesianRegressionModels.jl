@@ -196,7 +196,7 @@ function _brm_prune_cell_body(@nospecialize(raw), key::Symbol, wanted)
     # The indexed outputs stay the cell's own; a backend reads only the ones
     # the remaining body still binds.
     lam isa _BRMInlineBody && (lambda = _BRMInlineBody(lambda, _brm_inline_scope(lam),
-        nothing, _brm_inline_outputs(lam)))
+        nothing, _brm_inline_outputs(lam), nothing))
     rhs = ExprColumn(kernel, lambda, positionals...; getkwargs(cell.rhs)...)
     lhs = first(getargs(cell.op))
     NamedColumn(name(raw), ExprColumn(~, lhs, rhs; getkwargs(cell.op)...))

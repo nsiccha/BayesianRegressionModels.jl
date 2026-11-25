@@ -93,6 +93,8 @@ description constructed without it is English.
 order. `sections` holds the same sentences and equations per described
 component, `(; id, prose, equations)` in that order, so a reader sees each
 part's equations right after its sentences; the Markdown is written from them.
+A shared record-component section also has `members`, the collection/key pairs
+to which the explanation applies. Its `id` identifies the first use.
 A description constructed without sections has one section holding all of
 `prose`, then all of `equations`.
 `documentation` retains authored declaration Markdown and provenance; it
@@ -221,15 +223,18 @@ function brm_description_prior_references(c::BRMDescriptionContext)
     _brmd_prior_references!(ids,c)
     Tuple(p.id for p in c.priors if p.id in ids)
 end
+_brmd_local_id(x)=get(x.provenance,:local_id,x.id)
+
 function _brmd_prior_references!(ids,c::BRMDescriptionComponent)
+    union!(ids,get(c.provenance,:member_prior_ids,()))
     factor=get(c.provenance,:covariance_factor,nothing)
     isnothing(factor) || union!(ids,(factor.scales,factor.correlation))
     for b in c.bindings
         union!(ids,b.prior_ids)
     end
     for p in c.priors
-        if first(c.id) in (:random_effect,:total_effect) && length(p.id)>=length(c.id) && p.id[1:length(c.id)]==c.id ||
-           first(p.id)===:population && length(p.id)>=2 && p.id[2]===c.provenance.owner
+        if c.kind in (:random_effect,:total_effect) && length(p.id)>=length(c.id) && p.id[1:length(c.id)]==c.id ||
+           first(_brmd_local_id(p))===:population && _brmd_local_id(p)[2]===c.provenance.owner
             push!(ids,p.id)
         end
     end
@@ -245,7 +250,7 @@ function _brmd_prior_references!(ids,c,x::BRMDescriptionReference)
     for p in c.priors
         if p.id==resolved.logical || get(p.source,:binding_id,nothing)==resolved.logical ||
            p.id==(:parameter,resolved.logical) ||
-           first(p.id)===:population && length(p.id)>=2 && p.id[2]===resolved.logical
+           first(_brmd_local_id(p))===:population && _brmd_local_id(p)[2]===resolved.logical
             push!(ids,p.id)
         end
     end
@@ -262,6 +267,7 @@ brm_description_components(description::BRMDescription) =
 
 include("description_semantics.jl")
 include("description_priors.jl")
+include("description_members.jl")
 include("description_render.jl")
 include("description_plates.jl")
 include("description_allocations.jl")

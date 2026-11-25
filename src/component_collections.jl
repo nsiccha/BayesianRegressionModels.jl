@@ -89,6 +89,11 @@ struct _BRMCollectionAxis <: AbstractVector{Int}
     keys::Vector{Union{Int,Symbol}}
     positions::Vector{Int}
     path::Tuple{Vararg{Symbol}}
+    # Public return carriers and the record field -> (component port, data column)
+    # projection chosen by this variant. Names can be freshened by the compiler.
+    returns::Tuple{Vararg{Symbol}}
+    ports::NamedTuple
+    documentation::Tuple{Vararg{BRMDocumentation}}
 end
 Base.size(axis::_BRMCollectionAxis) = size(axis.positions)
 Base.getindex(axis::_BRMCollectionAxis, i::Int) = axis.positions[i]
@@ -137,7 +142,7 @@ function _brm_variant_component(loop, selected, value, ports)
 end
 
 function _brm_collection_variant!(out, frame, observers, builder, occupied, loop, records, keys,
-        positions, selected, value, variant, df, group_sources)
+        positions, selected, value, variant, df, group_sources, public_names)
     name = loop.target
     fresh(parts...) = _rk_ast_fresh_name(string(parts...), occupied)
     axis_name = fresh(name, "_axis_", variant)
@@ -149,9 +154,11 @@ function _brm_collection_variant!(out, frame, observers, builder, occupied, loop
     component, fields = _brm_variant_component(loop, declarations, value, ports)
     args = Any[arg for (i, arg) in enumerate(loop.arguments) if i != loop.record]
     append!(args, shared)
+    projection = Pair{Symbol,NamedTuple}[]
     for (key, formal) in fields
         column = fresh(fields_prefix, formal)
         frame[column] = [_brm_record_field(records[i], key) for i in positions]
+        push!(projection, key => (; formal, column))
         push!(args, Expr(:ref, column, index))
     end
     member = fresh(name, "_member_", variant)
@@ -164,7 +171,10 @@ function _brm_collection_variant!(out, frame, observers, builder, occupied, loop
         _brm_is_observer(st) || continue
         push!(observers, (; loop, records, positions, keys=keys[positions], result=member_results, variant, observer=st))
     end
-    frame[axis_name] = _BRMCollectionAxis(builder, name, keys[positions], positions, (last(results), member))
+    # Keep the selected branch's original record-field spelling in doc paths.
+    documentation = _brm_source_documentation(Expr(:block, selected...))
+    frame[axis_name] = _BRMCollectionAxis(builder, name, keys[positions], positions, (last(results), member),
+        Tuple(public_names), (; projection...), documentation)
     call = Expr(:call, component, args...)
     reads = isnothing(returned) ? [member] :
         [Expr(:., member, QuoteNode(field)) for field in Base.keys(returned)]
@@ -213,7 +223,7 @@ function _brm_lower_collection!(out, frame, observers, fields, builder, occupied
         name
     end
     if isempty(groups)
-        frame[loop.target] = _BRMCollectionAxis(builder, loop.target, keys, Int[], ())
+        frame[loop.target] = _BRMCollectionAxis(builder, loop.target, keys, Int[], (), Tuple(public_names), (;), ())
         for name in public_names
             frame[name] = frame[loop.target]
         end
@@ -232,7 +242,7 @@ function _brm_lower_collection!(out, frame, observers, fields, builder, occupied
         positions = groups[group]
         sort!(positions; by=i -> (keys[i] isa Symbol, keys[i]))
         push!(results, _brm_collection_variant!(out, frame, observers, builder, occupied, loop, records, keys,
-            positions, selected_bodies[group], value, variant, df, group_sources))
+            positions, selected_bodies[group], value, variant, df, group_sources, public_names))
         append!(order, positions)
     end
     permutation = _rk_ast_fresh_name(string(loop.target, "_row_order"), occupied)

@@ -74,6 +74,8 @@ function _brm_documentation_lhs(lhs)
         return Tuple(key for item in lhs.args for key in _brm_documentation_lhs(item))
     elseif Meta.isexpr(lhs, :vect)
         return (_joint_response_operation_key(Tuple(lhs.args)),)
+    elseif Meta.isexpr(lhs, :., 2) && first(lhs.args) isa Symbol && last(lhs.args) isa QuoteNode
+        return (Symbol(first(lhs.args), ".", last(lhs.args).value),)
     elseif lhs.head in (:ref, :(::))
         return _brm_documentation_lhs(lhs.args[1])
     elseif Meta.isexpr(lhs, :call)
