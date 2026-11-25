@@ -3427,10 +3427,31 @@ function _cells_centering_problem(problem, ad_backend, ordinary, r2d2_blocks,
     )
 end
 
+_rk_problem_layout(rk, problem, names) = BRM._rk_adaptive_layout(
+    rk, isnothing(names) ? BRM._rk_layout_coordinate_names(rk) : names)
+
+function _sparse_outer_names(rk, target, names)
+    rk === target.backend || throw(ArgumentError(
+        "adaptive centering: pass the RKBRMI used to build this sparse Laplace target"))
+    isnothing(names) || [Symbol(n) for n in names] == target.names || throw(ArgumentError(
+        "adaptive centering: `unc_names` must match the sparse Laplace target's outer names in order"))
+    target.names
+end
+
+_rk_problem_layout(rk, target::BRM.BRMSparseLaplaceProblem, names) =
+    BRM._rk_adaptive_layout(rk, _sparse_outer_names(rk, target, names), target.population)
+
 """
     adaptive_centering_problem(rk::RKBRMI, problem, ad_backend;
         unc_names=nothing, centeredness=nothing, ranef_order=:declared, hsgp=true,
         hsgp_levels=false, fields=false)
+
+A sparse `target = brm_laplace_problem(rk; ad_backend, integrate)` can be
+wrapped with `adaptive_centering_problem(rk, target, ad_backend)`. Cells and
+their scale, mixing-weight and location inputs use the outer order in
+`target.names`. Integrated effects are absent from the map. WarmupHMC's
+`posterior_position` is in the original outer frame and can be passed to
+`brm_laplace_draws(target, P)` to draw the integrated effects.
 
 Wrap `problem = rk_logdensity_problem(rk; ad_backend)` in the same WarmupHMC
 adaptive partial centring of random effects as the SBBRMI method: one
@@ -3511,34 +3532,33 @@ with no cell to adapt raises.
 function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
         unc_names=nothing, centeredness=nothing, ranef_order=:declared, hsgp=true,
         hsgp_levels=false, fields=false)
-    names = String.(isnothing(unc_names) ? BRM._rk_layout_coordinate_names(model) :
-                    unc_names)
+    layout = _rk_problem_layout(model, problem, unc_names)
     ranef_order in (:declared, :learned) ||
         throw(ArgumentError("ranef_order must be :declared or :learned"))
     centeredness isa Symbol && centeredness !== :midpoint && throw(ArgumentError(
         "centeredness must be a real in [0, 1], one such value per cell, or " *
         "`:midpoint`; got `:$centeredness`"))
-    blocks = BRM.adaptive_centering_blocks(model, names)
+    blocks = BRM.adaptive_centering_blocks(model, layout)
     fields isa Bool || throw(ArgumentError("fields must be true or false"))
     hsgp isa Bool || throw(ArgumentError("hsgp must be true or false"))
     hsgp_levels isa Bool || throw(ArgumentError("hsgp_levels must be true or false"))
-    hsgp_blocks = hsgp ? BRM._rk_adaptive_hsgp_blocks(model, names) :
+    hsgp_blocks = hsgp ? BRM._rk_adaptive_hsgp_blocks(model, layout) :
         BRM._HSGPAdaptiveCenteringBlock[]
-    level_blocks = hsgp_levels ? BRM._rk_adaptive_hsgp_level_blocks(model, names) :
+    level_blocks = hsgp_levels ? BRM._rk_adaptive_hsgp_level_blocks(model, layout) :
         _NO_LEVEL_BLOCKS
-    car_blocks = fields ? BRM._rk_adaptive_car_blocks(model, names) : _NO_CAR_BLOCKS
-    cdar_blocks = fields ? BRM._rk_adaptive_cdar_blocks(model, names) : _NO_CDAR_BLOCKS
+    car_blocks = fields ? BRM._rk_adaptive_car_blocks(model, layout) : _NO_CAR_BLOCKS
+    cdar_blocks = fields ? BRM._rk_adaptive_cdar_blocks(model, layout) : _NO_CDAR_BLOCKS
     # `rw(...)` walks: a zero-start walk's innovations are cells of their own,
     # mapped first, as on SBBRMI (snag adaptive-centrin-647119ba).
-    walks = BRM._rk_adaptive_walk_terms(model, names)
+    walks = BRM._rk_adaptive_walk_terms(model, layout)
     walk_blocks = BRM._adaptive_walk_blocks(walks)
     if isempty(blocks) && isempty(walk_blocks) && isempty(hsgp_blocks) &&
             isempty(level_blocks) && isempty(car_blocks) && isempty(cdar_blocks)
         # What a switched-off keyword would have adapted, named in the error.
-        held_basis = !hsgp && !isempty(BRM._rk_adaptive_hsgp_blocks(model, names))
+        held_basis = !hsgp && !isempty(BRM._rk_adaptive_hsgp_blocks(model, layout))
         held_levels = !hsgp_levels && BRM._rk_has_hsgp_level_terms(model)
-        held = !fields && !(isempty(BRM._rk_adaptive_car_blocks(model, names)) &&
-                            isempty(BRM._rk_adaptive_cdar_blocks(model, names)))
+        held = !fields && !(isempty(BRM._rk_adaptive_car_blocks(model, layout)) &&
+                            isempty(BRM._rk_adaptive_cdar_blocks(model, layout)))
         error("BRM adaptive centering on RKBRMI: this model has no random-effect " *
               "block" * (hsgp ? " or HSGP" : "") * ", and no zero-start `rw` walk, " *
               "with sampler coordinates to adapt" *
@@ -3549,7 +3569,7 @@ function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
               (held ? "; its `car` fields or `cdar` walks adapt only with `fields = true` " *
                       "(off by default: see the docstring)." : "."))
     end
-    locations = BRM._adaptive_ranef_locations(model, blocks, names; walks)
+    locations = BRM._adaptive_ranef_locations(model, blocks, layout; walks)
     # Walk cells first: the random-effect cells read them at their model values.
     ordinary = vcat(walk_blocks, BRM.AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.AdaptiveCenteringBlock])
@@ -3746,6 +3766,9 @@ _control_margins(_) = Dict{Symbol,Tuple}()
 
 # The unconstrained names a wrapper's positions carry: the RK layout's for an
 # RKBRMI, the compiled Stan model's otherwise.
+_control_names(rk::BRM.RKBRMI, target::BRM.BRMSparseLaplaceProblem, names) =
+    String.(_sparse_outer_names(rk, target, names))
+_control_names(model, problem, names) = isnothing(names) ? _control_names(model, problem) : names
 _control_names(model::BRM.RKBRMI, _) = String.(BRM._rk_layout_coordinate_names(model))
 _control_names(_, problem) = _problem_unc_names(problem)
 
@@ -3755,7 +3778,7 @@ function BRM.adaptive_centering_controls(adaptive::WarmupHMC.ReparametrizedProbl
     state = _centering_state(ir)
     rows = NamedTuple[]
     isnothing(state) && return rows
-    names = isnothing(unc_names) ? _control_names(model, adaptive.problem) : unc_names
+    names = _control_names(model, adaptive.problem, unc_names)
     _control_rows!(rows, state, _centering_orders(ir), 0, _centering_values(ir), names,
                    _control_margins(model))
     rows

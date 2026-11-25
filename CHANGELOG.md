@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.401
+
+- `adaptive_centering_problem(rk, target, ad_backend)` supports sparse Laplace
+  targets. Retained random effects, including Student-t blocks, adapt in the
+  outer coordinate order. WarmupHMC returns draws in the frame accepted by
+  `brm_laplace_draws`.
+
 ## 0.2.400
 
 - An adaptive-centering target returns `-Inf` when a finite proposal for a

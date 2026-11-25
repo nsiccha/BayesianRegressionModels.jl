@@ -727,6 +727,77 @@ end
     end
 end
 
+@stestset "sparse Laplace outer centring: retained Student-t cells" begin
+    data = (; y=randn(Xoshiro(38), 24), unit=repeat(1:8; inner=3),
+            batch=repeat(1:4; inner=6), arm=fill("a", 24))
+    model = @brm data begin
+        mu ~ 0 + factor(arm) + (1 | unit) + (1 | batch)
+        effect(mu, arm) ~ Normal(0, 1.5)
+        sd(mu, unit) ~ Exponential(1.0)
+        sd(mu, batch) ~ Exponential(1.0)
+        ranef(mu, batch) ~ TDist(3)
+        y ~ Normal(mu, 1.0)
+    end
+    rk = RKBRMI(model)
+    target = brm_laplace_problem(rk; ad_backend=AD, integrate=(:unit,))
+    names = String.(target.names)
+    @test names == layout_names(rk)[target.population]
+    @test_throws ArgumentError adaptive_centering_problem(rk, target, AD; unc_names=reverse(names))
+    @test_throws ArgumentError adaptive_centering_problem(RKBRMI(model), target, AD)
+    outer = adaptive_centering_problem(rk, target, AD; unc_names=Tuple(target.names))
+    rows = adaptive_centering_controls(outer, rk)
+    @test_throws ArgumentError adaptive_centering_controls(outer, rk; unc_names=layout_names(rk))
+    @test length(rows) == 4
+    @test all(r -> r.group === :batch && r.name == names[r.index], rows)
+    @test all(r -> r.c == 0.0 && r.location == "mu_arm.1", rows)
+    indices = [r.index for r in rows]
+    block = only(r for r in BRM._rk_coordinate_records(rk) if r.kind === :ranef && r.group === :batch)
+    tau = position(names, string(block.scale, ".1"))
+    weights = [position(names, string(block.mixing, ".", g)) for g in 1:4]
+    intercept = position(names, "mu_arm.1")
+    x = 0.4 .* randn(Xoshiro(71), length(names))
+    function expected(u, c)
+        logscale = u[tau] .+ u[weights] ./ 2
+        y = copy(u)
+        y[indices] .= (u[indices] .- c .* u[intercept]) .* exp.(-c .* logscale)
+        -dot(c, logscale), y
+    end
+    for c in (zeros(4), [0.2, 0.4, 0.6, 0.8], ones(4))
+        adaptive = adaptive_centering_problem(rk, target, AD; centeredness=c)
+        jac, y = expected(x, c)
+        actual_jac, actual_y = WarmupHMC.reparametrizer(adaptive)(copy(x))
+        @test actual_jac ≈ jac atol=1e-12
+        @test actual_y ≈ y atol=1e-12
+        objective(u) = begin
+            j, v = expected(u, c)
+            j + LogDensityProblems.logdensity(target, v)
+        end
+        value, gradient = LogDensityProblems.logdensity_and_gradient(adaptive, x)
+        @test value ≈ objective(x) atol=1e-10
+        h = 1e-5
+        fd = map(eachindex(x)) do k
+            step = zeros(length(x))
+            step[k] = h
+            (objective(x .+ step) - objective(x .- step)) / (2h)
+        end
+        @test gradient ≈ fd rtol=2e-6 atol=2e-6
+        copy_for_chain = deepcopy(adaptive)
+        @test copy_for_chain.problem !== target
+        @test LogDensityProblems.logdensity(copy_for_chain, x) ≈ value
+        draws = brm_laplace_draws(target, reshape(actual_y, :, 1); rng=Xoshiro(74)).draws
+        @test draws[target.population, 1] ≈ y
+        @test all(isfinite, draws[target.integrated, 1])
+    end
+    # Integrating the common location leaves the same four scale-dependent
+    # cells, with no outer coefficient to add at the centred endpoint.
+    reduced = brm_laplace_problem(rk; ad_backend=AD, integrate=(:unit, :coefficients))
+    scaled = adaptive_centering_problem(rk, reduced, AD; centeredness=1)
+    retained = adaptive_centering_controls(scaled, rk)
+    @test [r.name for r in retained] == names[indices]
+    @test all(r -> isnothing(r.location), retained)
+    @test target.names[intercept] ∉ reduced.names
+end
+
 @stestset "multi-membership blocks: one cell per joint level, centred on 0" begin
     df = panel(; seed=25)
     # A second membership column over the same levels, shifted by one group.
