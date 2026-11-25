@@ -4,6 +4,8 @@
     W = RKImageWorkload
     BRM = BayesianRegressionModels
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    image_constructors = IdDict(def.code.value.builds => def.code.value.builds.entry
+        for def in BRM._brm_image_table(W).definitions)
     data = (; x=[0., 1., 2.], y=[2., 1., 4.])
     train(shift) = RKBRMI(W.template((; x=data.x .+ shift, data.y)))
     first_fit, second_fit = train(0), train(10)
@@ -20,6 +22,9 @@
 
     a, b = fetch.([Threads.@spawn RKBRMI(W.template(design), state) for state in states])
     @test parentmodule(ext._rk_program(a).mod) === W
+    centered_builds = ext._rk_program(a).builds
+    @test !isnothing(image_constructors[centered_builds]) &&
+        centered_builds.entry === image_constructors[centered_builds]
     @test ext._rk_program(b).mod === ext._rk_program(a).mod
     @test ext._rk_program(a).captured !== ext._rk_program(b).captured
     @test rk_bound_plan(a) !== rk_bound_plan(b)
@@ -92,9 +97,12 @@
         rk = RKBRMI(model, state)
         @test BRM._rk_layout_coordinate_names(rk) == state.coordinates
         @test mean_prediction(rk) == mean_prediction(fit)
-        rk
+        (; rk, constructor=ext._rk_program(rk).builds.entry)
     end
-    @test first(group_fits).model.layout.total + 1 == last(group_fits).model.layout.total
+    two_levels, three_levels = group_fits
+    @test two_levels.rk.model.layout.total + 1 == three_levels.rk.model.layout.total
+    @test !isnothing(two_levels.constructor) &&
+        two_levels.constructor === three_levels.constructor
 
     # A provider can supply an existing package-owned graph to its emitted
     # kernel. Redirecting its output changes subsequent independent opens.
@@ -102,8 +110,6 @@
     child_fit = RKBRMI(child_template(data))
     child_state = brm_fitted_state(child_fit)
     reopen() = RKBRMI(child_template(design), child_state)
-    image_constructors = IdDict(def.code.value.builds => def.code.value.builds.entry
-        for def in BRM._brm_image_table(W).definitions)
     fixed = W.RKImageModels.fixed_child(data)
     fixed_state = brm_fitted_state(RKBRMI(fixed))
     fixed_rk = RKBRMI(fixed, fixed_state)
@@ -114,9 +120,7 @@
     before = reopen()
     @test parentmodule(ext._rk_program(before).mod) === W
     builds = ext._rk_program(before).builds
-    # RKPPL 0.1.260 builds the positive-scale graph fresh. BRM still
-    # shares its definitions and observes a child edit on the next open.
-    @test !isnothing(builds)
+    @test !isnothing(image_constructors[builds]) && builds.entry === image_constructors[builds]
     @test ext._rk_program(reopen()).builds === builds
     # A provider returning a graph created for this call must not root it
     # in a package image or in the runtime definitions table.
