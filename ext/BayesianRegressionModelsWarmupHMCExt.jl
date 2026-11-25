@@ -1,6 +1,7 @@
 module BayesianRegressionModelsWarmupHMCExt
 
 using BayesianRegressionModels
+import LogDensityProblems
 using WarmupHMC
 
 const BRM = BayesianRegressionModels
@@ -2696,6 +2697,45 @@ function (arg::BRMCDARAdaptiveCenteringArgument{:log_scale})(x)
     BRM._adaptive_cdar_log_scale(x, arg.state.blocks[bi], cell)
 end
 
+# A walk's scale coordinate is read-only throughout the map. Check it once per
+# block before either the map or the model sees the proposal, even at c = 0
+# where an indexed map can skip its scale reader entirely.
+const _WalkScaleReader = Union{BRMCDARAdaptiveCenteringArgument{:log_scale},
+                               BRMJointAdaptiveCenteringArgument{:log_scale}}
+const _WalkCell = WarmupHMC.Reparametrization{T,S,A} where {T,S,A<:Tuple{Any,_WalkScaleReader}}
+const _WalkPairs = AbstractVector{<:Pair{Int,<:_WalkCell}}
+const _WalkMap = Union{WarmupHMC.IndexedReparametrization{<:_WalkPairs},
+                       BRMOrderedCenteringReparametrization}
+const _WalkProblem = WarmupHMC.ReparametrizedProblem{<:_WalkMap}
+
+_cdar_blocks(state::BRMCDARAdaptiveCenteringState) = state.blocks
+_cdar_blocks(state::BRMJointAdaptiveCenteringState) = state.cdar.blocks
+_cdar_blocks(::Nothing) = _NO_CDAR_BLOCKS
+
+function _outside_cdar_support(problem, x)
+    for block in _cdar_blocks(_centering_state(problem.reparametrizer))
+        sigma = BRM._adaptive_cdar_sigma(block, x)
+        if (iszero(sigma) || sigma == Inf) && isfinite(x[block.sigma])
+            length(x) == LogDensityProblems.dimension(problem) ||
+                throw(DimensionMismatch("position length does not match the model dimension"))
+            return true
+        end
+    end
+    false
+end
+
+function LogDensityProblems.logdensity(problem::_WalkProblem, x::AbstractVector)
+    _outside_cdar_support(problem, x) && return -Inf
+    invoke(LogDensityProblems.logdensity,
+        Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
+end
+
+function LogDensityProblems.logdensity_and_gradient(problem::_WalkProblem, x::AbstractVector)
+    _outside_cdar_support(problem, x) && return (-Inf, zeros(eltype(x), length(x)))
+    invoke(LogDensityProblems.logdensity_and_gradient,
+        Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
+end
+
 function _sync_sources!(state::BRMCDARAdaptiveCenteringState, ir)
     length(ir.pairs) == length(state.sources) || throw(DimensionMismatch(
         "BRM cdar adaptive-centering plan has $(length(state.sources)) walk " *
@@ -3189,7 +3229,9 @@ scale `sigma * sqrt(1 - rho)` (`sigma` for an island) and location
 `c=0` is the emitted frame. Car cells follow every other joint cell in the pair
 order: `:icar` cells in emitted `phi` order, `:bym2` cells in sorted area order.
 
-For a `cdar` walk, each of the `P * W` innovations is one scalar cell with
+For a `cdar` walk, a finite proposal whose constrained marginal standard
+deviation rounds to zero or infinity has log density `-Inf` in every frame.
+Each of the `P * W` innovations is one scalar cell with
 zero location and its marginal prior spread
 `sigma * sqrt(C[p, p] * (1 - rho^(2w)) / (1 - rho^2))`; `c=0` is the emitted
 `eta` frame. `cdar` cells alone form their own plan. Beside rw, ordinary, R2D2, HSGP or car cells

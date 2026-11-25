@@ -148,6 +148,49 @@ LogDensityProblems.logdensity(::CDARQuadraticTarget, x) = -sum(abs2, x) / 2
 LogDensityProblems.logdensity_and_gradient(target::CDARQuadraticTarget, x) =
     (LogDensityProblems.logdensity(target, x), -x)
 
+function check_cdar_tail_rejection(wrapped, position, block)
+    before = LogDensityProblems.logdensity_and_gradient(wrapped, position)
+    @test isfinite(before[1]) && all(isfinite, before[2])
+    proposal = copy(position)
+    for value in (-750.0, 710.0)
+        proposal[block.sigma] = value
+        @test LogDensityProblems.logdensity(wrapped, proposal) == -Inf
+        ld, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, proposal)
+        @test ld == -Inf
+        @test axes(gradient) == axes(proposal)
+    end
+    @test LogDensityProblems.logdensity_and_gradient(wrapped, position) == before
+end
+
+@testset "cdar rejection follows each walk's physical scale" begin
+    bounded = BRM._CDARAdaptiveCenteringBlock(:mu, :bounded, 1, 1, [3],
+        1, 0.25, 2.0, 2, 0.0, 1.0, [1.0])
+    positive = BRM._CDARAdaptiveCenteringBlock(:mu, :positive, 1, 1, [6],
+        4, 0.0, Inf, 5, 0.0, 1.0, [1.0])
+    state, ir = CDAR_AC_EXT._adaptive_cdar_centering_reparametrizer([bounded, positive])
+    set_cdar_sources!(state, ir, [0.5, 1.0])
+    wrapped = WarmupHMC.ReparametrizedProblem(ir, CDARQuadraticTarget(6), DI.AutoEnzyme())
+    x = zeros(6)
+    for raw_scale in (-750.0, 710.0)
+        x[bounded.sigma] = raw_scale
+        check_cdar_tail_rejection(wrapped, x, positive)
+    end
+
+    # Stretch only the unbounded scale so the first leapfrog overshoots.
+    # At the origin its log-density gradient is -1 from the centered cell.
+    x .= 0
+    scale = ones(length(x))
+    scale[positive.sigma] = 1e5
+    oversized = WarmupHMC.FixedKernelNUTSState(Xoshiro(120), x;
+        metric=Diagonal(scale), stepsize=1.0, max_tree_depth=1)
+    rejected = WarmupHMC.fixed_kernel_nuts_step(oversized, wrapped)
+    @test rejected.divergent && rejected.state.position == x
+    regular = WarmupHMC.FixedKernelNUTSState(rejected.state.rng, rejected.state.position;
+        metric=Diagonal(ones(length(x))), stepsize=0.1, max_tree_depth=3)
+    next = WarmupHMC.fixed_kernel_nuts_step(regular, wrapped)
+    @test !next.divergent && next.state.position != x
+end
+
 @testset "cdar transform, Jacobian, scores, and Enzyme gradient" begin
     sb = SBBRMI(CDAR_AC_BUILDER; mod=@__MODULE__)
     names = cdar_ac_unc_names()
@@ -265,12 +308,18 @@ end
     adaptive = LogDensityProblems.logdensity_and_gradient(wrapped, initial)
     @test adaptive[1] ≈ plain[1] atol=2e-11
     @test adaptive[2] ≈ plain[2] atol=2e-11
+    check_cdar_tail_rejection(wrapped, initial, only(blocks))
     @test WarmupHMC.candidate_scoring_plan(wrapped) isa
           WarmupHMC.CandidateScoringPlan
 
     controls = [0.2, 0.5, 1.0, 0.7]
     set_cdar_sources!(state, ir, controls)
     position = collect(range(-0.2, 0.25; length=length(unc_names)))
+    check_cdar_tail_rejection(wrapped, position, only(blocks))
+    malformed = copy(position)
+    malformed[only(blocks).rho] = NaN
+    @test_throws "persistence left" LogDensityProblems.logdensity(wrapped, malformed)
+    @test_throws "persistence left" LogDensityProblems.logdensity_and_gradient(wrapped, malformed)
     ljac, model_position = ir(position)
     wrapped_lp, wrapped_gradient =
         LogDensityProblems.logdensity_and_gradient(wrapped, position)
@@ -357,6 +406,7 @@ end
     # Each family maps exactly as its own wrapper does at the same controls.
     controls = collect(range(0.15, 0.85; length=n_ranef + n_walk))
     set_cdar_sources!(state, ir, controls)
+    check_cdar_tail_rejection(wrapped, x, only(walk))
     ljac, mapped = ir(x)
     walk_state, walk_ir = CDAR_AC_EXT._adaptive_cdar_centering_reparametrizer(walk)
     set_cdar_sources!(walk_state, walk_ir, controls[n_ranef + 1:end])
@@ -392,6 +442,7 @@ end
     @test lir isa CDAR_AC_EXT.BRMOrderedCenteringReparametrization
     @test length(WarmupHMC.reparam_controls(lir)) == n_ranef + n_walk
     WarmupHMC.restore_reparam_controls!(lir, controls)
+    check_cdar_tail_rejection(learned, x, only(walk))
     learned_ljac, learned_mapped = lir(x)
     @test learned_mapped[walk_coords] ≈ walk_mapped[walk_coords] atol=1e-13
     _, ranef_only = CDAR_AC_EXT._adaptive_ordered_centering_reparametrizer(
