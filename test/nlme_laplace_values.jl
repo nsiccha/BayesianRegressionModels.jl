@@ -87,6 +87,24 @@ end
     @test isempty(last(BRM._brm_spl_nb2_rows(latent_shape, records)))
 end
 
+@stestset "computed NB2 promotion distinguishes arithmetic and kernel shapes in one model" begin
+    d = (; g=["a", "b", "c"], exposure=[2, 1, 3], y=[1, 0, 2], other=[2, 1, 0])
+    rk = RKBRMI(@brm d begin
+        log(mu) ~ 1 + (1 | g)
+        a ~ LogNormal(0, 1)
+        shape = a .* exposure
+        kernel_shape ~ kernel(mu) do m
+            return 1 + m
+        end
+        y ~ NegativeBinomial2(mu, shape)
+        other ~ NegativeBinomial2(mu, kernel_shape)
+    end)
+    records = BRM._brm_spl_records(rk, [:g])
+    _, responses, promoted = BRM._brm_spl_nb2_rows(rk, records)
+    @test promoted == [:y]
+    @test only(responses).scale === :shape
+end
+
 @stestset "non-centered shares retain completion density corrections" begin
     d = (; g=["a", "a", "b", "b"], ids=["a", "b"], total=[5.0, 4.0],
         x=Union{Missing,Float64}[missing, missing, missing, 1.0],
