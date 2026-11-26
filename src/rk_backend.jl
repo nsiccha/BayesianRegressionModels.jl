@@ -566,7 +566,9 @@ mutable struct _BRMPreparedSlot
     const lock::ReentrantLock
     const factors::_RKOnce
     const coordinates::_RKOnce
-    _BRMPreparedSlot() = new(nothing, ReentrantLock(), _RKOnce(), _RKOnce())
+    # The parameter and readout graph of an unconditioned fit or its replay.
+    const prior_values::_RKOnce
+    _BRMPreparedSlot() = new(nothing, ReentrantLock(), _RKOnce(), _RKOnce(), _RKOnce())
 end
 Base.deepcopy_internal(::_BRMPreparedSlot, ::IdDict) = _BRMPreparedSlot()
 

@@ -109,6 +109,18 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
             car_units=_rk_rebuilt_car_units(car_units))
     end
     new_data = _brm_collection_replay_data(brm_source(rk), new_data)
+    if rk.plan isa _RKUnconditionedPlan
+        # A design can contain measured outcomes. Keep the fit's distinction
+        # between data inputs and sampled names (including inside cells).
+        new_data = (; (name => _brm_df_column(new_data, name)
+            for name in keys(_rk_training_columns(parent(rk)))
+            if _brm_df_has_column(new_data, name))...)
+    end
+    _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariates, car_units, prefix)
+end
+
+function _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariates,
+        car_units, prefix, prior_responses=nothing)
     _rk_refuse_level_correlated_resample(parent(rk),
         _rk_resample_group_set(resample_groups; prefix); prefix)
     _rk_refuse_grouped_hsgp_resample(parent(rk),
@@ -133,9 +145,13 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     _, fitted = _brm_resolve_constants(parent(rk); prefix)
     constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
     plan = _brm_with_frozen_replay(_BRMFrozenReplay(training, groups)) do
-        _rk_plan_car_units(_rk_plan_completions(_brm_rk_plan(rebound; held_out,
+        _rk_plan_car_units(_rk_plan_completions(_brm_rk_plan(rebound; held_out, prior_responses,
             fitted_constants=(name, _source) -> get(constants, name, nothing)),
             _rk_completion_mode(rk.plan)), car_units)
+    end
+    if rk.plan isa _RKUnconditionedPlan && plan isa _RKUnconditionedPlan
+        source = rk.plan.replay === nothing ? rk : rk.plan.replay.source
+        plan = _RKUnconditionedPlan(plan.generative, plan.columns, (; data=new_data, groups, source))
     end
     retained = _rk_retained_program(rk)
     # This emission's coordinate inventory is the replay's, so preparing the
@@ -171,6 +187,57 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         program=replay.program, bound=replay.bound, source=brm_source(rk),
         model_plan=plan), records)
 end
+
+function _rk_prior_values(rk::RKBRMI)
+    rk.plan isa _RKUnconditionedPlan || throw(ArgumentError(
+        "RK prior replay requires an unconditioned fit. Keep the observation statements " *
+        "and omit the response columns when constructing RKBRMI."))
+    _rk_once!(rk.prepared.prior_values) do
+        binding = rk.plan.replay
+        if binding === nothing
+            backend = _rk_prior_value_backend(rk)
+            return (; backend, fit=backend, id=_brm_rk_binding_identity(backend, "brm-prior-v1"))
+        end
+        isempty(binding.groups) || throw(ArgumentError(
+            "RK prior draws carry the fitted group effects. Reuse them on " *
+            "designs with the fitted levels and omit resample_groups."))
+        source = _rk_prior_values(binding.source)
+        backend = _rk_frozen_reprocess(source.fit, binding.data; held_out=(), resample_groups=(),
+            covariates=(), car_units=_rk_fitted_car_units(source.fit.plan), prefix="RK prior replay",
+            prior_responses=_rk_prior_response_names(rk.model_plan))
+        (; backend, source.fit, source.id)
+    end
+end
+
+# The packed parameter coordinates belong to the prior graph, whose frozen
+# replays share their meaning. The fitted density has its own empty layout.
+struct _RKPriorDraws
+    points::Matrix{Float64}
+    binding_id::String
+end
+Base.length(draws::_RKPriorDraws) = size(draws.points, 2)
+
+"""
+    rk_prior_draws(rk::RKBRMI, n; seed)
+
+Draw `n` joint parameter realizations for a prior-only model. Construct `rk`
+with its response columns omitted. The seeded RNG runs once over the parameter
+declarations in dependency order. The batch stores the parameter coordinates
+of the prior graph, including the group effects. The fitted backend still
+has zero sampler coordinates.
+
+Pass the batch to `rk_draw_values(reprocess(rk, design), draws, names)` to
+evaluate the same realizations on each design. Frozen replay uses the
+training levels, coefficient order and preprocessing. A law used for a
+prior draw must supply a normalized generator.
+"""
+function rk_prior_draws(rk::RKBRMI, n::Integer; seed::Integer)
+    n > 0 || throw(ArgumentError("rk_prior_draws requires a positive draw count"))
+    values = _rk_prior_values(rk)
+    points = _rk_generate_prior(values.fit, Random.Xoshiro(seed), n)
+    _RKPriorDraws(points, values.id)
+end
+function _rk_generate_prior end
 
 # The kernel of a backend's own binding (ReactiveKernels package extension).
 function _rk_rebuild_model end

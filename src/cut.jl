@@ -232,11 +232,15 @@ end
 
 """
     rk_draw_values(rk::RKBRMI, U, names; submodel=nothing) -> NamedTuple
+    rk_draw_values(rk::RKBRMI, draws, names; submodel=nothing) -> NamedTuple
 
 The graph values `names` of `rk` (formula values, `=` assignments, `@plate`
 cell outputs) at each draw, the columns of `U` in `rk`'s unconstrained
 coordinates: one vector of per-draw values per name, from one prepared value
 kernel.
+
+For a prior-only model, pass a batch from [`rk_prior_draws`](@ref) to read
+the same parameter realizations on the fit or its frozen design replays.
 
 A draw's value of a `@plate` output has one entry per cell in the cell's own
 shape, as the model reads it: after `out[i] = v`, `value[i]` is cell `i`'s
@@ -263,6 +267,13 @@ function rk_draw_values(rk::RKBRMI, U::AbstractMatrix, names; submodel=nothing)
     values = [read(U[:, k]) for k in axes(U, 2)]
     at(value) = isnothing(member) ? value : value[member]
     NamedTuple{names}(Tuple([at(v[source]) for v in values] for source in sources))
+end
+
+function rk_draw_values(rk::RKBRMI, draws::_RKPriorDraws, names; submodel=nothing)
+    target = _rk_prior_values(rk)
+    target.id == draws.binding_id || throw(ArgumentError(
+        "rk_draw_values: generate the prior batch from this fit and use its frozen design replays"))
+    rk_draw_values(target.backend, draws.points, names; submodel)
 end
 
 # Resolve authored fields through the actual property reads emitted by the

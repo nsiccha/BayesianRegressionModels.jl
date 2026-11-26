@@ -562,6 +562,11 @@ Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); hel
     brmi = BRM._brm_resolve_optional_priors(source)
     plan = BRM._rk_plan_car_units(
         BRM._rk_plan_completions(BRM._brm_rk_plan(brmi; held_out), completions), car_units)
+    BRM._rk_backend_from_plan(brmi, plan, source)
+end
+
+Base.@nospecializeinfer function BRM._rk_backend_from_plan(@nospecialize(brmi::BRM.BRMI),
+        @nospecialize(plan), @nospecialize(source::BRM.BRMI))
     program = _RKProgram(BRM._rk_emit_ast(plan; documentation=BRM.brm_documentation(source)))
     bound = _rk_bind_program(program, plan)
     BRM.RKBRMI(brmi, plan, build_kernel(bound);
@@ -606,6 +611,17 @@ function LogDensityProblems.logdensity_and_gradient(
 end
 
 BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
+
+function BRM._rk_generate_prior(rk, rng, n)
+    bound = BRM.rk_bound_plan(rk)
+    query = ReactiveKernelsPPL.prepare_prior(bound)
+    layout = rk.model.layout
+    points = Matrix{Float64}(undef, layout.total, n)
+    for (i, draw) in enumerate(query(rng, n))
+        points[:, i] = unconstrain(layout, draw)
+    end
+    points
+end
 
 BRM.rk_bound_data(backend::BRM.RKBRMI) = _rk_bound_inputs(BRM.rk_bound_plan(backend))
 

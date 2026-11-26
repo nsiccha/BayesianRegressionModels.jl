@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.406
+
+- `rk_prior_draws(rk, n; seed)` generates a reusable joint batch from an RK
+  fit with omitted responses. Pass it to `rk_draw_values` on the fit or its
+  frozen design replays to evaluate the same parameters at each design.
+
 ## 0.2.405
 
 - `RKBRMI` keeps a component's named return fields available to its caller

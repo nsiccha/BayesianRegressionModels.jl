@@ -226,7 +226,7 @@ function show_rk_plan(plan::_RKUnconditionedPlan)
     string(_rk_plan_summary(plan), "\n",
         "  data keys = ", sort!(collect(keys(plan.columns))), "\n",
         "  generative snapshot = retained SLIC model and bindings\n",
-        "  native generated draws = unavailable\n")
+        "  joint prior draws = rk_prior_draws(rk, n; seed)\n")
 end
 
 function _rk_show_terms(terms)

@@ -11,11 +11,12 @@ _rk_generated_input_entries(plan::_RKHeldOutPlan) = _rk_generated_input_entries(
 
 # An unconditioned BRM program forward-simulates on the Stan route. Its
 # declarations belong to generated quantities, not to an HMC coordinate pack.
-# Retain the authoritative generative snapshot while emitting only its empty
-# fitted density. This does not implement native generated draws.
+# Retain the authoritative generative snapshot. The fitted density is empty,
+# and the parameter and readout graph is prepared when requested.
 struct _RKUnconditionedPlan{G}
     generative::G
     columns::Dict{Symbol,Any}
+    replay::Union{Nothing,NamedTuple}
 end
 _rk_plan_summary(plan::_RKUnconditionedPlan) =
     "unconditioned program (zero fitted coordinates; " *
@@ -23,6 +24,30 @@ _rk_plan_summary(plan::_RKUnconditionedPlan) =
 _rk_observed_names(::_RKUnconditionedPlan) = ()
 _rk_emit_ast(::_RKUnconditionedPlan; documentation=()) =
     _RKEmittedProgram(Expr[], Expr(:block), Pair{Symbol,Any}[])
+
+# The same prior fit has a second graph for generation and readouts. The
+# declaration inventory distinguishes an omitted outcome from an ordinary
+# prior with sampled arguments. Cell-local outcomes are handled by the cell
+# planner using their original formals and data bindings.
+function _rk_prior_response_names(plan::_RKUnconditionedPlan)
+    Tuple(d.target for d in plan.generative.declarations
+        if d.role === :observation && isempty(d.context))
+end
+
+Base.@nospecializeinfer function _rk_prior_value_plan(@nospecialize(brmi::BRMI),
+        response_names)
+    entries = filter(p -> first(p) ∉ response_names, _brm_operation_entries(brmi))
+    source = BRMI((; entries...), brmi.documentation)
+    program = _brm_prepare_program(source;
+        context=_brm_backend_context(source; retain_mm_sources=true))
+    kernels = Tuple(_rk_prepare_kernel_value(source, program, name, rhs)
+        for (name, rhs) in _rk_kernel_ops(source))
+    submodels = _rk_prepare_submodel_values(program)
+    roots = Tuple(op.name for op in program.operations
+        if op.role in (:parameter, :assignment, :predictor))
+    values = _brm_rk_value_plan(source, program, (); kernels, submodels, value_roots=roots)
+    isempty(kernels) ? values : _rk_with_kernel_observations(values, kernels, program)
+end
 
 # The module authoring the model's cells, where the Stan program reads the
 # functions they call; no keyword without a cell.
@@ -66,12 +91,32 @@ Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI
     sb = SBBRMI(brmi; _rk_cell_module(brmi)...)
     _sb_observation_triage(sb).bound > 0 && return nothing
     generated = generative_plan(sb)
-    _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data))
+    _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data), nothing)
 end
 function Base.getproperty(plan::_RKHeldOutPlan, field::Symbol)
     field in (:parent, :held_out) ? getfield(plan, field) :
         getproperty(getfield(plan, :parent), field)
 end
+
+function _rk_prior_value_backend(rk::RKBRMI)
+    # With moving mass a restricted prior and its ancestors stay sampled.
+    # Forward sampling the individually bounded draws would change their
+    # joint law. Read the declaration placement from the fitted program.
+    model = rk.model_plan.generative.model
+    if !isempty(_sb_restricted_targets!(Symbol[], model.model))
+        sampled = [o.name for o in StanBlocks.stan_descriptor(model).outputs
+            if o.kind === :parameter]
+        isempty(sampled) || throw(ArgumentError(
+            "RK prior draws require a fully generative prior. The restricted prior " *
+            "keeps sampled parameters: $(join(sampled, ", "))."))
+    end
+    prior_responses = _rk_prior_response_names(rk.model_plan)
+    brmi = parent(rk)
+    plan = _brm_rk_plan(brmi; prior_responses)
+    _rk_backend_from_plan(brmi, plan, brm_source(rk))
+end
+function _rk_backend_from_plan end
+
 _rk_plan_summary(plan::_RKHeldOutPlan) =
     _rk_plan_summary(plan.parent) * " (withheld: " *
     join(string.(sort!(collect(plan.held_out))), ", ") * ")"
@@ -80,7 +125,7 @@ _rk_plan_summary(plan::_RKHeldOutPlan) =
 # This barrier applies only to planning; emitted numerical kernels retain their
 # ordinary specialization and contain exactly the same source and data.
 Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_out=(),
-        fitted_constants=(_name, _source) -> nothing)
+        fitted_constants=(_name, _source) -> nothing, prior_responses=nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
     # A `constant(...)` becomes a named data constant (a number or an array),
     # which the graph binds: evaluated here, or the fitted value on a frozen
@@ -92,7 +137,8 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     brmi, assignments = _brm_resolve_data_assignments(brmi; prefix="RK backend")
     selected = _rk_held_out_selection(brmi, held_out)
     known_scalars = Ref{Any}(nothing)
-    original = _brm_rk_unselected_plan(brmi, known_scalars)
+    original = isnothing(prior_responses) ? _brm_rk_unselected_plan(brmi, known_scalars) :
+        _rk_prior_value_plan(brmi, prior_responses)
     _rk_attach_data_assignments!(original, assignments, constants)
     _rk_define_read_scalars!(original, known_scalars[])
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)
