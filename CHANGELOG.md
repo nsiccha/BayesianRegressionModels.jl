@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.406
+
+- `rk_new_population_effects(binder, design, U; seed, draw_positions)` draws
+  Gaussian or Student-t group effects and grouped HSGP level inputs for a
+  batched replay reader. Reuse the returned arrays to pair new subjects across
+  designs, or reproduce them by seed and posterior draw position.
+
 ## 0.2.405
 
 - `RKBRMI` keeps a component's named return fields available to its caller

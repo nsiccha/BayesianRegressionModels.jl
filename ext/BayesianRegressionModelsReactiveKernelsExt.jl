@@ -662,6 +662,8 @@ BRM._rk_bind_design_plan(lowering, columns, frozen) = frozen === nothing ?
     bind_data(lowering, columns) : bind_data(lowering, columns; frozen)
 BRM._rk_plan_columns(plan) = _rk_bound_inputs(plan)
 
+include("rk_new_population.jl")
+
 # Validation reads the graph's data-only definitions, never reevaluates BRM's
 # planning expressions. Reuse materialized columns; RKPPL's frozen_values
 # evaluates only the requested definitions that preparation normally folds.

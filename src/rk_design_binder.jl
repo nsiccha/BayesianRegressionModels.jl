@@ -35,8 +35,9 @@ into that replay's lowered program.
   fit, while the rows read the design's own levels by position (`g_level`). So
   `u` is a draw of the fit for any number of new levels, and the new levels'
   effects come in HAVE (`have=(:unconstrained, :b_g, ...)`, one row per new
-  level in level order). A grouped `hsgp(x; by = g)` term is sized by the same
-  level set: its new levels' standardized basis weights (`<term>.z`, levels ×
+  level in level order). [`rk_new_population_effects`](@ref) draws these
+  inputs for a batch of fitted draws. The same level set sizes a grouped
+  `hsgp(x; by = g)` term. Its new levels' standardized basis weights (`<term>.z`, levels ×
   basis functions) and per-level hyper effects (`<term>.sigma_z`,
   `<term>.rho_z`) come in HAVE as well, and the graph scales them at the
   draw's fitted length scale and amplitude. `binder.level_inputs` names every
@@ -89,6 +90,7 @@ struct RKDesignBinder{B<:RKBRMI}
     # The fit's level sets of the resampled groupings, which keep a draw of the
     # fit in the fit's coordinates (`_rk_fit_coordinate_levels`).
     levels::Any
+    population::_RKOnce
     classes::Dict{Any,Any}
     lock::ReentrantLock
 end
@@ -141,8 +143,28 @@ function rk_design_binder(rk::RKBRMI; resample_groups=(),
     levels = _rk_fit_coordinate_levels(rk, groups)
     RKDesignBinder(rk, groups, Tuple(held_out), sort!(collect(training)),
         merge(_rk_design_fitted(rk, groups), levels.values), levels.inputs, levels,
-        Dict{Any,Any}(), ReentrantLock())
+        _RKOnce(), Dict{Any,Any}(), ReentrantLock())
 end
+
+"""
+    rk_new_population_effects(binder, design, U; seed, draw_positions=axes(U, 2))
+
+Draw new levels from the fitted population for the groups selected by
+`rk_design_binder(rk; resample_groups)`. Columns of `U` are unconstrained
+draws **of the fit**. The result is a named tuple in `binder.level_inputs`
+order, ready for the corresponding batched inputs of a ReactiveKernels reader.
+Ordinary effects have shape levels × terms × draws. Grouped HSGP basis weights
+have shape levels × basis functions × draws, and scalar per-level effects
+have shape levels × draws. Level order is the design binder's.
+
+Use the same integer seed and draw positions to pair subjects across designs
+with the same ordered levels. For chunks or permutations, pass the original
+positive draw positions explicitly. Each stochastic declaration has its own
+stream. Student-t blocks share one fresh mixing weight across each level's
+terms, using that draw's degrees of freedom. The returned arrays can be kept
+and supplied to multiple readers.
+"""
+function rk_new_population_effects end
 
 # The data columns of the fit `rk` replays: its own, or on a data-free backend
 # those of the fit its state was exported from.
