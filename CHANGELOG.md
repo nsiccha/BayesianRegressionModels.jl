@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.410
+
+- `brm_nlme_model` supplies per-subject likelihoods and gradients for scalar
+  responses observed in a plate over repeated subject rows. Louis information
+  can use each subject's population score when another grouping is shared.
+
 ## 0.2.409
 
 - Gaussian NLME models prepare the forward-mode observation derivative on the
