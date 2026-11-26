@@ -541,6 +541,14 @@ function _brm_spl_nb2_rows(backend, records)
     promoted = Symbol[]
     plan isa _RKValuePlan && isempty(plan.completions) &&
         all(r -> r.kind in (:ranef, :cdar), records) || return backend, responses, promoted
+    candidates = filter(plan.observations) do o
+        o isa _BRMPreparedObservation && o.modifier === nothing && o.weight === nothing &&
+            o.missing_response === nothing || return false
+        d = o.distribution
+        d isa _BRMPreparedExpr && d.callable === NegativeBinomial2 && isempty(d.kwargs) &&
+            length(d.args) == 2
+    end
+    isempty(candidates) && return backend, responses, promoted
     reg = plan.regression
     data = rk_bound_data(backend)
     static = setdiff(Set(keys(data)), (a.name for a in plan.assignments),
@@ -549,18 +557,14 @@ function _brm_spl_nb2_rows(backend, records)
     scalars = Set(p.name for p in reg.parameters if p.dimension === nothing &&
         (p.support_override === :positive || (p.support_override === nothing &&
          p.family in (:LogNormal, :Gamma, :Exponential, :Beta))))
-    assignments = Dict(a.name => a.expression for a in plan.assignments)
+    assignments = Dict(a.name => a.expression for a in plan.assignments
+        if a isa _BRMPreparedAssignment)
     extra = _BRMPreparedAssignment[]
     specs = NamedTuple[]
     taken = _rk_plan_taken(plan)
     nrows = isempty(responses) ? nothing : length(data[first(responses).response])
-    for o in plan.observations
-        o isa _BRMPreparedObservation && o.modifier === nothing && o.weight === nothing &&
-            o.missing_response === nothing || continue
-        d = o.distribution
-        d isa _BRMPreparedExpr && d.callable === NegativeBinomial2 && isempty(d.kwargs) &&
-            length(d.args) == 2 || continue
-        mu, shape = d.args
+    for o in candidates
+        mu, shape = o.distribution.args
         y = get(data, o.name, nothing)
         y isa AbstractVector && !isempty(y) || continue
         nrows === nothing || nrows == length(y) || continue
