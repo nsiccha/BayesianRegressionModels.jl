@@ -90,8 +90,11 @@ high = rk_draw_values(reprocess(prior, (; dose=[3.0])), draws, (:mu,))
 
 For each draw `i`, `high.mu[i]` is three times `low.mu[i]`. Both use the same
 slope. The fit has zero sampler coordinates. Each frozen replay uses the
-training group levels and preprocessing. [`rk_prior_draws`](@ref) requires
-a generator for every sampled parameter law.
+training group levels and preprocessing. [`rk_prior_draws`](@ref) uses
+ReactiveKernelsPPL 0.1.265 or later and requires a normalized generator at
+each parameter site. A fixed-bound restriction such as a standard Normal
+scale restricted to positive values draws from the corresponding truncated
+law. A restriction whose mass varies with an ancestor requires joint sampling.
 
 ## Descriptions and inspection
 

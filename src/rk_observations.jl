@@ -103,19 +103,41 @@ function _rk_prior_value_backend(rk::RKBRMI)
     # Forward sampling the individually bounded draws would change their
     # joint law. Read the declaration placement from the fitted program.
     model = rk.model_plan.generative.model
-    if !isempty(_sb_restricted_targets!(Symbol[], model.model))
-        sampled = [o.name for o in StanBlocks.stan_descriptor(model).outputs
-            if o.kind === :parameter]
-        isempty(sampled) || throw(ArgumentError(
-            "RK prior draws require a fully generative prior. The restricted prior " *
-            "keeps sampled parameters: $(join(sampled, ", "))."))
-    end
+    sampled = [o.name for o in StanBlocks.stan_descriptor(model).outputs
+        if o.kind === :parameter]
+    isempty(sampled) || throw(ArgumentError(
+        "RK prior draws require a fully generative prior. The model keeps sampled parameters: " *
+        join(sampled, ", ") * "."))
     prior_responses = _rk_prior_response_names(rk.model_plan)
     brmi = parent(rk)
     plan = _brm_rk_plan(brmi; prior_responses)
     _rk_backend_from_plan(brmi, plan, brm_source(rk))
 end
 function _rk_backend_from_plan end
+
+# A restriction whose entire joint prior forward-simulates draws from the
+# base law conditional on its bounds. The placement check above is essential:
+# dropping the probability of those bounds can otherwise bias ancestors.
+# Change only the law of a sampling site in the generator's private source.
+function _rk_prior_rng_expr(x::Expr, in_law=false)
+    args = copy(x.args)
+    if in_law && x.head in (:call, :.) && !isempty(args) && args[1] === :restricted
+        args[1] = :truncated
+    end
+    sampled = Meta.isexpr(x, :call, 3) && args[1] in (:~, :.~)
+    for i in eachindex(args)
+        args[i] isa Expr || continue
+        args[i] = _rk_prior_rng_expr(args[i], in_law || (sampled && i == 3))
+    end
+    Expr(x.head, args...)
+end
+
+function _rk_prior_rng_source(emitted::_RKEmittedProgram)
+    main = _rk_prior_rng_expr(emitted.main)
+    defs = map(_rk_prior_rng_expr, emitted.defs)
+    main == emitted.main && defs == emitted.defs && return emitted
+    _RKEmittedProgram(defs, main, emitted.bindings)
+end
 
 _rk_plan_summary(plan::_RKHeldOutPlan) =
     _rk_plan_summary(plan.parent) * " (withheld: " *

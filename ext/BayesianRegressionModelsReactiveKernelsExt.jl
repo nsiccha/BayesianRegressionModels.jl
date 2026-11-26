@@ -612,9 +612,13 @@ end
 
 BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
 
-function BRM._rk_generate_prior(rk, rng, n)
-    bound = BRM.rk_bound_plan(rk)
-    query = ReactiveKernelsPPL.prepare_prior(bound)
+function BRM._rk_generate_prior(rk, generator, rng, n)
+    query = BRM._rk_once!(generator) do
+        emitted = BRM._rk_retained_program(rk)
+        source = BRM._rk_prior_rng_source(emitted)
+        bound = source === emitted ? BRM.rk_bound_plan(rk) : _rk_translate_from_emitted(rk.plan, source)
+        ReactiveKernelsPPL.prepare_prior(bound)
+    end
     layout = rk.model.layout
     points = Matrix{Float64}(undef, layout.total, n)
     for (i, draw) in enumerate(query(rng, n))

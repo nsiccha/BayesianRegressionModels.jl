@@ -196,7 +196,8 @@ function _rk_prior_values(rk::RKBRMI)
         binding = rk.plan.replay
         if binding === nothing
             backend = _rk_prior_value_backend(rk)
-            return (; backend, fit=backend, id=_brm_rk_binding_identity(backend, "brm-prior-v1"))
+            return (; backend, fit=backend, id=_brm_rk_binding_identity(backend, "brm-prior-v1"),
+                generator=_RKOnce())
         end
         isempty(binding.groups) || throw(ArgumentError(
             "RK prior draws carry the fitted group effects. Reuse them on " *
@@ -205,7 +206,7 @@ function _rk_prior_values(rk::RKBRMI)
         backend = _rk_frozen_reprocess(source.fit, binding.data; held_out=(), resample_groups=(),
             covariates=(), car_units=_rk_fitted_car_units(source.fit.plan), prefix="RK prior replay",
             prior_responses=_rk_prior_response_names(rk.model_plan))
-        (; backend, source.fit, source.id)
+        merge(source, (; backend))
     end
 end
 
@@ -234,7 +235,7 @@ prior draw must supply a normalized generator.
 function rk_prior_draws(rk::RKBRMI, n::Integer; seed::Integer)
     n > 0 || throw(ArgumentError("rk_prior_draws requires a positive draw count"))
     values = _rk_prior_values(rk)
-    points = _rk_generate_prior(values.fit, Random.Xoshiro(seed), n)
+    points = _rk_generate_prior(values.fit, values.generator, Random.Xoshiro(seed), n)
     _RKPriorDraws(points, values.id)
 end
 function _rk_generate_prior end

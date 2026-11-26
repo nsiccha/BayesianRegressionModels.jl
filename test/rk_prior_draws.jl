@@ -76,6 +76,20 @@ end
     @test_throws "keeps sampled parameters" rk_prior_draws(rk, 2; seed=23)
 end
 
+@stestset "native prior draws normalize a fixed-bound restriction" begin
+    model = @brm begin
+        bounded ~ restricted(Normal(0.2, 0.7), 0.0, 2.0)
+        y ~ Normal(bounded, 0.8)
+    end
+    prior = RKBRMI(model((;)))
+    draws = rk_prior_draws(prior, 2048; seed=72)
+    values = rk_draw_values(prior, draws, (:bounded,)).bounded
+    law = Distributions.truncated(Normal(0.2, 0.7), 0.0, 2.0)
+    @test all(x -> 0 < x < 2, values)
+    @test mean(values) ≈ mean(law) atol=0.04
+    @test var(values) ≈ var(law) atol=0.025
+end
+
 @stestset "prior value graph replays the same hierarchical parameter points" begin
     model = @brm begin
         scale ~ Exponential(1.0)
