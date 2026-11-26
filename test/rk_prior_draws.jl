@@ -138,4 +138,14 @@ end
     @test a.offset == b.offset
     @test a.curve ≈ a.offset .+ data.dose .* exp.(a.eta)
     @test b.curve ≈ b.offset .+ 2 .* data.dose .* exp.(b.eta)
+    draws = rk_prior_draws(prior, 4; seed=174)
+    first_design = rk_draw_values(prior, draws, (:eta, :offset, :curve))
+    doubled = 2 .* data.dose
+    replay = reprocess(prior, merge(data, (; dose=doubled)))
+    second_design = rk_draw_values(replay, draws, (:eta, :offset, :curve))
+    @test first_design.eta == second_design.eta
+    @test first_design.offset == second_design.offset
+    for i in 1:length(draws)
+        @test second_design.curve[i] ≈ first_design.offset[i] .+ doubled .* exp.(first_design.eta[i])
+    end
 end
