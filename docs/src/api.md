@@ -306,6 +306,7 @@ rk_bound_data
 rk_bound_plan
 rk_design_binder
 rk_model
+rk_new_population_effects
 rkppl_model
 stan_data
 stan_instantiate
