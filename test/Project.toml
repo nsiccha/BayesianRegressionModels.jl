@@ -473,4 +473,4 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RKPPL 0.1.259 preserves nested reading axes when a sibling response uses a fitted predictor.
 # RK 0.1.387 / RKPPL 0.1.262 retain fitted constructors for finite bounds and nested child kernels.
 # RKPPL 0.1.265 provides the joint parameter generator used by rk_prior_draws.
-rev = "dc6d99a5a6f75c2364d8fd437ce01cfacd9d2d8f"
+rev = "834fd733f89afdf0bcd853584d35cb9ce392d125"
