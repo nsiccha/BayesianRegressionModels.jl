@@ -1,7 +1,6 @@
 # Formulas and nested plates need each record's actual design, including
 # the subject counts and observed rows. The native submodel body is shared.
-function _brm_collection_cell_calls(component, call, scope, columns, count)
-    symbolic = _brm_component_cell_ir(component, call, scope)
+function _brm_collection_cell_calls(component, symbolic, columns, count)
     if !any(_is_brm_plate, _brm_component_parts(component.source).body) &&
             isempty(linear_predictors(_brm_component_instance(component, symbolic)))
         return nothing
@@ -32,7 +31,8 @@ function _sb_collection_cell!(body, data, axis, names, params, scope)
     component = _brm_component_cell_head(call, scope)
     inputs = Dict(param => source for (param, source) in zip(params, names) if haskey(data, source))
     columns = Dict(param => data[source] for (param, source) in inputs)
-    calls = _brm_collection_cell_calls(component, call, scope, columns, length(axis))
+    rhs = _brm_component_cell_ir(component, call, scope)
+    calls = _brm_collection_cell_calls(component, rhs, columns, length(axis))
     isnothing(calls) && return body
     fits = SBBRMI[SBBRMI(_brm_component_instance(component, rhs); mod=component.scope,
         total_groups=(), _component_output=_brm_component_results(component)) for rhs in calls]
@@ -46,7 +46,7 @@ function _sb_collection_cell!(body, data, axis, names, params, scope)
     # which only that return reads.
     result = _sb_component_return(component)
     reads = _rk_source_symbols!(Set{Symbol}(), Expr(:block, model.model.args..., result))
-    args = _brm_component_arguments(component, _brm_component_cell_ir(component, call, scope))
+    args = _brm_component_arguments(component, rhs)
     arguments = Any[Expr(:kw, formal, _sb_scalar_expr(arg, data))
         for (formal, arg) in zip(component.inputs, args) if formal in reads]
     prepared = Dict{Symbol,Symbol}()

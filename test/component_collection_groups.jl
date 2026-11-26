@@ -172,6 +172,66 @@ const centred_panels = @brm begin
     y ~ Normal(readings, 1)
 end
 
+@brm function calibrated_panel(settings, center, width)
+    shift ~ 1 + (1 | parentblock(:p) | settings.site)
+    effect(shift, Intercept) ~ Normal(center, width)
+    return sum(shift)
+end
+
+const calibrated_panels = @brm begin
+    midpoint = constant(sum(samples) / length(samples))
+    spread = constant(maximum(widths))
+    root ~ 0 + (1 | p | site)
+    for entry in records
+        readings[entry.id] ~ calibrated_panel(entry, midpoint, spread)
+    end
+    primary ~ Normal(root, 1)
+    y ~ Normal(readings, 1)
+end
+
+const supplied_panels = @brm begin
+    root ~ 0 + (1 | p | site)
+    for entry in records
+        readings[entry.id] ~ calibrated_panel(entry, midpoint, spread)
+    end
+    primary ~ Normal(root, 1)
+    y ~ Normal(readings, 1)
+end
+
+@stestset "Record member intercept priors read the caller's scalars on fit and replay" begin
+    records(center) = [(; id=:a, site=["x", "y"], center),
+                       (; id=:b, site=["y", "x", "y"], center)]
+    data = (; site=["x", "y"], primary=[0.1, -0.1], y=[0.2, 0.4],
+        records=records(0.5), samples=[0.0, 1.0], widths=[0.4, 0.7])
+    design = merge(data, (; samples=[1.0, 2.0], widths=[1.2], records=records(1.5)))
+    fit = RKBRMI(calibrated_panels(data))
+    frozen = reprocess(fit, design)
+    fresh = reprocess(fit, design; freeze_constants=false)
+    fit_program = BRM._rk_emit_ast(fit.plan)
+    fresh_program = BRM._rk_emit_ast(fresh.plan)
+    @test fresh_program.main == fit_program.main
+    @test fresh_program.defs == fit_program.defs
+    fields = RKBRMI(centred_panels(data))
+    supplied = RKBRMI(supplied_panels(merge(data, (; midpoint=0.5, spread=0.7))))
+    new_scalars = reprocess(supplied, merge(design, (; midpoint=1.5, spread=1.2));
+        freeze_constants=false)
+    queries = map((fit, frozen, fresh, fields, supplied, new_scalars)) do rk
+        @test coordinate_names(rk.model.layout) == coordinate_names(fit.model.layout)
+        prepare_query(rk.model, rk_bound_plan(rk), :prior)
+    end
+    for intercept in (-0.25, 0.4)
+        u = fill(intercept, fit.model.layout.total)
+        lp, held, refit, field, scalar, moved_scalar =
+            map(q -> Base.invokelatest(q, u), queries)
+        @test held ≈ lp
+        @test field ≈ lp
+        @test scalar ≈ lp
+        original = logpdf(Normal(0.5, 0.7), intercept)
+        @test refit - lp ≈ 2 * (logpdf(Normal(1.5, 1.2), intercept) - original)
+        @test moved_scalar ≈ refit
+    end
+end
+
 const centred_explicit = @brm begin
     root ~ 0 + (1 | p | site)
     a ~ 1 + (1 | p | a_site)

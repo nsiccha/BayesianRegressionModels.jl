@@ -53,13 +53,26 @@ function _brm_cell_component_reads(statements, scope, field_expr)
     Any[rewrite(statement) for statement in statements]
 end
 
-function _brm_component_cell_ir(component, call, scope)
+function _brm_component_cell_ir(component, call, scope, captures=(;))
     locals = _BRMScope(scope)
     refs = _brm_cell_value_refs!(Set{Symbol}(), call)
     for name in refs
-        locals.vars[name] = NamedColumn(name, _BRMComponentInput(name))
+        locals.vars[name] = get(captures, name, NamedColumn(name, _BRMComponentInput(name)))
     end
     _brm_interpret(_brm_expand(_x(call), scope), locals)
+end
+
+# Preserve the enclosing model's named scalar data, including resolved fitted
+# constants, for a component's prior checks. Cell formals and locals are
+# excluded by the same free-reference walk as the enclosing operation.
+function _rk_cell_scalar_captures(@nospecialize(brmi::BRMI), cell)
+    captures = Dict{Symbol,Any}()
+    for key in _brm_operation_references!(Set{Symbol}(), cell)
+        _brm_has_operation(brmi, key) || continue
+        column = _brm_operation(brmi, key)
+        _brm_data_scalar_name(column) === nothing || (captures[key] = column)
+    end
+    captures
 end
 
 function _sb_component_cell_call(component, call, scope)
@@ -100,9 +113,9 @@ end
 # Prepare cell inputs with the enclosing plan. A cached emitted program can
 # then bind a new design without emitting again or mutating a kernel's columns.
 function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inputs,
-        kernel_columns, reserved)
+        kernel_columns, reserved, captures)
     component = _brm_component_cell_head(call, scope)
-    rhs = _brm_component_cell_ir(component, call, scope)
+    rhs = _brm_component_cell_ir(component, call, scope, captures)
     defs, statements = Expr[], Expr[]
     columns, bound = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
     sliced = Set{Symbol}()
@@ -116,7 +129,7 @@ function _rk_prepare_cell_component!(lhs, call, scope, kernel_name, params, inpu
     for axis in values(kernel_columns)
         axis isa _BRMCollectionAxis && !isempty(axis.path) && last(axis.path) === lhs || continue
         raw = Dict(param => kernel_columns[source] for (param, source) in sources)
-        calls = _brm_collection_cell_calls(component, call, scope, raw, length(axis))
+        calls = _brm_collection_cell_calls(component, rhs, raw, length(axis))
         break
     end
     if isnothing(calls)
