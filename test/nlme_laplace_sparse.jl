@@ -376,6 +376,18 @@ function spl_dense_curvature(p, pop, z)
     H
 end
 
+@stestset "nonconsecutive effects with complete and shared curvature columns" begin
+    effects = [1, 4, 7]
+    pattern = BRM._brm_spl_pattern([effects], 7, [(2, 4)]).pattern
+    for column in (1, 7)
+        offset = BRM._brm_spl_column_offset(pattern, column, length(effects))
+        @test offset >= 0
+        @test [rowvals(pattern)[offset + i] for i in eachindex(effects)] == effects
+    end
+    # An extra prior edge inserts row 2 in column 4, between the term's rows.
+    @test BRM._brm_spl_column_offset(pattern, 4, length(effects)) < 0
+end
+
 @stestset "mode-search workspaces: paired curvature lookups, the refreshed factor, value-only states" begin
     rng = Xoshiro(31)
     c = SPL_CROSSED

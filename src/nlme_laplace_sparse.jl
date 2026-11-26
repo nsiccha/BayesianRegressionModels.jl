@@ -1184,6 +1184,14 @@ end
     first(span) - 1 + searchsortedfirst(view(rows, span), i)
 end
 
+# A row term's sorted, unique effects form a clique in the precision pattern.
+# When a column stores exactly that many entries, its rows are precisely the
+# term's effects, even when their global indices are far apart.
+@inline function _brm_spl_column_offset(pattern, column, width)
+    span = nzrange(pattern, column)
+    length(span) == width ? first(span) - 1 : -1
+end
+
 # The position of row `zi` in column `zj`, below its diagonal `kd` and after
 # the last hit `k` there (a term's effects ascend, as a column's rows do); `hi`
 # is the column's last position. A run of consecutive rows is indexed directly.
@@ -1240,10 +1248,13 @@ end
         nz[kd] -= weight * pair(j, j)
         hi = colptr[zj + 1] - 1
         k = kd
+        complete = hi - colptr[zj] + 1 == m
         for i in (j + 1):m
             if kept
                 k = Int(p.pair[q])
                 q += 1
+            elseif complete
+                k = kd + (i - j)
             else
                 k = _brm_spl_below(rows, kd, hi, k, zj, zs[i])
             end
@@ -2039,6 +2050,7 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
     previous = fill(Inf, nc)
     λ = zeros(nc)
     iterations = 0
+    trial_precision = nothing
     while true
         _brm_spl_finite(h) || return (; status=:nonfinite, iterations, h)
         r = _brm_spl_shifted_direction(p, h, g)
@@ -2068,7 +2080,10 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
         iterations == p.maxiter &&
             return (; status=:unconverged, iterations, h, converged, λ)
         iterations += 1
-        _brm_spl_step!(p, pop, z, δ, g, h, fc, converged; weight=s, search) ||
+        if trial_precision === nothing && p.algebra === nothing
+            trial_precision = _brm_spl_precision(p)
+        end
+        _brm_spl_step!(p, pop, z, δ, g, h, fc, converged; weight=s, search, trial_precision) ||
             return (; status=:nonfinite, iterations, h)
     end
 end
@@ -2177,7 +2192,7 @@ end
 # step therefore needs just one derivative assembly. False when a component
 # finds no finite gain.
 function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, converged;
-        weight::Float64=1.0, search=nothing)
+        weight::Float64=1.0, search=nothing, trial_precision=nothing)
     p.algebra === nothing || return _brm_operator_step!(p, pop, z, δ, g, h, fc, converged;
         weight, search)
     n = length(z)
@@ -2186,7 +2201,8 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
     for i in 1:n
         λc[p.component[i]] += g[i] * δ[i]
     end
-    ft = similar(fc); gt = similar(g); ht = _brm_spl_precision(p)
+    ft = similar(fc); gt = similar(g)
+    ht = isnothing(trial_precision) ? _brm_spl_precision(p) : trial_precision
     fbt = zeros(nb)
     trial = copy(z)
     for i in 1:n
@@ -2367,10 +2383,14 @@ function _brm_spl_mean_shift(p, state, S, on)
         moving = p.moving[t]
         m11 = m12 = m22 = 0.0
         zs = view(p.tz, span)
-        for j in 1:m, i in 1:m
-            Sij = S[_brm_spl_nzindex(p.pattern, zs[i], zs[j])]
-            m11 += c1[i] * Sij * c1[j]
-            moving && (m12 += c1[i] * Sij * c2[j]; m22 += c2[i] * Sij * c2[j])
+        for j in 1:m
+            offset = _brm_spl_column_offset(p.pattern, zs[j], m)
+            for i in 1:m
+                k = offset < 0 ? _brm_spl_nzindex(p.pattern, zs[i], zs[j]) : offset + i
+                Sij = S[k]
+                m11 += c1[i] * Sij * c1[j]
+                moving && (m12 += c1[i] * Sij * c2[j]; m22 += c2[i] * Sij * c2[j])
+            end
         end
         two = _brm_lap_width(p.family[t]) == 2
         τ1 = m11 * r.t111 + 2m12 * r.t112 + m22 * r.t122
@@ -2502,10 +2522,14 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             (bad = "the parameter derivatives of row $(p.row[t]) of `$(p.response[t])`")
         # (ℓ″ C S) per parameter, on the term's local effects.
         resize!(LCS, 2m); fill!(LCS, 0.0)
-        for j in 1:m, i in 1:m
-            Sij = S[_brm_spl_nzindex(p.pattern, zs[i], zs[j])]
-            LCS[j] += (r.h11 * c1[i] + (moving ? r.h12 * c2[i] : 0.0)) * Sij
-            moving && (LCS[m + j] += (r.h12 * c1[i] + r.h22 * c2[i]) * Sij)
+        for j in 1:m
+            offset = _brm_spl_column_offset(p.pattern, zs[j], m)
+            for i in 1:m
+                k = offset < 0 ? _brm_spl_nzindex(p.pattern, zs[i], zs[j]) : offset + i
+                Sij = S[k]
+                LCS[j] += (r.h11 * c1[i] + (moving ? r.h12 * c2[i] : 0.0)) * Sij
+                moving && (LCS[m + j] += (r.h12 * c1[i] + r.h22 * c2[i]) * Sij)
+            end
         end
         for (k, (e2, wk, gk)) in enumerate(((e, w1, r.g1), (e + 1, w2, r.g2)))
             k == 2 && !moving && break

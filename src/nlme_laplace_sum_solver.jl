@@ -2,7 +2,8 @@
 # Only curvature storage, factorization and the sum-factor chain rule differ.
 function _brm_spl_precision(p::BRMSparseLaplaceProblem)
     # h's pattern is fixed, so a precision shares its index arrays (never
-    # written) and owns its values: one is made per Newton step.
+    # written) and owns its values. A stage can refill a trial's values
+    # across Newton steps while retaining the accepted precision separately.
     D = SparseMatrixCSC(size(p.pattern)..., SparseArrays.getcolptr(p.pattern),
         rowvals(p.pattern), copy(nonzeros(p.pattern)))
     any(g -> g isa _BRMSumCellGroup, p.cells) || return D
