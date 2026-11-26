@@ -590,7 +590,9 @@ const PINS = [
     # 0997a2c7 / libEnzyme 24b44443 adds `later_store_targets`. A prepared
     # Vecchia row pullback can store its result without copying the constant
     # field geometry (test/nlme_svi_field_rows.jl).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0997a2c75ea917d3ee243e49050eee09945ad3f2"),  # dogfood
+    # b77d0b96 preserves the derivatives of exp(-exp(x)) in the saturated
+    # tail, including the third derivative needed for the Laplace score.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b77d0b96ca011e43c011c35764964863404f10dd"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

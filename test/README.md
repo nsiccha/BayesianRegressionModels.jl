@@ -3110,11 +3110,13 @@ effect beside an intercept of 1e6 has a real floor above `tol`, which must still
 stop the search. Run it with `julia --project=test test/laplace_mode_floor.jl`.
 
 `laplace_mode_overflow.jl` checks a saturated exponential against the gradient
-and curvature of the latent's normal prior. A separate observation gives both
-sparse solvers an improving trial with a finite density and a slope too
-large for `Float64`. In ordinary and sum cells, only the affected component
-backtracks. The test also checks the sequential fallback, conditional
-stationarity, marginal gradients and repeated evaluations.
+and curvature of the latent's normal prior. At shift 1000 both the exact and
+matrix-free solvers must return the analytical marginal and the shift prior's
+score of −1000. A separate observation gives both solvers an improving trial
+with a finite density and a slope too large for `Float64`. In ordinary and
+sum cells, only the affected component backtracks. The test also checks the
+sequential fallback, conditional stationarity, marginal gradients and repeated
+evaluations.
 
 `laplace_gradient_nonfinite.jl` evaluates a finite marginal whose gradient is
 not (an infinite third derivative at a converged mode) in an ordinary cell, a
