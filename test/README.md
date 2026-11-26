@@ -494,6 +494,12 @@ predictors, a multi-membership block and a data-free fit, against the fit's own
 values and closed forms at a draw whose coordinates all differ, and the refusal
 of a `gr(g, by = s)` design with other level counts. Run it with
 `julia --project=test test/rk_resample_binder.jl`; it needs no Enzyme.
+`rk_new_population.jl` draws new subjects at known posterior positions. It
+compares Gaussian and Student-t effects with the fitted scales, correlations
+and per-subject mixing law, and supplies the results to a batched reader.
+It also checks grouped HSGP weights and hyperparameter effects, pairing across
+designs, concurrent chunks and replay from a data-free fit. Run it with
+`julia --threads=2 --project=test test/rk_new_population.jl`.
 `rk_grouped_anisotropic_hsgp.jl` checks per-axis length scales of grouped
 HSGPs: independent, sampled, known and multigroup correlations, default and
 explicit floor bounds, fixed scales, term starts, shared readers and frozen
