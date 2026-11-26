@@ -44,6 +44,17 @@ _mk(name, kind) = BRM.BRMOutput(
     @test ci([_mk(:t, :transformed_parameter)], _ -> true) == Int[]
     # The predicate still filters: a non-matching carrier is not selected.
     @test ci([_mk(:a, :parameter)], o -> o.name === :b) == Int[]
+
+    # Queries on a finished descriptor see a tuple. Preserve every matching
+    # index in order, also when a derived term prefers a transformed parameter.
+    outputs = (_mk(:x, :generated_quantity), _mk(:x, :parameter),
+               _mk(:y, :generated_quantity), _mk(:x, :transformed_parameter),
+               _mk(:x, :parameter))
+    @test ci(outputs, o -> o.name === :x) == [2, 5]
+    @test ci(outputs, o -> o.name === :y) == [3]
+    @test ci((), _ -> true) == Int[]
+    @test BRM._brm_term_role_indices(outputs, BRM.car, :effects, o -> o.name === :x) == [4]
+    @test BRM._brm_term_role_indices(outputs, BRM.car, :effects, o -> o.name === :y) == [3]
 end
 
 @testset "prior-only joint R2D2 categorical coordinates select beta, not scale" begin
