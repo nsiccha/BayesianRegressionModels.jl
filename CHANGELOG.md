@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.404
+
+- `brm_svi_fit` uses the ordinary global update whenever a minibatch expects
+  exactly one reader of a coordinate. This includes a batch of one when every
+  unit reads the coordinate, for both uniform and work-weighted sampling.
+  Such ties no longer trigger the GPU runner's sparse-site restriction.
+
 ## 0.2.403
 
 - `brm_description` describes observations inside repeated record components.

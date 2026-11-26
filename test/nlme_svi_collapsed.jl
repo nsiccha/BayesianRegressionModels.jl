@@ -243,9 +243,8 @@ end
     x̂ = g0 .+ Λ \ Gp
     full = H \ b
     @test x̂ ≈ full[3:4]
-    sites = BRM._brm_svi_collapsed_sites(BRM._brm_svi_sites(
-        (; globals=[1, 2], units=[[3, 4]], touched=[[1, 2]]), 1, [0.5]),
-        (; globals=[1, 2], units=[[3, 4]], touched=[[1, 2]]))
+    t = (; globals=[1, 2], units=[[3, 4], [5]], touched=[[1, 2], Int[]])
+    sites = BRM._brm_svi_collapsed_sites(BRM._brm_svi_sites(t, 1, [0.5, 0.5]), t)
     q = (; μ=[0.0, 0.0], ρ=[0.0, 0.0], Β=zeros(2, 0))
     BRM._brm_svi_collapsed_update!(sites, q, [1], [(; Λ, G=Gp, point=g0, C=nothing)], 1.0)
     @test Matrix(sites.sum) ≈ Λ
@@ -258,8 +257,8 @@ end
 end
 
 @stestset "collapsed draws keep polished marginal scales and joint correlations" begin
-    t = (; globals=[1, 2, 3], units=[[4]], touched=[[1, 2]])
-    sites = BRM._brm_svi_collapsed_sites(BRM._brm_svi_sites(t, 1, [0.5]), t)
+    t = (; globals=[1, 2, 3], units=[[4], [5]], touched=[[1, 2], Int[]])
+    sites = BRM._brm_svi_collapsed_sites(BRM._brm_svi_sites(t, 1, [0.5, 0.5]), t)
     P = [4.0 1.5; 1.5 2.0]
     nonzeros(sites.sum) .= vec(P)
     sites.solves = 1

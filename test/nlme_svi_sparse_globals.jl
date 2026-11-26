@@ -133,12 +133,47 @@ end
     @test isempty(BRM._brm_svi_sites_diagnostics(nothing, t).coordinates)
 end
 
+@stestset "reader sites at the one-draw threshold" begin
+    for n in (32, 149, 596)
+        t = (; globals=1:6, units=1:n, touched=fill(1:6, n))
+        for kind in (:uniform, :work)
+            sampler = BRM._brm_svi_unit_sampler(kind, 1:n)
+            @test BRM._brm_svi_sites(t, 1, sampler.probabilities) === nothing
+        end
+    end
+    # With two uniform draws, 148 readers are sparse, 149 tie, and 150 exceed one.
+    n = 298
+    t = (; globals=1:3, units=1:n, touched=[findall(k -> i <= k, 148:150) for i in 1:n])
+    s = BRM._brm_svi_sites(t, 2, fill(1/n, n))
+    @test s.globals == [1]
+    @test s.readers == [148]
+    @test s.expected ≈ [148 / 149]
+
+    # Under work sampling, two copies of the same set of units each carry half
+    # the total weight, even when their individual probabilities round.
+    halves = (; globals=1:2, units=1:n, touched=[i <= 149 ? (1,) : (2,) for i in 1:n])
+    sampler = BRM._brm_svi_unit_sampler(:work, repeat(1:149, 2))
+    @test BRM._brm_svi_sites(halves, 2, sampler.probabilities) === nothing
+
+    # The two halves have equal nonuniform mass. Transferring one Float64
+    # spacing between units moves their expected draws to either side of one.
+    t = (; globals=1:3, units=1:4, touched=[[1, 2], [1, 2], [1, 3], [1, 3]])
+    p = [3/16, 5/16, 3/16, 5/16]
+    @test BRM._brm_svi_sites(t, 2, p) === nothing
+    for (a, b, sparse) in ((1, 3, 2), (3, 1, 3))
+        weights = copy(p)
+        weights[a] = prevfloat(p[a])
+        weights[b] = nextfloat(p[b])
+        @test BRM._brm_svi_sites(t, 2, weights).globals == [sparse]
+    end
+end
+
 # Visits of one reader with term -h (x - c)²/2 of global 1, its exact gradient at
 # draws of q = N(μ, s²), μ and s held fixed: the site's precision tends to h and
 # its gradient at the mean to the exact one, -h (μ - c).
 function svi_site_visits(; h=40.0, c=0.3, μ=1.1, s=0.1, visits=600, seed=3, β=0.1)
-    t = (; globals=[1, 2], units=[[3]], touched=[[1, 2]])
-    sites = BRM._brm_svi_sites(t, 1, [0.5])
+    t = (; globals=[1, 2], units=[[3], [4]], touched=[[1, 2], Int[]])
+    sites = BRM._brm_svi_sites(t, 1, [0.5, 0.5])
     q = (; μ=[μ, 0.0], ρ=log.([s, 1.0]), Β=zeros(2, 0))
     rng = Xoshiro(seed)
     history = NamedTuple[]
@@ -161,13 +196,13 @@ end
     @test abs(mean(x.pull for x in tail) - (-h * (μ - c))) < 0.05h
     # The sums over readers are the site's own here.
     @test sites.precision_sum[1] ≈ last(history).λ
-    @test sites.seen == [true]
+    @test sites.seen == [true, false]
     # One visit changes the coordinate's precision at most 2.5-fold: the first
     # visit, from no site, at most to 1.5 times the coordinate's precision 1/s².
     Λ = 1 / 0.1^2
     @test history[1].λ <= 1.5Λ + 1e-12
-    t = (; globals=[1], units=[[2]], touched=[[1]])
-    sites = BRM._brm_svi_sites(t, 1, [0.5])
+    t = (; globals=[1], units=[[2], [3]], touched=[[1], Int[]])
+    sites = BRM._brm_svi_sites(t, 1, [0.5, 0.5])
     q = (; μ=[1.1], ρ=[log(0.1)], Β=zeros(1, 0))
     g = q.μ .+ 0.1                   # ε = 1; a reader curving a million times more
     BRM._brm_svi_update_sites!(sites, t, q, g, [1.0], [1], [(; gg=[2 * -1e6 * (g[1] - 0.3)])], 0.1, 1.0)

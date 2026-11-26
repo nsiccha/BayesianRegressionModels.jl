@@ -97,18 +97,31 @@ end
 # `probabilities`, or `nothing` when no global is sparse.
 function _brm_svi_sites(t, B, probabilities)
     D, N = length(t.globals), length(t.units)
-    readers, expected = zeros(Int, D), zeros(D)
-    for i in 1:N, p in _brm_svi_unit_touched(t, i)
-        readers[p] += 1
-        expected[p] += B * probabilities[i]
+    # Every Float64 probability is an integer multiple of the smallest one's
+    # spacing. Both samplers give each unit at least 1/(2N), so even for an
+    # Int-sized N the total weight fits in Int128 (at most about 2^116).
+    spacing = eps(minimum(probabilities))
+    readers, mass = zeros(Int, D), zeros(Int128, D)
+    total = zero(Int128)
+    for i in 1:N
+        weight = Int128(probabilities[i] / spacing)
+        total += weight
+        for p in _brm_svi_unit_touched(t, i)
+            readers[p] += 1
+            mass[p] += weight
+        end
     end
-    globals = [p for p in 1:D if readers[p] > 0 && expected[p] < 1]
+    # B * mass[p] < total, without overflowing the product. Under uniform
+    # sampling this is exactly B * readers[p] < N.
+    cutoff = cld(total, B)
+    globals = findall(m -> 0 < m < cutoff, mass)
     isempty(globals) && return nothing
+    expected = [B * (mass[p] / total) for p in globals]
     slot = zeros(Int, D)
     slot[globals] .= eachindex(globals)
     entries = [[k for (k, p) in enumerate(_brm_svi_unit_touched(t, i)) if slot[p] > 0]
         for i in 1:N]
-    _BRMSVISites(globals, readers[globals], expected[globals], slot, entries,
+    _BRMSVISites(globals, readers[globals], expected, slot, entries,
         [zeros(length(e)) for e in entries], [zeros(length(e)) for e in entries],
         falses(N), zeros(length(globals)), zeros(length(globals)))
 end
