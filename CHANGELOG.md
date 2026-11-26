@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.411
+
+- `brm_description` describes fitted record members that read a parent
+  parameter or a shared `parentblock` effect. Their outputs refer to the
+  enclosing model's draws and retain the selection for each member key.
+
 ## 0.2.410
 
 - `brm_nlme_model` supplies per-subject likelihoods and gradients for scalar

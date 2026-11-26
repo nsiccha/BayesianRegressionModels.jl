@@ -108,7 +108,7 @@ function _brmd_population_priors!(priors,d,anchors,notation,texts)
                 _brmd_support(getf(expression)),source,anchors,notation,texts))
         end
         cats = _sb_cat_effect_overrides(overrides,entry.logical)
-        for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link)
+        for cat in _brm_categorical_effect_entries(d.plan,entry.logical,entry.link)
             cfg = get(cats,cat.emitted,nothing)
             for (i,level) in enumerate(cat.nonreference_levels)
                 configured = cfg isa AbstractVector ? cfg[i] : cfg
@@ -136,7 +136,7 @@ function _brmd_ranef_metadata(d)
     buckets = _sb_collect_id_buckets(d.plan.parent)
     overrides = _sb_ranef_effect_overrides(d.plan.parent,buckets)
     result = NamedTuple[]
-    for (index,block) in enumerate(ranef_blocks(d))
+    for (index,block) in enumerate(_ranef_blocks(d.plan,d.stan))
         # A marginalized `|ID|` block (src/sb_marginal_ranef.jl) samples its
         # active margins in a carrier and completes the rest in the bucket's
         # own block; that block states the complete generative prior.
@@ -431,7 +431,7 @@ function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d)
     _brmd_ranef_priors!(priors,d,groups,anchors,notation,texts)
     _brmd_total_priors!(priors,d,groups,anchors,notation,texts)
     categories=Set(cat.emitted for entry in _brm_population_effect_entries(d.plan.parent)
-        for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link))
+        for cat in _brm_categorical_effect_entries(d.plan,entry.logical,entry.link))
     # Carriers inventoried semantically above: exact totals, and a known-value
     # block's sampled scales, its `(…, :sd, i)` priors; the vector its emission
     # declares for them is not a second parameter.
