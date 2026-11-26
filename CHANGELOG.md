@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.408
+
+- Gaussian NLME models prepare the forward-mode observation derivative on the
+  first `observation_moments_and_jacobians` call and reuse it on later calls.
+  Fits that use only the conditional likelihood and ordinary moment reads
+  skip that preparation.
+
 ## 0.2.407
 
 - `rk_prior_draws(rk, n; seed)` generates a reusable joint batch from an RK
