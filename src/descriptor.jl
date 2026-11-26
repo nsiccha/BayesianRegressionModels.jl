@@ -1288,10 +1288,25 @@ end
 # derived value such as a fused `mu`, or an R2D2 `tau`) is deliberately NOT a
 # draw carrier here — those are matched by exact carrier name where addressed —
 # which keeps the population/categorical/term single-carrier guarantee intact.
-function _brm_carrier_indices(outputs, pred)
-    idx = findall(o -> pred(o) && o.kind === :parameter, outputs)
+function _brm_carrier_indices(outputs, pred, preferred=:parameter)
+    idx = findall(o -> pred(o) && o.kind === preferred, outputs)
     isempty(idx) || return idx
     findall(o -> pred(o) && o.kind === :generated_quantity, outputs)
+end
+
+# A finished descriptor stores its outputs in a tuple. Scanning by index keeps
+# the compiled lookup reusable when the next model has a different output count.
+Base.@nospecializeinfer function _brm_carrier_indices(
+        @nospecialize(outputs::Tuple{Vararg{BRMOutput}}), pred::F, preferred=:parameter) where {F}
+    indices = Int[]
+    for kind in (preferred, :generated_quantity)
+        for i in eachindex(outputs)
+            output = outputs[i]
+            pred(output) && output.kind === kind && push!(indices, i)
+        end
+        isempty(indices) || break
+    end
+    indices
 end
 
 # Term roles that name a derived value of the term (a transformed parameter, as
@@ -1301,10 +1316,8 @@ end
 _brm_term_derived_roles(_f) = ()
 _brm_term_derived_roles(::typeof(car)) = (:effects,)
 function _brm_term_role_indices(outputs, f, role, pred)
-    role in _brm_term_derived_roles(f) || return _brm_carrier_indices(outputs, pred)
-    idx = findall(o -> pred(o) && o.kind === :transformed_parameter, outputs)
-    isempty(idx) || return idx
-    findall(o -> pred(o) && o.kind === :generated_quantity, outputs)
+    preferred = role in _brm_term_derived_roles(f) ? :transformed_parameter : :parameter
+    _brm_carrier_indices(outputs, pred, preferred)
 end
 
 # Attach coefficient labels to the population block's coefficient vector.
