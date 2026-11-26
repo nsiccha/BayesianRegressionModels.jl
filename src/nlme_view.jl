@@ -2142,27 +2142,35 @@ function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution
             (; names=(name,), positions, elementwise=true)
         end)
     end
-    plate = _brm_nlme_plate_observations(plan)
+    grouped_plates = setdiff(_brm_nlme_plate_observations(plan), measured)
     n = length(view.levels)
     L = sum(length, view.rows)
     subjects = Dict(attribution)
     rows = all(r -> length(r) == 1, view.rows) ? [only(r) for r in view.rows] : nothing
-    # A plate observation attributed by its rows, not measured, is a plate over
-    # the subjects' rows.
-    on_rows(name) = name in plate && !(name in measured)
+    # Gathered plate cells use their joined rows. A scalar response observed
+    # directly on each grouping row uses its individual density positions.
     for name in first.(attribution)
-        on_rows(name) || continue
+        name in grouped_plates || continue
         s = subjects[name]
         if rows !== nothing
             length(s) == n && all(i -> s[rows[i]] == i, 1:n) || return nothing
         else
             cell_rows = _brm_nlme_cell_rows(plan, name, view.group, L)
-            cell_rows !== nothing && length(cell_rows) == length(s) || return nothing
+            if cell_rows === nothing
+                # RK lowers a flat in-plate response as an ordinary observation.
+                # Its attributed densities already key the partition, including
+                # when the same subject owns several noncontiguous rows.
+                length(s) == L && any(o -> o isa _BRMPreparedObservation &&
+                    o.name === name, plan.observations) || return nothing
+                delete!(grouped_plates, name)
+            else
+                length(cell_rows) == length(s) || return nothing
+            end
         end
     end
     group(names) = (; names=Tuple(names),
         positions=[findall(==(i), subjects[first(names)]) for i in 1:n],
-        elementwise=!any(on_rows, names))
+        elementwise=isdisjoint(names, grouped_plates))
     groups = Any[]
     for names in _brm_nlme_cell_groups(plan, first.(attribution))
         if all(name -> subjects[name] == subjects[first(names)], names)

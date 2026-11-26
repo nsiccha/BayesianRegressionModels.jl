@@ -19,6 +19,38 @@ const CR_SHARED = (; shared_groups=(:class,))
 const CR_SAEM = NE.SAEMOptions(iterations=4, burnin=2, mcmc_burnin=0, adapt_iterations=0,
     numeric_maxiter=2, omega_floor=0.05)
 
+@stestset "crossed scalar row plate supplies each subject's population score" begin
+    model = @brm CR_FLAT begin
+        sigma ~ Exponential(1)
+        base ~ 1 + x + (1 | subject)
+        class_effect ~ 0 + (1 | class)
+        @plate for r in eachindex(base)
+            y[r] ~ Normal(base[r] + class_effect[r], sigma)
+        end
+    end
+    m = brm_nlme_model(RKBRMI(model); subject_group=:subject, ad_backend=NLME_AD, CR_SHARED...)
+    @test NE.saem_population_gradient_style(m) isa NE.BatchedEvaluation
+    rng = Xoshiro(42)
+    θ = 0.3 .* randn(rng, length(m.theta))
+    σ = [-0.4]
+    H = randn(rng, 1, NE.nsubjects(m))
+    ids = collect(axes(H, 2))
+    cohort_values(t, s) = NE.conditional_loglikelihoods(m, ids, t, s, H)
+    reference = cohort_values(θ, σ)
+    scores = [NE.conditional_loglikelihood_and_population_gradient(m, i, θ, σ, H[:, i])
+        for i in ids]
+    @test first.(scores) ≈ reference
+    h = 1e-5
+    for j in eachindex(θ)
+        step = zeros(length(θ))
+        step[j] = h
+        @test [gθ[j] for (_, gθ, _) in scores] ≈
+            (cohort_values(θ + step, σ) - cohort_values(θ - step, σ)) / (2h) atol=1e-7
+    end
+    @test [only(gσ) for (_, _, gσ) in scores] ≈
+        (cohort_values(θ, σ .+ h) - cohort_values(θ, σ .- h)) / (2h) atol=1e-7
+end
+
 @stestset "the population prior carries the crossed block's authored priors" begin
     rk = RKBRMI(crossed_flat(CR_FLAT))
     m = brm_nlme_model(rk; ad_backend=NLME_AD, CR_SHARED...)
