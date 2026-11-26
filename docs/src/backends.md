@@ -75,17 +75,27 @@ To compare designs under the joint prior, build the RK fit with the response
 columns omitted. Generate the parameters once, then read the same draws on
 each design. The following model has a slope whose scale varies across draws.
 
-```julia
-model = @brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:PriorReplay), raw"""
+model = (@brm begin
     scale ~ Exponential(1.0)
     slope ~ Normal(0.0, scale)
     mu = slope * dose
     y ~ Normal(mu, 1.0)
-end
-prior = RKBRMI(model((; dose=[1.0, 2.0])))
+end)((; dose=[1.0, 2.0]))
+""", :model; title="Joint prior for a dose response", require_stan=true)
+```
+
+```@example prior_replay
+using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+model = Main.BRMDocsComparisons.example_module(:PriorReplay).model # hide
+prior = RKBRMI(model)
 draws = rk_prior_draws(prior, 100; seed=42)
 low = rk_draw_values(reprocess(prior, (; dose=[1.0])), draws, (:mu,))
 high = rk_draw_values(reprocess(prior, (; dose=[3.0])), draws, (:mu,))
+@assert all(high.mu[i] ≈ 3 * low.mu[i] for i in eachindex(low.mu))
+length(draws)
 ```
 
 For each draw `i`, `high.mu[i]` is three times `low.mu[i]`. Both use the same
