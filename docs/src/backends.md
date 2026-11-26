@@ -71,6 +71,31 @@ evaluate requested quantities from model-coordinate draws. A latent field,
 a linear predictor and a predictive response are different outputs; adding
 observation noise belongs to prediction.
 
+To compare designs under the joint prior, build the RK fit with the response
+columns omitted. Generate the parameters once, then read the same draws on
+each design. The following model has a slope whose scale varies across draws.
+
+```julia
+model = @brm begin
+    scale ~ Exponential(1.0)
+    slope ~ Normal(0.0, scale)
+    mu = slope * dose
+    y ~ Normal(mu, 1.0)
+end
+prior = RKBRMI(model((; dose=[1.0, 2.0])))
+draws = rk_prior_draws(prior, 100; seed=42)
+low = rk_draw_values(reprocess(prior, (; dose=[1.0])), draws, (:mu,))
+high = rk_draw_values(reprocess(prior, (; dose=[3.0])), draws, (:mu,))
+```
+
+For each draw `i`, `high.mu[i]` is three times `low.mu[i]`. Both use the same
+slope. The fit has zero sampler coordinates. Each frozen replay uses the
+training group levels and preprocessing. [`rk_prior_draws`](@ref) uses
+ReactiveKernelsPPL 0.1.265 or later and requires a normalized generator at
+each parameter site. A fixed-bound restriction such as a standard Normal
+scale restricted to positive values draws from the corresponding truncated
+law. A restriction whose mass varies with an ancestor requires joint sampling.
+
 ## Descriptions and inspection
 
 `brm_descriptor` supplies a Stan-backed description of the prepared model.

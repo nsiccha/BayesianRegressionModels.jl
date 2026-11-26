@@ -39,7 +39,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         @test isempty(BRM._rk_observed_names(backend.plan))
         @test any(d -> d.role === :observation && d.data_source === nothing,
             backend.plan.generative.declarations)
-        @test occursin("native generated draws = unavailable", BRM.show_rk_plan(backend.plan))
+        @test occursin("rk_prior_draws", BRM.show_rk_plan(backend.plan))
         @test BRM.stan_code(backend.plan.generative) ==
             BRM.stan_code(SBBRMI(brmi))
         if label == "prior-ragged-bounds"

@@ -472,4 +472,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RKPPL 0.1.258 keeps sums with parameter-dependent row checks in the outer likelihood.
 # RKPPL 0.1.259 preserves nested reading axes when a sibling response uses a fitted predictor.
 # RK 0.1.387 / RKPPL 0.1.262 retain fitted constructors for finite bounds and nested child kernels.
-rev = "064f59a791c4d0ec1cd1e8f8ed59ab4e23ba9459"
+# RKPPL 0.1.265 provides the joint parameter generator used by rk_prior_draws.
+rev = "834fd733f89afdf0bcd853584d35cb9ce392d125"
