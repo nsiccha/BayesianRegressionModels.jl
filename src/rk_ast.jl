@@ -2404,6 +2404,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     designs = Dict{Symbol,Any}()
     monotonic_joint = _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
     class_blocks = Dict(r.predictor => r for r in plan.responses if r.class_rows)
+    prior_data = Dict{Symbol,Any}(_rk_prior_array_name(v.source) => v.value
+        for v in Base.values(plan.prior_reads))
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
@@ -2778,12 +2780,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     paired=r2d2 === nothing &&
                         !haskey(joint_priors, (predictor.name, term.addressee)))
             end
+            # Keep the planner's element types when splitting the entries:
+            # a literal or a named prior argument uses the same emitter.
             name = _rk_ast_population_component!(defs, stmts, taken,
                 _rk_ast_fresh_name(string("pop_", target), taken),
                 string("X_", target),
-                [entry[2] for entry in population], [entry[3] for entry in population],
-                designs, coefficients; prior_data=Dict(_rk_prior_array_name(v.source) => v.value
-                    for v in Base.values(plan.prior_reads)))
+                Any[entry[2] for entry in population],
+                Tuple{Symbol,Tuple}[entry[3] for entry in population],
+                designs, coefficients; prior_data)
             replacements[first(first(population))] = name
             foreach(entry -> replacements[first(entry)] = nothing, population[2:end])
         end

@@ -987,13 +987,15 @@ end
 # A prior addressing one samples nothing here, and a name the model does not
 # declare still fails.
 Base.@nospecializeinfer function _rk_declared_predictors(@nospecialize(brmi::BRMI), predictor_order)
-    declared = Symbol[predictor_order...]
+    declared = collect(Symbol, predictor_order)
+    planned = Set(declared)
     for (key, raw) in _brm_operation_entries(brmi)
+        key in planned && continue
         operation = _named_op(raw)
         operation isa ExprColumn{typeof(~)} && _brm_operation_role(operation) === :predictor &&
-            !(key in declared) && push!(declared, key)
+            push!(declared, key)
     end
-    Tuple(declared)
+    declared
 end
 
 # Model-wide orchestration over already boxed plan carriers. Do not infer this

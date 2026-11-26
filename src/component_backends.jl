@@ -328,8 +328,7 @@ function _brm_component_rk_plan(component, call)
     program = _brm_prepare_program(instance;
         context=_brm_backend_context(instance; retain_mm_sources=true))
     submodels = _rk_prepare_submodel_values(program)
-    kernels = Tuple(_rk_prepare_kernel_value(instance, program, name, rhs)
-        for (name, rhs) in _rk_kernel_ops(instance))
+    kernels = _rk_prepare_kernel_values(program)
     observations = _brm_direct_observation_list(instance;
         prefix="BRM component", require_observation=false)
     plan = _brm_rk_value_plan(instance, program, observations;

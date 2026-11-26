@@ -1328,11 +1328,19 @@ function _rk_kernel_response_modifier!(columns, taken, derived, observation, lay
         gather(modifier.lower, :lower), gather(modifier.upper, :upper))
 end
 
+function _rk_prepare_kernel_values(program)
+    brmi = program.context.parent
+    prepared = _RKPreparedKernelAssignment[]
+    for (name, rhs) in _rk_kernel_ops(brmi)
+        push!(prepared, _rk_prepare_kernel_value(brmi, program, name, rhs))
+    end
+    Tuple(prepared)
+end
+
 Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi::BRMI))
     program = _brm_prepare_program(brmi;
         context=_brm_backend_context(brmi; retain_mm_sources=true))
-    kernels = Tuple(_rk_prepare_kernel_value(brmi, program, name, rhs)
-        for (name, rhs) in _rk_kernel_ops(brmi))
+    kernels = _rk_prepare_kernel_values(program)
     direct = Any[(; key, lhs=getargs(parent(node))[1], rhs=getargs(parent(node))[2])
         for (key, node) in _brm_operation_entries(brmi) if node isa NamedColumn &&
             parent(node) isa ExprColumn{typeof(~)} &&

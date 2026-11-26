@@ -40,6 +40,28 @@ const BRM = BayesianRegressionModels
     @test only(model.observations).distribution.args[2].axis === :scalar
 end
 
+@testset "preparation types are shared across declaration and predictor widths" begin
+    data = (; x=[-1.0, 0.0, 1.0], y=[0.1, -0.2, 0.3])
+    narrow = (@brm begin
+        mu ~ 1
+        y ~ Normal(mu, 1)
+    end)(data)
+    wide = (@brm begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)(data)
+    a, b = BRM._brm_prepare_program(narrow), BRM._brm_prepare_program(wide)
+    @test length(a.operations) < length(b.operations)
+    @test typeof(a) === typeof(b)
+    @test typeof(a.operations) === typeof(b.operations)
+    d1 = BRM._brm_prepare_predictor_geometry(narrow, a.context, :mu).design
+    d2 = BRM._brm_prepare_predictor_geometry(wide, b.context, :mu).design
+    @test typeof(d1) === typeof(d2)
+    @test d1.matrix == ones(3, 1)
+    @test d2.matrix == hcat(ones(3), data.x)
+end
+
 @testset "unweighted matrix observations bypass vector weight validation" begin
     counts = [2 1 0; 0 2 1; 1 0 2]
     expected_counts = copy(counts)

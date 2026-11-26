@@ -3795,7 +3795,7 @@ function _rk_addressee_prior(cells, idxs, design, terms, target::Symbol,
 end
 
 Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI), design, target::Symbol,
-        available::Tuple, factor_addressees::Set{Symbol},
+        available, factor_addressees::Set{Symbol},
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
         r2d2::Union{Nothing,_BRMR2D2Plan}, hs_addressees::Set{Symbol};
         tolerant_default::Bool=false)
@@ -4962,7 +4962,7 @@ end
 # (single-level treatment-coded) factor is coefficient-free too; its
 # raw column supplies the row axis.
 Base.@nospecializeinfer function _rk_plan_offset_only_predictor(@nospecialize(brmi::BRMI), context, target::Symbol,
-        ordinary::Tuple, available::Tuple, link::Symbol,
+        ordinary::Tuple, available, link::Symbol,
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
     prefix = "RK backend"
@@ -5978,7 +5978,7 @@ end
 # here, ahead of the R2D2 override composition that would otherwise
 # misread the Horseshoe cells as Normals).
 Base.@nospecializeinfer function _rk_horseshoe_priors(@nospecialize(brmi::BRMI), design, target::Symbol,
-        available::Tuple, terms::Vector{_RKTermSpec},
+        available, terms::Vector{_RKTermSpec},
         r2d2::Union{Nothing,_BRMR2D2Plan}; tolerant_default::Bool=false)
     prefix = "RK backend"
     overrides = _brm_simple_population_effect_overrides(
@@ -6060,7 +6060,7 @@ end
 # override/no-override structure, so the numbering itself need not
 # agree. Returns `(; prior, scalars, phi)`.
 Base.@nospecializeinfer function _rk_plan_r2d2_prior(@nospecialize(brmi::BRMI), design, r2plan::_BRMR2D2Plan,
-        target::Symbol, available::Tuple, terms::Vector{_RKTermSpec},
+        target::Symbol, available, terms::Vector{_RKTermSpec},
         taken::Set{Symbol}, columns::Dict{Symbol,AbstractVector};
         data::AbstractDict, derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
@@ -6513,7 +6513,7 @@ function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
 end
 
 Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), context, target::Symbol,
-        available::Tuple, columns::Dict{Symbol,AbstractVector},
+        available, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
         ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
             Union{_RKRanefBucket,Nothing}},
