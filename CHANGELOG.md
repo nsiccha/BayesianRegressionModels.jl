@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.412
+
+- Stan replay accepts `condition_groups=(site=:reading,)` to draw a fresh
+  Gaussian group intercept conditional on a measured Normal response. Readings
+  of the same level inform a shared draw. The response can use fitted
+  predictors and row-specific sampling errors. Adaptive centring also accepts
+  a latent predictor used as an offset when projecting population coefficients.
+
 ## 0.2.411
 
 - `brm_description` describes fitted record members that read a parent
