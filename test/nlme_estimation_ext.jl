@@ -631,6 +631,8 @@ end
     d = NLME_RAGGED_DATA
     m = brm_nlme_model(RKBRMI(nlme_ragged_pk(d)); ad_backend=NLME_AD)
     @test observation_model(m) isa GaussianObservations
+    cached = m.observations_pushforward.cached
+    @test cached.value === nothing
     θ = [0.4, 2.1]
     σ = [log(0.8)]
     H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
@@ -652,11 +654,19 @@ end
         Jμ[:, kv] .= μ .* (kt .- 1)
         (d.y[rows], μ, v, Jμ, zeros(size(Jμ)))
     end
+    prepared = nothing
     for subjects in ([1, 2, 3], [3, 1], [2])
         observed = observations(m, subjects)
         moments = observation_moments(m, subjects, θ, σ, H[:, subjects])
+        @test cached.value === prepared
         with_jacobians = observation_moments_and_jacobians(
             m, subjects, θ, σ, H[:, subjects])
+        if prepared === nothing
+            prepared = cached.value
+            @test prepared !== nothing
+        else
+            @test cached.value === prepared
+        end
         densities = conditional_loglikelihoods(m, subjects, θ, σ, H[:, subjects])
         for (k, i) in enumerate(subjects)
             y, μ, v, Jμ, Jv = oracle(i)

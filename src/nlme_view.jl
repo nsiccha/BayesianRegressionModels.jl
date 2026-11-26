@@ -2696,7 +2696,9 @@ preparation copies the model per thread.
 `observation_ad_backend` selects the forward-mode backend for Gaussian moment
 Jacobians. With the NLMEEstimation/Enzyme extension loaded, an `AutoEnzyme`
 reverse backend automatically selects Enzyme forward mode. Other callers can
-pass a forward backend explicitly.
+pass a forward backend explicitly. The first call to
+`NLMEEstimation.observation_moments_and_jacobians` prepares the colored
+directions and derivative query. Later calls reuse them.
 
 Shared sampled coordinates enter θ by default and can therefore be estimated
 jointly with ordinary population parameters. To hold them fixed, pass

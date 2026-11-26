@@ -1049,8 +1049,20 @@ BRM._rk_svi_factor_value_gradient(query, base::Vector{Float64},
 BRM._rk_observation_query(backend::BRM.RKBRMI) =
     prepare_query(backend.model, _rk_translated(backend), :observations)
 BRM._rk_observation_values(query, u::AbstractVector) = Base.invokelatest(query, u)
+
+struct _LazyObservationPushforward{F}
+    prepare::F
+    cached::BRM._RKOnce
+end
+
 function BRM._rk_observation_pushforward(backend::BRM.RKBRMI,
         view::BRM.BRMNLMEView, unit::Vector{Float64}, ad_backend)
+    _LazyObservationPushforward(BRM._RKOnce()) do
+        _prepare_observation_pushforward(backend, view, unit, ad_backend)
+    end
+end
+
+function _prepare_observation_pushforward(backend, view, unit, ad_backend)
     neta = maximum(length, view.subject_coordinates)
     directions = ntuple(neta) do k
         direction = zeros(Float64, length(unit))
@@ -1066,6 +1078,10 @@ function BRM._rk_observation_pushforward(backend::BRM.RKBRMI,
 end
 BRM._rk_observation_value_and_pushforward(bundle, u::AbstractVector) =
     ad_value_and_pushforward(bundle.query, bundle.directions, u)
+function BRM._rk_observation_value_and_pushforward(lazy::_LazyObservationPushforward, u::AbstractVector)
+    bundle = BRM._rk_once!(lazy.prepare, lazy.cached)
+    BRM._rk_observation_value_and_pushforward(bundle, u)
+end
 
 # Cut posteriors (`src/cut.jl`). The coordinate cut lowers the joint program
 # with its upstream declarations pinned (RKPPL `merge`, scoped names such as
