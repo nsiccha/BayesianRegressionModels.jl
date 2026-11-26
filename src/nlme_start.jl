@@ -150,8 +150,14 @@ end
 # Law evaluation and scalar medians are shared with explicit prior bases
 # in start_prior.jl. This NLME adapter retains its coordinate-selection policy.
 
-_brm_nlme_scalar_data(plan::_RKHeldOutPlan, name) = _brm_nlme_scalar_data(plan.parent, name)
 function _brm_nlme_scalar_data(plan, name)
+    # Authored bounds can retain the Julia name `Inf` in the recorded law.
+    x = _brm_nlme_bound_scalar(plan, name)
+    isnothing(x) && name === :Inf ? Inf : x
+end
+
+_brm_nlme_bound_scalar(plan::_RKHeldOutPlan, name) = _brm_nlme_bound_scalar(plan.parent, name)
+function _brm_nlme_bound_scalar(plan, name)
     x = get(plan.columns, name, nothing)
     x isa Real && return Float64(x)
     x = get(_rk_input_bindings(plan), name, nothing)
@@ -159,7 +165,7 @@ function _brm_nlme_scalar_data(plan, name)
 end
 # The regression plan binds a data scalar it reads by name (`plan.inputs`) and
 # defines an assignment holding a literal (`_rk_define_read_scalars!`).
-function _brm_nlme_scalar_data(plan::_RKStructuralPlan, name)
+function _brm_nlme_bound_scalar(plan::_RKStructuralPlan, name)
     x = get(plan.inputs, name, nothing)
     x isa Real && return Float64(x)
     index = findfirst(a -> a.name === name, plan.assignments)

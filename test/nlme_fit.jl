@@ -73,6 +73,27 @@ scale_positions(m) = findall(==(:subject_scale), m.view.role)
     @test start.omega_matrix ≈ quantile(Normal(), 0.75)^2 * I(2) rtol=1e-12
 end
 
+@stestset "named blocks start at their explicit half-normal scale medians" begin
+    brmi = @brm NLME_PLATE_DATA begin
+        sigma ~ truncated(Normal(0, 1), 0.0, Inf)
+        alpha ~ 1 + (1 | a | subject)
+        beta ~ 1 + (1 | b | subject)
+        sd(:, a) ~ truncated(Normal(0, 1), 0.0, Inf)
+        sd(:, b) ~ truncated(Normal(0, 2), 0.0, Inf)
+        @plate for i in eachindex(alpha)
+            dv[i] ~ normal(alpha[i] .+ beta[i] .* t[i], sigma)
+        end
+    end
+    m = brm_nlme_model(RKBRMI(brmi); subject_group=:subject, ad_backend=NLME_AD)
+    start = brm_nlme_start(m)
+    point = brm_nlme_estimates(m, start.theta, start.sigma, start.omega_matrix).point
+    halfnormal = quantile(Normal(), 0.75)
+    @test point.sigma ≈ halfnormal
+    @test only(point.a.sd) ≈ halfnormal
+    @test only(point.b.sd) ≈ 2halfnormal
+    @test isempty(start.start_source.zero)
+end
+
 @stestset "independent blocks without an ID stay independent NLME blocks" begin
     m = brm_nlme_model(RKBRMI(unnamed_pk(UNNAMED_DATA)); ad_backend=NLME_AD)
     blocks = unique(b.block for b in m.view.block_margins)

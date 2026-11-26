@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.408
+
+- `brm_nlme_start(m)` now uses the prior median for random-effect scales
+  whose authored truncation bound is `Inf`. For a standard half-normal prior,
+  the scale starts at `0.67448975`.
+
 ## 0.2.407
 
 - `rk_prior_draws(rk, n; seed)` generates a reusable joint batch from an RK
