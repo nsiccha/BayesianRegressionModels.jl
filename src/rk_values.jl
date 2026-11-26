@@ -1473,7 +1473,7 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
 end
 
 function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=nothing,
-        documentation=(), collection_cell=false, literal_hsgp_levels=(;))
+        documentation=(), collection_cell=false, literal_hsgp_levels=(;), value_roots=())
     documentation_owners = _brm_documentation_owners(documentation)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
@@ -1604,7 +1604,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken;
                 reusable_code=regression.reusable_code),
             _rk_observed_names(plan); retained=authored, coordinates,
-            densities),
+            required=union!(densities, value_roots)),
         lone_intercepts)
     # A cell observation is emitted outside its value plate. Its prepared
     # record supplies both the cell-local parameter and the response source.

@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.405
+
+- `RKBRMI` keeps a component's named return fields available to its caller
+  when the component has its own observations. A field computed from record
+  data can be queried alongside fitted fields and follows the data on replay.
+
 ## 0.2.404
 
 - `brm_svi_fit` uses the ordinary global update whenever a minibatch expects

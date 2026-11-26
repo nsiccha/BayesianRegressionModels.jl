@@ -331,4 +331,61 @@ end
         (; site=collect(1:4), read_time=curve_times, records=[ast, alt], n_margins=3),
         twin_design, member_names(:all, :a, :b), "unguarded-data-curve")
 end
+
+@brm function measured_grid(record)
+    scale ~ LogNormal(0, 1)
+    if record.scaled
+        pattern = scale .* record.grid
+    else
+        pattern = record.grid
+    end
+    @plate for j in eachindex(record.y)
+        loc[j] = pattern[record.rows[j]] .+ scale
+        record.y[j] .~ Normal.(loc[j], 1)
+    end
+    return (; scale, pattern)
+end
+const grid_model = @brm begin
+    for record in records
+        channels[record.id] ~ measured_grid(record)
+    end
+end
+
+@stestset "An observed member exposes both data and fitted return fields" begin
+    plain = (; id=:a, scaled=false, grid=[2., -1.], rows=[[1, 2]], y=[[.7, 1.8]])
+    scaled = (; id=:b, scaled=true, grid=[.5, 1.2, .7], rows=[[2, 1], [3]], y=[[.1, -.2], [.3]])
+    design = (; records=[scaled, plain])
+    changed = (; records=[(; plain..., grid=[-.4, .6]), (; scaled..., grid=[.8, 2., -.3])])
+    fitted = RKBRMI(grid_model(design))
+    point = [.2, -.3]
+    for (rk, data) in ((fitted, design), (reprocess(fitted, changed), changed))
+        names = coordinate_names(rk.model.layout)
+        member(record) = Symbol("channels_member_", Int(record.scaled))
+        scale_at(record, u) = exp(u[coordinate(names, Symbol(member(record), ".scale.1"))])
+        pattern_at(record, u) = record.scaled ? scale_at(record, u) .* record.grid : record.grid
+        for scope in rk_bound_plan(rk).submodel_scopes
+            @test haskey(scope.locals, :component_result_pattern)
+        end
+        problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        function oracle(u)
+            value = sum(logpdf.(Normal(), u))
+            for record in data.records
+                means = pattern_at(record, u) .+ scale_at(record, u)
+                for (rows, y) in zip(record.rows, record.y)
+                    value += sum(logpdf.(Normal.(means[rows], 1), y))
+                end
+            end
+            value
+        end
+        check_consumer_point(problem, point, oracle)
+        constrained = ReactiveKernelsPPL.constrain(rk.model.layout, point)
+        for record in data.records
+            draws = rk_draw_values(rk, reshape(point, :, 1), (:scale, :pattern);
+                submodel=(:channels, record.id))
+            @test only(constrained[member(record)].scale) ≈ scale_at(record, point)
+            @test only(draws.scale) ≈ scale_at(record, point)
+            @test only(draws.pattern) ≈ pattern_at(record, point)
+        end
+    end
+end
 end
