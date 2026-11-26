@@ -19,6 +19,8 @@ instead of failing at run time.
   of the same level inform a shared draw. The response can use fitted
   predictors and row-specific sampling errors. Adaptive centring also accepts
   a latent predictor used as an offset when projecting population coefficients.
+  The ReactiveKernelsPPL backend requires 0.1.268 for per-chain copies of
+  bound plans in WarmupHMC.
 
 ## 0.2.411
 
