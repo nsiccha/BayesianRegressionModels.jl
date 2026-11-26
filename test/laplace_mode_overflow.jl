@@ -164,27 +164,22 @@ end
             trial = overflow_assemble(p,pop,delta)
             @test all(isfinite,trial.fc)
             @test all(trial.fc .> initial.fc)
-            finite = all(isfinite,trial.g) && BRM._brm_spl_finite(trial.h)
-            # Ordinary cells differentiate the saturated mean to zero. A sum
-            # cell can still encounter the indeterminate product 0 * Inf.
-            @test finite || sumcell
+            @test all(isfinite,trial.g) && BRM._brm_spl_finite(trial.h)
             search = BRM._brm_spl_search(2, (1.0,))
             @test BRM._brm_spl_step!(p,pop,z,delta,initial.g,initial.h,initial.fc,falses(2); search)
-            if finite
-                # In the saturated cell only the standard normal prior contributes.
-                @test trial.g[1] == -delta[1]
-                @test overflow_dense(trial.h)[1,1] == 1
-                @test search.backtracks == [0,0]
-                @test z == delta
-                value = LogDensityProblems.logdensity(p,[1000.0])
-                expected = logpdf(Normal(),1000.0) + sum(logpdf.(Normal.(0,data.noise),data.y))
-                @test value ≈ expected atol=1e-8 rtol=0
-                @test p.nonfinite == 0
-            else
-                @test search.backtracks == [1,0]
-                @test 0 < z[1] < delta[1]
-                @test z[2] == delta[2]
-            end
+            # In the saturated cell only the standard normal field prior contributes.
+            @test trial.g[1] == -delta[1]
+            @test overflow_dense(trial.h)[1,1] == 1
+            @test search.backtracks == [0,0]
+            @test z == delta
+
+            # At shift 1000 both observations are constant to Float64 precision.
+            # Integrating the standard normal fields leaves only the shift prior's score.
+            value, gradient = LogDensityProblems.logdensity_and_gradient(p,[1000.0])
+            expected = logpdf(Normal(),1000.0) + sum(logpdf.(Normal.(0,data.noise),data.y))
+            @test value ≈ expected atol=1e-8 rtol=0
+            @test gradient == [-1000.0]
+            @test p.nonfinite == p.nonfinite_gradient == p.unconverged == 0
         end
     end
 end
