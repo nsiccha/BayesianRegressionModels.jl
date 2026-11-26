@@ -1602,6 +1602,29 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         end
         by_name[sname] = d
     end
+    outputs = _brm_declaration_outputs(plan, stan, semantics, by_name)
+    outputs = _brm_ranef_components(outputs, plan, stan)
+    outputs = _brm_output_dims(outputs, plan, stan)
+    outputs = _brm_output_addresses(outputs, plan, stan)
+    outputs = _brm_cell_formula_output_addresses(outputs, plan, stan)
+
+    # --- schema -------------------------------------------------------------
+    columns = Tuple(sort!(collect(df_columns)))
+
+    # --- operations ---------------------------------------------------------
+    ops = _brm_derive_operations(plan, stan, outputs, columns)
+    ops = _brm_apply_overrides(ops, operations, titles)
+
+    BRMDescriptor(stan.id, stan.name, _brm_descriptor_formula(brmi), plan, stan, highlights,
+                  Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
+                  Tuple(unpredictable), _brm_submodels(plan, outputs, stan),
+                  requested_highlights)
+end
+
+# Attribute the traced outputs to the declarations that emitted them. A
+# fitted record member uses the same attribution in its enclosing trace.
+function _brm_declaration_outputs(plan, stan, semantics, by_name)
+    brmi = plan.parent
     targets = collect(keys(by_name))
     population_effects = _brm_population_effect_entries(brmi)
     covariance_factors = _brm_joint_covariance_factors(brmi)
@@ -1724,22 +1747,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
             o.source,:population_effect,o.declaration,block.predictor,
             collect(Symbol,block.population_columns),o.segments)
     end
-    outputs = _brm_ranef_components(outputs, plan, stan)
-    outputs = _brm_output_dims(outputs, plan, stan)
-    outputs = _brm_output_addresses(outputs, plan, stan)
-    outputs = _brm_cell_formula_output_addresses(outputs, plan, stan)
-
-    # --- schema -------------------------------------------------------------
-    columns = Tuple(sort!(collect(df_columns)))
-
-    # --- operations ---------------------------------------------------------
-    ops = _brm_derive_operations(plan, stan, outputs, columns)
-    ops = _brm_apply_overrides(ops, operations, titles)
-
-    BRMDescriptor(stan.id, stan.name, _brm_descriptor_formula(brmi), plan, stan, highlights,
-                  Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
-                  Tuple(unpredictable), _brm_submodels(plan, outputs, stan),
-                  requested_highlights)
+    outputs
 end
 
 # The block component of every random-effect carrier (`BRMOutput.component`),

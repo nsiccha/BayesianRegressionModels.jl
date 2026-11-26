@@ -26,12 +26,20 @@ function _brmd_member_value(c::BRMDescriptionComponent, scope)
     isnothing(factor) || (provenance=merge(provenance,(;covariance_factor=map(id -> _brmd_member_id(scope,id),factor))))
     sources = get(provenance,:observation_sources,())
     any(s -> s in scope.held_out,sources) && (provenance=merge(provenance,(;observation_role=:held_out)))
-    outputs = Tuple(output for o in c.outputs for output in
-        get(scope.response_outputs,(o.logical,o.role),(merge(o,(;scope.member)),)))
+    outputs = map(o -> _brmd_member_output(o, scope), c.outputs)
     result = BRMDescriptionComponent(id, c.kind, c.callable, qualify(c.arguments), qualify(c.keywords),
         c.axes, outputs, scope.priors, c.fitted_constants,
         qualify(c.children), provenance, c.notation, bindings)
     scope.nodes[c.id] = result
+end
+
+function _brmd_member_output(o, scope)
+    response = get(scope.response_outputs, (o.logical,o.name), nothing)
+    isnothing(response) || return response
+    name = get(scope.output_names, o.name, o.name)
+    output = merge(o, (; name, scope.member))
+    selection = get(scope.selections, (scope.member,name), nothing)
+    isnothing(selection) ? output : merge(output, (; selection))
 end
 
 function _brmd_member_prior(p, scope, anchors)
@@ -54,6 +62,53 @@ function _brmd_member_plan(fit, call, axis, data, index)
         haskey(data,port.column) && (plan.data[port.formal]=data[port.column][index])
     end
     plan
+end
+
+# The scoped program can read a parameter, predictor or trajectory computed
+# by its caller. Its fitted data alone cannot trace that program. Reflect the
+# outputs and their aliases from the trace in which the call actually ran.
+function _brmd_member_trace(d, path)
+    prefix = string(join(path, "_"), "_")
+    localname(k) = Symbol(chopprefix(String(k), prefix))
+    names = Dict(o.name => localname(o.name) for o in d.stan.outputs
+                 if startswith(String(o.name), prefix))
+    outputs = [(; name=names[o.name], o.kind, o.type, o.size, o.constraints,
+                  o.generative, o.segments, source=isnothing(o.source) ? nothing : localname(o.source))
+               for o in d.stan.outputs if haskey(names, o.name)]
+    # A named value may be a view of several emitted outputs. Keep the
+    # links the descriptor follows, expressed in the member's namespace.
+    model = Dict{Symbol,Tuple}()
+    for key in keys(d.stan.model)
+        startswith(String(key), prefix) && !haskey(names, key) || continue
+        leaves = Set{Symbol}()
+        _brm_output_leaves!(leaves, d.stan.model[key], keys(names))
+        model[localname(key)] = Tuple(names[leaf] for leaf in leaves)
+    end
+    (; outputs, model, names=Dict(local_name => name for (name, local_name) in names))
+end
+
+function _brmd_fitted_member(parent, call, plan, trace, responses, held_out)
+    semantics = _brm_descriptor_semantics(plan.parent)
+    by_name = Dict(_brm_stan_name(site) => site for site in plan.declarations)
+    outputs = _brm_declaration_outputs(plan, trace, semantics, by_name)
+    for twin in values(responses)
+        o = parent.outputs[twin.name]
+        formal = twin.logical
+        push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints, o.generative,
+            formal, twin.role, get(by_name, formal, nothing), formal, o.labels, o.segments))
+    end
+    columns = Set(semantics.columns)
+    inputs = NamedTuple[]
+    # Only the caller's data inputs can supply observed or held-out values.
+    # A fitted parent parameter stays a reference in the member's formula.
+    for (formal, actual) in pairs(call.inputs)
+        i = get(parent.inputs, actual, nothing)
+        isnothing(i) && continue
+        column, transform = _brm_input_schema(plan, formal, columns)
+        push!(inputs, (; name=formal, column, transform, i.observed,
+                         held_out=i.held_out || formal in held_out))
+    end
+    (; parent.id, plan, stan=trace, columns=semantics.columns, inputs, outputs)
 end
 
 function _brmd_member_inputs(axis, loop, d, index, plan, env)
@@ -89,7 +144,7 @@ end
 # and log-likelihood draws under the projected input column. Segment ends are
 # cumulative, including repeated ends for a member with zero readings.
 function _brmd_member_responses(d, axis)
-    outputs = [Dict{Tuple,Vector{NamedTuple}}() for _ in axis.keys]
+    outputs = [OrderedDict{Tuple{Symbol,Symbol},NamedTuple}() for _ in axis.keys]
     held_out = Set{Symbol}()
     for port in axis.ports
         port.column in d.plan.held_out && push!(held_out,port.formal)
@@ -103,7 +158,7 @@ function _brmd_member_responses(d, axis)
             for (index,key) in enumerate(axis.keys)
                 selection = isnothing(ends) ? index : _brm_member_segment(ends,index)
                 output = (; common..., member=(axis.collection,key), selection)
-                push!(get!(Vector{NamedTuple},outputs[index],(port.formal,o.role)),output)
+                outputs[index][(port.formal,o.name)] = output
             end
         end
     end
@@ -137,11 +192,16 @@ function _brmd_members(d, axes, labels, anchors, texts, parent_priors, constants
     result = Dict{Symbol,Vector{BRMDescriptionComponent}}()
     isempty(axes) && return result
     calls = Dict((call.path...,call.target) => call for call in d.submodels)
+    parent = (; d.id, inputs=Dict(i.name => i for i in d.inputs),
+              outputs=Dict(o.name => o for o in d.outputs))
+    selections = Dict((path[1:2],o.name) => (o.member isa Vector ? Tuple(o.member) : o.member)
+        for (path,call) in calls if length(path) >= 2 for o in call.outputs if !isnothing(o.member))
     for axis in axes
         isempty(axis.path) && continue
         loop = only(st for st in axis.builder.statements if st isa _BRMCollectionLoop && st.target === axis.collection)
         fits = _brm_member_fits(d,axis)
         outputs_by_member, held_out = _brmd_member_responses(d,axis)
+        trace = isnothing(fits) ? nothing : _brmd_member_trace(d,axis.path)
         roots = BRMDescriptionComponent[]
         env = _brmd_environment(d,axis.collection,:submodel,parent_priors,constants,notation,texts)
         for (index,key) in enumerate(axis.keys)
@@ -150,9 +210,14 @@ function _brmd_members(d, axes, labels, anchors, texts, parent_priors, constants
             fit = isnothing(fits) ? nothing : fits[index]
             plan = _brmd_member_plan(fit,call,axis,d.plan.data,index)
             inputs, arguments = _brmd_member_inputs(axis,loop,d,index,plan,env)
-            parts = isnothing(plan) ? _brmd_simple_member(d,call,inputs,axis,index,env,notation,texts) :
-                _brmd_model_parts(brm_descriptor(plan),labels,Dict(),texts)
-            scope = (; member, variant=axis.path, inputs, held_out, model_id=d.id,
+            parts = if isnothing(plan)
+                _brmd_simple_member(d,call,inputs,axis,index,env,notation,texts)
+            else
+                fitted = _brmd_fitted_member(parent,call,plan,trace,outputs_by_member[index],held_out)
+                _brmd_model_parts(fitted,labels,Dict(),texts)
+            end
+            scope = (; member, variant=axis.path, inputs, held_out, model_id=d.id, selections,
+                output_names=isnothing(trace) ? (;) : trace.names,
                 response_outputs=outputs_by_member[index], local_priors=Set(p.id for p in parts.priors),
                 nodes=Dict{Tuple,BRMDescriptionComponent}(), priors=())
             priors = map(p -> _brmd_member_prior(p,scope,anchors),parts.priors)

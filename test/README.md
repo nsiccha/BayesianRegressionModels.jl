@@ -2278,7 +2278,8 @@ julia --startup-file=no --project=test test/description_comparisons.jl
 
 `description_record_members.jl` checks shared and distinct observation equations,
 keyed prior links, record-field documentation, callable hooks and replay for
-repeated record components. Run it with
+repeated record components, including members that read a parent parameter
+and a shared group effect. Run it with
 `julia --startup-file=no --project=test test/description_record_members.jl`.
 
 `description_plate_cells.jl` checks that a `@plate for` cell is described as

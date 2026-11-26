@@ -160,3 +160,53 @@ end
     @test !any(c -> haskey(c.provenance,:member),brm_description_components(empty_report))
 end
 end
+
+module DescriptionParentInputs
+using Test, BayesianRegressionModels, Distributions
+
+@brm function meter(record, shift)
+    level ~ 1 + (1 | parentblock(:joint) | record.site)
+    effect(level, Intercept) ~ Normal(record.center, 0.8)
+    @plate for i in eachindex(record.y)
+        record.y[i] ~ Normal(level[i] + shift, 1)
+    end
+    return sum(level)
+end
+
+const network = @brm begin
+    ambient ~ Normal(0, 1)
+    baseline ~ 1 + (1 | joint | site)
+    y ~ Normal(baseline, 1)
+    for r in sensors
+        readings[r.id] ~ meter(r, ambient)
+    end
+end
+
+@testset "A fitted member reads the shared effect and the parent's scalar" begin
+    records = [(id=:red, site=[1,2,1], center=0.5, y=[1.,3.,2.]),
+               (id=:blue, site=[2,1], center=-0.3, y=[4.,2.])]
+    fit = SBBRMI(network((; site=[1,2], y=[0.,0.], sensors=records)); mod=@__MODULE__, total_groups=())
+    d = brm_descriptor(fit)
+    result = brm_description(d)
+    @test result.complete
+    md = brm_description_markdown(result)
+    @test all(r -> occursin(string(r.id), md), records)
+    @test count(p -> p.id == (:parameter,:ambient), result.priors) == 1
+    for r in records
+        member = (:readings,r.id)
+        prior = only(p for p in result.priors if p.id == (:member,member...,:population,:level,:Intercept))
+        center = first(prior.distribution.arguments)
+        @test brm_description_binding(prior.distribution, center.name).value == r.center
+        nodes = filter(c -> get(c.provenance,:member,nothing) == member, brm_description_components(result))
+        obs = only(c for c in nodes if c.kind === :observation)
+        @test obs.provenance.observation_role === :conditioned
+        prediction = only(o for o in obs.outputs if o.role === :posterior_predictive)
+        @test reduce(vcat,fit.data[prediction.source])[prediction.selection] == r.y
+        level = only(c for c in nodes if c.kind === :predictor && c.provenance.owner === :level)
+        carrier = brm_output(d,:level;submodel=member)
+        @test only(level.outputs).name == carrier.name
+        @test only(level.outputs).selection == carrier.member
+        @test (:parameter,:ambient) in brm_description_prior_references(obs)
+    end
+end
+end
