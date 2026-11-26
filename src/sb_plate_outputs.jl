@@ -62,26 +62,27 @@ StanBlocks.@deffun begin
         end
         total
     end
+    # A scalar plate has one entry per member, so every segment has width one.
+    @inline brm_member_vectors(x::vector[n]) = RaggedVector(x, brm_column_ends(1, n))
+    @inline brm_member_vectors(x::int[n]) = brm_member_vectors(to_vector(x))
     @inline brm_member_vectors(x::matrix[k, n]) =
         RaggedVector(to_vector(x), brm_column_ends(k, n))
     @inline brm_member_vectors(x::RaggedVector) = x
     @inline brm_concat_members(a::vector[n], b::vector[m]) = append_row(a, b)
     @inline brm_concat_members(a::int[n], b::int[m]) = append_array(a, b)
-    @inline brm_concat_members(a::RaggedVector, b::RaggedVector) =
+    @inline brm_concat_members(a::int[n], b::vector[m]) = append_row(to_vector(a), b)
+    @inline brm_concat_members(a::vector[n], b::int[m]) = append_row(a, to_vector(b))
+    @inline brm_concat_member_vectors(a::RaggedVector, b::RaggedVector) =
         RaggedVector(append_row(a.mem, b.mem),
             append_array(a.ends, brm_shifted_ends(b.ends, brm_ends_total(a.ends))))
+    @inline brm_concat_members(a, b) =
+        brm_concat_member_vectors(brm_member_vectors(a), brm_member_vectors(b))
     # A member returning a subject plate has two sets of cumulative ends.
     # Shift reading ends by the left reading count and group ends by its subject count.
     @inline brm_concat_members(a::NestedRaggedVector, b::NestedRaggedVector) =
         NestedRaggedVector(append_row(a.mem, b.mem),
             append_array(a.ends, brm_shifted_ends(b.ends, brm_ends_total(a.ends))),
             append_array(a.groups, brm_shifted_ends(b.groups, size(a.ends))))
-    @inline brm_concat_members(a::matrix[k,n], b::matrix[j,m]) =
-        brm_concat_members(brm_member_vectors(a), brm_member_vectors(b))
-    @inline brm_concat_members(a::matrix[k,n], b::RaggedVector) =
-        brm_concat_members(brm_member_vectors(a), b)
-    @inline brm_concat_members(a::RaggedVector, b::matrix[k,n]) =
-        brm_concat_members(a, brm_member_vectors(b))
     brm_plate_row_pairs(x::matrix[k, n], members::int[m], rows::int[m])::vector[m] = begin
         rv = rep_vector(0.0, m)
         for i in 1:m

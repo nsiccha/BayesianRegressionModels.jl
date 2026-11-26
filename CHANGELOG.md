@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.412
+
+- On Stan, a record component can return a scalar for some members and a
+  vector for others in the same field. Each scalar occupies one element in
+  its own member's segment, in the supplied record order.
+
 ## 0.2.411
 
 - `brm_description` describes fitted record members that read a parent
