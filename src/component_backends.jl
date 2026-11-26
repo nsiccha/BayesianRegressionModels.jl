@@ -363,7 +363,7 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     cells = Dict{Symbol,Symbol}()
     coordinates = Any[]
     emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates, collection_cell=cell !== nothing,
-        documentation=brm_documentation(instance))
+        documentation=brm_documentation(instance), value_roots=_brm_component_results(component))
     _rk_strip_adaptive_records!(coordinates)
     cell_output = _brm_component_cell_output(component, instance)
     if cell_output !== nothing

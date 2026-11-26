@@ -310,12 +310,12 @@ end
 # with it (`_rk_drop_unfitted_records!`), so the semantic inventory describes
 # the fitted program's packed coordinates and nothing else.
 #
-# A statement defining one of `densities` stays whether or not a response
-# reads it: the grouped entries of `mi(x)::shares(total, rows)`, whose density
-# carries what their residuals say about the law, or a component call whose
-# own observations contribute to the likelihood.
+# Required outputs and their dependencies stay even when no local observation
+# reads them. These include a component's return fields, which its caller
+# reads, and terms that contribute their own density (grouped completions
+# and observed submodel calls).
 function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothing,
-        densities=())
+        required=())
     isempty(conditioned) && return emitted
     statements = emitted.main.args
     outputs = [_rk_source_outputs!(Set{Symbol}(), statement) for statement in statements]
@@ -332,7 +332,7 @@ function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothin
         end
     end
     kept = [_rk_source_observes(statement, conditioned) ||
-        !isdisjoint(outputs[i], densities) for (i, statement) in enumerate(statements)]
+        !isdisjoint(outputs[i], required) for (i, statement) in enumerate(statements)]
     needed = Set{Symbol}()
     for i in eachindex(statements)
         kept[i] && union!(needed, references[i])
