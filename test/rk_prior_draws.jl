@@ -90,6 +90,25 @@ end
     @test var(values) ≈ var(law) atol=0.025
 end
 
+@stestset "prior replay keeps the fitted HSGP basis on constant designs" begin
+    model = @brm begin
+        mu ~ 0 + hsgp(t; k=3)
+        y ~ Normal(mu, 1.0)
+    end
+    times = [-1.0, 0.5, 2.0, 3.0]
+    prior = RKBRMI(model((; t=times)))
+    draws = rk_prior_draws(prior, 4; seed=768)
+    fitted = rk_draw_values(prior, draws, (:mu,)).mu
+    for i in (2, 3)
+        target = reprocess(prior, (; t=fill(times[i], 2)))
+        @test isempty(coordinate_names(target.model.layout))
+        repeated = rk_draw_values(target, draws, (:mu,)).mu
+        for j in 1:length(draws)
+            @test repeated[j] ≈ fill(fitted[j][i], 2)
+        end
+    end
+end
+
 @stestset "prior value graph replays the same hierarchical parameter points" begin
     model = @brm begin
         scale ~ Exponential(1.0)

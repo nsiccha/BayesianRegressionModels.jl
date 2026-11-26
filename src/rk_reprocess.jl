@@ -141,17 +141,22 @@ function _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariate
         if haskey(training, name) && !_brm_df_has_column(new_data, name))
     merge!(absent, _rk_car_fitted_edges(parent(rk), new_data, training))
     merge!(absent, _rk_omitted_scalars(_rk_replay_scalars(rk), new_data))
-    rebound = _brm_rebind_brmi(parent(rk), _BRMReplayData(new_data, absent))
-    _, fitted = _brm_resolve_constants(parent(rk); prefix)
-    constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
-    plan = _brm_with_frozen_replay(_BRMFrozenReplay(training, groups)) do
-        _rk_plan_car_units(_rk_plan_completions(_brm_rk_plan(rebound; held_out, prior_responses,
-            fitted_constants=(name, _source) -> get(constants, name, nothing)),
-            _rk_completion_mode(rk.plan)), car_units)
-    end
-    if rk.plan isa _RKUnconditionedPlan && plan isa _RKUnconditionedPlan
+    data = _BRMReplayData(new_data, absent)
+    plan = if rk.plan isa _RKUnconditionedPlan
+        # Replay the fitted declarations and their preprocessing. Re-emitting
+        # them from the design would fit a new basis on its prediction rows.
         source = rk.plan.replay === nothing ? rk : rk.plan.replay.source
-        plan = _RKUnconditionedPlan(plan.generative, plan.columns, (; data=new_data, groups, source))
+        generated = reprocess(source.plan.generative, data; held_out, resample_groups=groups)
+        _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data), (; data=new_data, groups, source))
+    else
+        rebound = _brm_rebind_brmi(parent(rk), data)
+        _, fitted = _brm_resolve_constants(parent(rk); prefix)
+        constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
+        _brm_with_frozen_replay(_BRMFrozenReplay(training, groups)) do
+            _rk_plan_car_units(_rk_plan_completions(_brm_rk_plan(rebound; held_out, prior_responses,
+                fitted_constants=(name, _source) -> get(constants, name, nothing)),
+                _rk_completion_mode(rk.plan)), car_units)
+        end
     end
     retained = _rk_retained_program(rk)
     # This emission's coordinate inventory is the replay's, so preparing the
