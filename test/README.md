@@ -2732,6 +2732,12 @@ and the descriptor, and that a per-subject window fitted on its kept rows
 replays onto the full data, a denser grid and a re-drawn subject with its
 frozen `zscale` constants.
 
+`ordinal_forecast.jl` checks values-free `Ordinal` forecasts with fitted levels,
+new predictor row counts, restored labels, threshold-specific effects, and a
+Bernoulli response on a separate axis. It compares compiled predictive draws
+with valid placeholder labels and checks fitted parameter coordinates, finite
+densities and gradients, all ordinal links, one-level fits, and group redraws.
+
 `rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
 singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged

@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.418
+
+- `reprocess(::SBBRMI, new_data)` can forecast an `Ordinal` response with
+  automatically allocated thresholds when its response column is absent.
+  Replay keeps the fitted category levels and thresholds, sizes predictions
+  from the new predictors, and omits the response data and likelihood. A later
+  replay can restore response labels using the fitted category vocabulary.
+
 ## 0.2.417
 
 - The sparse Laplace solver recognizes a row-aligned identity-link predictor

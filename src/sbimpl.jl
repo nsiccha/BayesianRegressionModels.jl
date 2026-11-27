@@ -1799,7 +1799,9 @@ StanBlocks.@deffun begin
         end
     end
 
-    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+    # The threshold-effect matrix supplies n even with scalar predictors, so
+    # values-free responses can infer their integer-vector predictive shape.
+    @stanonly @lhs brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
                      discrimination::vector[n], structure::int, link::int,
                      threshold_effect::matrix[n,k])::real = begin
         rv = 0.
@@ -1811,7 +1813,7 @@ StanBlocks.@deffun begin
         end
         rv
     end
-    @stanonly brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
+    @stanonly @lhs brm_ordinal_lpmf(y::int[n], eta::vector[n], thresholds::vector[k],
                      discrimination::real, structure::int, link::int,
                      threshold_effect::matrix[n,k])::real = begin
         brm_ordinal_lpmf(
@@ -1819,7 +1821,7 @@ StanBlocks.@deffun begin
             threshold_effect,
         )
     end
-    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+    @stanonly @lhs brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
                      discrimination::vector[n], structure::int, link::int,
                      threshold_effect::matrix[n,k])::real = begin
         brm_ordinal_lpmf(
@@ -1827,7 +1829,7 @@ StanBlocks.@deffun begin
             threshold_effect,
         )
     end
-    @stanonly brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
+    @stanonly @lhs brm_ordinal_lpmf(y::int[n], eta::real, thresholds::vector[k],
                      discrimination::real, structure::int, link::int,
                      threshold_effect::matrix[n,k])::real = begin
         brm_ordinal_lpmf(
@@ -8355,18 +8357,6 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
             continue
         end
         _sb_reads_level_codes(e) && continue
-        # A response a cell observes through a grouping (`y[rows[i]]`) is a
-        # gathered key whose raw column the new data may lack. Its record is
-        # kept, so a later replay onto rows with the response gathers it again.
-        if e.kind === :kernel_ragged && !e.const_.is_lp &&
-           !_sb_df_has_column(new_df, first(e.raw_ref)) && is_absent_response(key)
-            new_data[key] = StanBlocks.stan.maybecv(key)
-            new_preproc[key] = e
-            push!(handled, key)
-            push!(forecast, key)
-            push!(forecast_columns, first(e.raw_ref))
-            continue
-        end
         # A joint response's emission reads its rows through its own density,
         # which a values-free mark cannot stand in for.
         if e.kind in (:joint_response, :joint_missing_response)
@@ -8376,6 +8366,19 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                 "sbimpl: reprocess: the new data lacks column(s) `", join(lacking, "`, `"),
                 "` of the joint response `", join(outcomes, "`, `"), "`. A forecast of a ",
                 "joint response is not supported yet (todo `1fnt1zu`); include its outcome columns.")
+        end
+        # A gathered or recoded response can lack its raw column too. Keep
+        # its fitted record (including ordinal levels), so a later replay can
+        # restore response values using the same preprocessing contract.
+        columns = _sb_response_columns(sb, key)
+        if !isnothing(columns) && any(c -> !_sb_df_has_column(new_df, c), columns) &&
+           is_absent_response(key)
+            new_data[key] = StanBlocks.stan.maybecv(key)
+            new_preproc[key] = e
+            push!(handled, key)
+            push!(forecast, key)
+            union!(forecast_columns, columns)
+            continue
         end
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
@@ -8501,11 +8504,12 @@ end
 
 # The data columns a response data source is read from, or `nothing` for one
 # BRM derives from other columns (a fresh-covariate `keep`, an imputation
-# split): its own column, the raw column a cell gathers through a grouping, or
-# a joint response's outcome columns.
+# split): its own column, a recoded ordinal column, the raw column a cell
+# gathers through a grouping, or a joint response's outcome columns.
 function _sb_response_columns(sb::SBBRMI, key::Symbol)
     e = get(sb.preproc, key, nothing)
     isnothing(e) && return (key,)
+    e.kind === :ordinal_outcome && return (e.raw_ref,)
     e.kind === :kernel_ragged && !e.const_.is_lp && return (first(e.raw_ref),)
     e.kind in (:joint_response, :joint_missing_response) && return Tuple(e.raw_ref)
     nothing
@@ -17974,7 +17978,7 @@ end
 # are normalized centrally by `_sb_stan_dist_args` before they reach the Stan
 # call, so model density, predictive RNG and pointwise log-likelihood all see
 # the same exact parameterization.
-_sb_lik_stan_exprs!(stmts, target, name::Symbol, arg_exprs) =
+_sb_lik_stan_exprs!(stmts, target, name, arg_exprs) =
     push!(stmts, Expr(:call, :~, target, Expr(:call, name, arg_exprs...)))
 
 _sb_lik_stan!(stmts, target, name::Symbol, args, data) =
@@ -18093,14 +18097,13 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
     levels = prepared_response.fit.levels
     n_levels = prepared_response.fit.n_levels
     # No `n_levels >= 2` guard: one uniform emission. At a single observed level
-    # `n_cut == 0` — `ordered[0]`/`vector[0]` thresholds and an empty
-    # `rep_matrix(0., N, 0)` threshold effect, all Stan-valid, degenerating to a
-    # zero-information likelihood rather than a shape-conditional error.
+    # `n_cut == 0` — `ordered[0]`/`vector[0]` thresholds, all Stan-valid,
+    # degenerating to a zero-information likelihood rather than a shape error.
     data[target] = prepared_response.response
     _sb_record_preproc!(data, target, PreprocEntry(
         :ordinal_outcome, (; levels, n_levels), target, true))
     law = _sb_ordinal_law!(stmts, target, args, kwargs, data, n_levels, length(raw))
-    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal, law)
+    _sb_lik_stan_exprs!(stmts, target, law.family, law.args)
 end
 
 function _sb_ordinal_observed(target, data)
@@ -18143,12 +18146,12 @@ function _sb_lik_family!(stmts, target, ::typeof(coarsened), args, kwargs::Named
         :coarsened_upper, (; levels, n_levels, lower=target), name(plan.upper), true))
     law = _sb_ordinal_law!(stmts, target, Tuple(base_args), getkwargs(base), data,
                            n_levels, length(lower))
-    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal_range, (upper_key, law...))
+    _sb_lik_stan_exprs!(stmts, target, law.range_family, (upper_key, law.args...))
 end
 
-# An `Ordinal` law's Stan arguments after its response is coded: thresholds,
-# threshold effects, location and discrimination, shared by an exact response
-# and a coarsened one.
+# An `Ordinal` law's Stan family and arguments after its response is coded:
+# thresholds, threshold effects, location and discrimination, shared by an
+# exact response and a coarsened one.
 function _sb_ordinal_law!(stmts, target, args::Tuple{Any,Any,Any},
                           kwargs::NamedTuple, data, n_levels::Int, n_obs::Int)
     structure_raw, link_raw, eta_raw = args
@@ -18174,29 +18177,32 @@ function _sb_ordinal_law!(stmts, target, args::Tuple{Any,Any,Any},
         "`StoppingRatio()` only; unrestricted cumulative category-specific " *
         "effects can make cumulative probabilities non-monotone")
 
-    effect_name = Symbol(target, :_threshold_effect)
-    if isempty(per_threshold)
-        push!(stmts, :($effect_name = rep_matrix(
-            0., num_elements($target), $n_cut)))
-    else
-        X_name = Symbol(target, :_threshold_X)
-        beta_name = Symbol(target, :_threshold_beta)
-        n_terms = length(per_threshold)
-        push!(stmts, Expr(:(=), X_name, Expr(:call, :hcat, per_threshold...)))
-        # Stan's std_normal_lpdf is not matrix-vectorised. Reuse BRM's
-        # array-of-vectors standard-normal prior, then rebuild a K-1 by p matrix
-        # through the measured ranef_b_matrix helper for the design multiply.
-        push!(stmts, :($beta_name::vector[$n_cut,$n_terms] ~ multi_std_normal()))
-        beta_matrix = Expr(:call, :adjoint,
-            Expr(:call, :ranef_b_matrix, beta_name))
-        push!(stmts, Expr(:(=), effect_name,
-            Expr(:call, :*, X_name, beta_matrix)))
-    end
-
     eta = _sb_scalar_expr(eta_raw, data)
     discrimination = _sb_ordinal_discrimination_expr(
         get(kwargs, :discrimination, 1.0), data)
-    (eta, cut_name, discrimination, structure, link, effect_name)
+    law_args = (eta, cut_name, discrimination, structure, link)
+    # Without threshold-specific effects, use the existing family whose RNG
+    # takes its row axis from eta or discrimination. Reading num_elements(y)
+    # here would consume a values-free forecast mark before its sampling site.
+    isempty(per_threshold) && return (;
+        family=brm_ordinal_explicit, range_family=brm_ordinal_explicit_range,
+        args=law_args)
+
+    effect_name = Symbol(target, :_threshold_effect)
+    X_name = Symbol(target, :_threshold_X)
+    beta_name = Symbol(target, :_threshold_beta)
+    n_terms = length(per_threshold)
+    push!(stmts, Expr(:(=), X_name, Expr(:call, :hcat, per_threshold...)))
+    # Stan's std_normal_lpdf is not matrix-vectorised. Reuse BRM's
+    # array-of-vectors standard-normal prior, then rebuild a K-1 by p matrix
+    # through the measured ranef_b_matrix helper for the design multiply.
+    push!(stmts, :($beta_name::vector[$n_cut,$n_terms] ~ multi_std_normal()))
+    beta_matrix = Expr(:call, :adjoint,
+        Expr(:call, :ranef_b_matrix, beta_name))
+    push!(stmts, Expr(:(=), effect_name,
+        Expr(:call, :*, X_name, beta_matrix)))
+    (; family=:brm_ordinal, range_family=:brm_ordinal_range,
+        args=(law_args..., effect_name))
 end
 # Explicit thresholds: `y ~ Ordinal(structure, link, eta, thresholds[,
 # discrimination])`. The model states the thresholds (a declared vector with its
