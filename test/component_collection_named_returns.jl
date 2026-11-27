@@ -291,6 +291,60 @@ end
     @test !any(name -> endswith(string(name), "__"), names)
 end
 
+@brm function mixed_reading(record)
+    bias ~ Normal(0, 1)
+    if record.series
+        first_reading = bias .+ record.grid
+        second_reading = bias
+    else
+        first_reading = bias
+        second_reading = bias .- record.grid
+    end
+    return (; first_reading, second_reading)
+end
+const mixed_model = @brm begin
+    for record in records
+        channels[record.id] ~ mixed_reading(record)
+    end
+    first_readings = channels.first_reading
+    second_readings = channels.second_reading
+    @plate for i in eachindex(y)
+        y[i] ~ Normal(sum(first_readings[i]) - sum(second_readings[i]), 1)
+    end
+end
+
+@stestset "Scalar and vector returns keep one segment per record" begin
+    records = [(; id=:d, series=false, grid=[3., -2.]),
+               (; id=:c, series=true, grid=[1., 4., -3.]),
+               (; id=:a, series=false, grid=[2.]),
+               (; id=:b, series=true, grid=Float64[])]
+    y = [.2, -.4, .7, -.9]
+    sb = SBBRMI(mixed_model((; records, y)); mod=@__MODULE__, total_groups=())
+    path = joinpath(mktempdir(), "mixed-readings.stan")
+    model = BRM.stan_instantiate(sb; path).model
+    names = BridgeStan.param_unc_names(model)
+    descriptor = brm_descriptor(sb)
+    u = [.15, -.2, .25, -.3]
+    @test length(names) == length(u)
+    constrained_names = BridgeStan.param_names(model; include_tp=true, include_gq=true)
+    draw = BridgeStan.param_constrain(model, u; include_tp=true, include_gq=true,
+        rng=BridgeStan.StanRNG(model, 1))
+    expected = sum(logpdf.(Normal(), u))
+    for (record, observation) in zip(records, y)
+        submodel = (:channels, record.id)
+        at = only(brm_output_coordinates(descriptor, :bias, names; submodel))
+        bias = u[at]
+        first_reading = record.series ? bias .+ record.grid : [bias]
+        second_reading = record.series ? [bias] : bias .- record.grid
+        for (field, values) in ((:first_reading, first_reading), (:second_reading, second_reading))
+            indices = brm_output_coordinates(descriptor, field, constrained_names; submodel)
+            @test draw[indices] ≈ values
+        end
+        expected += logpdf(Normal(sum(first_reading) - sum(second_reading), 1), observation)
+    end
+    @test BridgeStan.log_density(model, u; propto=false) ≈ expected
+end
+
 @stestset "A named return holds a member's own data vector" begin
     # Two members return their record's curve (of lengths 3 and 2), one its
     # fitted curve; supplied out of key order.
