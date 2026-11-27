@@ -663,6 +663,8 @@ function BRM._rk_generate_members(rk, readout, U, rng)
     end
 end
 
+include("rk_generated_replay.jl")
+
 function BRM._rk_generated_points(backend, physical)
     layout = backend.model.layout
     points = Matrix{Float64}(undef, layout.total, length(physical))

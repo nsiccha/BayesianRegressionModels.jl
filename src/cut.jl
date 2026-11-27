@@ -328,14 +328,34 @@ function rk_draw_values(rk::RKBRMI, draws::_RKPriorDraws, names; submodel=nothin
     rk_draw_values(target.backend, draws.points, names; submodel)
 end
 
-function rk_draw_values(rk::RKBRMI, draws::_RKGeneratedDraws, names; submodel=nothing)
+function rk_draw_values(rk::RKBRMI, draws::_RKGeneratedBatch, names; submodel=nothing)
+    (; backend, points) = rk_generated_replay(rk, draws)
+    rk_draw_values(backend, points, names; submodel)
+end
+
+"""
+    rk_generated_replay(rk::RKBRMI, draws)
+
+Return `(; backend, points)` for a batch from [`rk_generated_draws`](@ref).
+Each column of `points` is a packed unconstrained draw for `backend`, including
+the parameters of omitted responses. Use this pair with RK graph readers,
+[`rk_design_binder`](@ref), or a posterior-predictive query on
+[`rk_bound_plan`](@ref). A compatible frozen replay of the fit can reuse the
+same batch.
+"""
+function rk_generated_replay(rk::RKBRMI, draws::_RKGeneratedBatch)
     rk.prepared.draw_binding === draws.binding || throw(ArgumentError(
         "rk_draw_values: use the generated batch on its fit or a compatible frozen design replay"))
-    readout = _rk_keyed_readout(rk)
+    readout = _rk_generated_readout(rk)
     issetequal(readout.coordinates, draws.coordinates) || throw(DimensionMismatch(
         "rk_draw_values: the replay changes the generated parameter coordinates"))
-    points = _rk_generated_points(readout.backend, draws.physical)
-    rk_draw_values(readout.backend, points, names; submodel)
+    points = if readout.coordinates == draws.coordinates
+        draws.points
+    else
+        positions = Dict(name => i for (i, name) in pairs(draws.coordinates))
+        draws.points[[positions[name] for name in readout.coordinates], :]
+    end
+    (; readout.backend, points)
 end
 function _rk_generated_points end
 

@@ -677,6 +677,9 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # replays can share that build with a different plan. Inspection uses this
     # provenance to avoid presenting the old layout's shapes as current.
     model_plan::Any
+    # The training fit and new rows for a compatible frozen generated-draw
+    # replay. They are binding provenance and survive clearing prepared caches.
+    generated_design::Union{Nothing,NamedTuple}
     # What this process prepared from the backend (`_BRMPreparedSlot`).
     prepared::_BRMPreparedSlot
     # The retained parent is the model the plan lowered: `optional(...)`
@@ -684,10 +687,10 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
             bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing,
-            model_plan=plan, draw_binding=Ref(nothing))
+            model_plan=plan, draw_binding=Ref(nothing), generated_design=nothing)
         parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
-            plan, model, program, bound, source, fitted, model_plan,
+            plan, model, program, bound, source, fitted, model_plan, generated_design,
             _BRMPreparedSlot(draw_binding))
     end
 end

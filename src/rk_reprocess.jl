@@ -170,9 +170,15 @@ function _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariate
     # The fit's program, translated once, binds the replay's data too, unless
     # a callable differs under the same name.
     program = _rk_same_callables(retained, replayed) ? rk.program : _RKOnce()
+    compatible = isempty(groups) && isempty(covariates)
+    generated_design = if compatible && !(rk.plan isa _RKUnconditionedPlan) &&
+            isempty(_brm_collection_axes(brm_source(rk)))
+        fit = isnothing(rk.generated_design) ? rk : rk.generated_design.fit
+        (; fit, data=new_data, held_out)
+    end
     replay = _rk_seed_coordinate_records!(RKBRMI(parent(rk), plan, rk.model; program,
-        source=brm_source(rk), model_plan=rk.model_plan,
-        draw_binding=isempty(groups) && isempty(covariates) ? rk.prepared.draw_binding : Ref(nothing)), records)
+        source=brm_source(rk), model_plan=rk.model_plan, generated_design,
+        draw_binding=compatible ? rk.prepared.draw_binding : Ref(nothing)), records)
     # Same coordinates, so the fit's draws mean the same thing on the replay.
     # Resampled groups size their effects by the new data's levels; a
     # forecast covariate's missing entries are the design's.
@@ -246,34 +252,73 @@ function rk_prior_draws(rk::RKBRMI, n::Integer; seed::Integer)
 end
 function _rk_generate_prior end
 
-struct _RKGeneratedDraws{D}
-    physical::D
+struct _RKGeneratedBatch
+    points::Matrix{Float64}
     binding::Base.RefValue{Nothing}
     coordinates::Vector{Symbol}
 end
-Base.length(draws::_RKGeneratedDraws) = length(draws.physical)
+Base.length(draws::_RKGeneratedBatch) = size(draws.points, 2)
 
 """
     rk_generated_draws(rk::RKBRMI, U; seed)
 
-Draw the unobserved parameters of keyed components conditional on each posterior
-column of `U`. Each skipped sampling declaration must have a normalized
-generator. Its joint realization is drawn once per column.
+Draw the parameters needed to predict omitted responses or read unobserved
+keyed components, conditional on each fitted posterior column of `U`. The
+batch retains the fitted population coefficients and subject effects. Shared
+Gaussian group-effect blocks draw their missing margins conditional on the
+fitted correlation and effects. Each skipped law needs a normalized generator.
 Pass the resulting batch to `rk_draw_values` on the fit or a compatible frozen
 `reprocess` design to reuse the same physical member parameters across fields
-and schedules. Supply the same integer seed to reproduce the batch.
+and schedules. Use [`rk_generated_replay`](@ref) for the target backend and
+its packed coordinates. Supply the same integer seed to reproduce the batch.
 """
 function rk_generated_draws(rk::RKBRMI, U::AbstractMatrix; seed::Integer)
-    isempty(_brm_collection_axes(brm_source(rk))) && throw(ArgumentError(
-        "rk_generated_draws requires a model with keyed components"))
     rk.plan isa _RKUnconditionedPlan && throw(ArgumentError(
         "rk_generated_draws requires a fitted observation. Use rk_prior_draws for a prior-only model."))
     U = _brm_cut_draws(U, _rk_layout_coordinate_names(rk); prefix="rk_generated_draws")
-    readout = _rk_keyed_readout(rk)
-    physical = _rk_generate_members(rk, readout, U, Random.Xoshiro(seed))
-    _RKGeneratedDraws(physical, rk.prepared.draw_binding, readout.coordinates)
+    readout = _rk_generated_readout(rk)
+    rng = Random.Xoshiro(seed)
+    points = if haskey(readout, :fit)
+        _rk_generate_replay_points(readout, U, rng)
+    else
+        _rk_generated_points(readout.backend, _rk_generate_members(rk, readout, U, rng))
+    end
+    _RKGeneratedBatch(points, rk.prepared.draw_binding, readout.coordinates)
 end
 function _rk_generate_members end
+function _rk_generate_replay_points end
+
+function _rk_generated_readout(rk)
+    isempty(_brm_collection_axes(brm_source(rk))) || return _rk_keyed_readout(rk)
+    _rk_once!(rk.prepared.readout) do
+        design = rk.generated_design
+        isnothing(design) && return _rk_ordinary_readout(rk)
+        original = _rk_generated_readout(design.fit)
+        backend = reprocess(original.backend, design.data; design.held_out)
+        merge(original, (; backend, coordinates=_rk_bound_coordinate_names(backend)))
+    end
+end
+
+function _rk_ordinary_readout(rk)
+    rk.model_plan === rk.plan || throw(ArgumentError(
+        "rk_generated_draws: generate the batch on the training fit before resampling " *
+        "levels or forecasting covariates on a new design"))
+    brmi = parent(rk)
+    missing = _rk_omitted_response_columns(brmi)
+    backend = if isempty(missing)
+        rk
+    else
+        isnothing(rk.fitted) || throw(ArgumentError(
+            "rk_generated_draws: completing an omitted response needs the data-bound fit " *
+            "to prepare that response's predictors on the training design"))
+        columns = merge(_rk_training_columns(brmi), missing)
+        source = _brm_rebind_brmi(brmi, _BRMReplayData((;), columns))
+        RKBRMI(source; held_out=_rk_held_out_names(rk.plan),
+            completions=_rk_completion_mode(rk.plan), car_units=_rk_fitted_car_units(rk.plan))
+    end
+    (; fit=rk, target=backend, backend, coordinates=_rk_layout_coordinate_names(backend),
+        generator=_RKOnce())
+end
 
 # The kernel of a backend's own binding (ReactiveKernels package extension).
 function _rk_rebuild_model end

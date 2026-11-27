@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.416
+
+- After fitting a model with an omitted response, `rk_generated_draws(rk, U; seed)`
+  completes each posterior draw with the parameters needed to read that response’s
+  predictors and plate outputs. The conditional draw of a shared Gaussian block
+  preserves its fitted margins, including when they are interleaved with omitted
+  margins. Reuse a batch with `rk_draw_values` on frozen designs, or take
+  `(; backend, points) = rk_generated_replay(rk, batch)` for an RK graph query.
+
 ## 0.2.415
 
 - `rk_draw_values(rk, U, names; submodel=(collection, key))` reads a skipped

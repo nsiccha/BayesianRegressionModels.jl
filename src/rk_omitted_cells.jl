@@ -3,8 +3,8 @@
 # Omitting a response means not conditioning on it: what no remaining likelihood
 # reaches leaves the sampler. SBBRMI moves it to generated quantities and samples
 # only the active margins of a shared `|ID|` block (`sb_marginal_ranef.jl`). RK
-# has no generated quantities, so such a value is simply not in the program, and
-# a shared block is planned over the predictors a likelihood reaches.
+# samples the same narrow block. Conditional replay restores the other margins
+# and values on a separate graph (rk_generated_replay.jl).
 #
 # Dropping the omitted observation from its cell is not enough for that. The cell
 # usually computes the observation's location in statements of its own, and

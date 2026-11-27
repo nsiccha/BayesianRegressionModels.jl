@@ -102,6 +102,7 @@ include("rk_observations.jl")
 include("rk_car_separation.jl")
 include("rk_data_assignments.jl")
 include("rk_reprocess.jl")
+include("rk_generated_replay.jl")
 include("rk_design_binder.jl")
 include("rk_fitted_state.jl")
 include("cut.jl")
@@ -295,7 +296,7 @@ export primary_censored, double_interval_censored, PrimaryCensored, DoubleInterv
 export rk_translate_artifact
 export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
-export rk_prior_draws, rk_generated_draws
+export rk_prior_draws, rk_generated_draws, rk_generated_replay
 export rk_new_population_effects
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
