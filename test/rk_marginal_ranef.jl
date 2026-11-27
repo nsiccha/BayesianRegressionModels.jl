@@ -533,3 +533,21 @@ end
         end
     end
 end
+
+@stestset "scalar RK plate prediction after first-binding response omission" begin
+    data = (; RKM.CELL.subject, RKM.CELL.x, ya=first.(RKM.CELL.ya))
+    fit = RKBRMI(RKM.cell(data))
+    observed = RKBRMI(RKM.cell(merge(data, (; yc=first.(RKM.CELL.yc)))))
+    U = randn(Xoshiro(33), fit.model.layout.total, 2)
+    target = rk_generated_replay(fit, rk_generated_draws(fit, U; seed=8))
+    model, plan = target.backend.model, rk_bound_plan(target.backend)
+    @test predictive_targets(model, plan).yc.kind === :array
+    predict = prepare_predictive(model, plan)
+    control = reprocess(observed, data)
+    reference = prepare_predictive(control.model, rk_bound_plan(control))
+    for u in eachcol(target.points)
+        actual = predict(u, Xoshiro(17)).yc
+        @test size(actual) == size(data.subject)
+        @test mean.(predictive_laws(predict, u).yc) ≈ mean.(predictive_laws(reference, u).yc)
+    end
+end
