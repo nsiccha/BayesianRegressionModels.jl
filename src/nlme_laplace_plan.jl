@@ -248,7 +248,7 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
         uncertified=Dict{Symbol,Set{Symbol}}(),
         integrated_dimension=0, sampled_dimension=length(_rk_layout_coordinate_names(backend))) :
         _brm_with_progress(progress; description="Cell width screening") do _
-            working, _ = _rw2_field_backend(backend, [t.declaration for t in candidates])
+            working, _ = _brm_laplace_field_backend(backend, [t.declaration for t in candidates])
             _brm_spl_screen(working, candidates,
                 Set(t.declaration for t in candidates if named(t, forced)), max_cell_width)
         end
@@ -293,7 +293,7 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     retained = Set(t.declaration for t in candidates if named(t, forced) ||
         (!haskey(unknown, t.declaration) && get(gated, t.declaration, nothing) !== :never))
     if !isempty(retained) && length(retained) < length(candidates)
-        if _rw2_releases_walk(p, retained)
+        if _brm_laplace_releases_field(p, retained)
             p = _brm_sparse_laplace_problem(backend,
                 unique(t.grouping for t in candidates if t.declaration in retained);
                 ad_backend, tol, maxiter, declarations=retained, max_cell_width, screened=true,
@@ -581,7 +581,7 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
         i, j = cache.edges[e]
         total -= cache.edge_weights[e] * (z[i] - z[j])^2 / 2
     end
-    # A native GMRF field's −½ zᵀQz, as far as it depends on z[I]: a pair
+    # A structured field's −½ zᵀQz, as far as it depends on z[I]: a pair
     # inside I once each way, a pair leaving I twice.
     Q = cache.gmrf
     if Q !== nothing
@@ -610,7 +610,7 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
     declarations = Set(t.declaration for t in admitted)
     prepared = r.plan.prepared
     if prepared !== nothing && prepared.problem.backend === backend &&
-            !_rw2_releases_walk(prepared.problem, declarations) &&
+            !_brm_laplace_releases_field(prepared.problem, declarations) &&
             isequal(prepared.ad_backend, ad_backend) &&
             issubset(declarations, Set(_brm_plan_problem_terms(prepared.problem)))
         # Backend inputs are read-only. Do not clone the model and its bound
@@ -709,6 +709,7 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
             g.mean[oldz], g.precision[oldz], g.values)
     end
     p.gmrf = _brm_spl_gmrf_restrict(p.gmrf, blockmap, zmap)
+    _brm_spl_cdar_restrict!(p, zmap)
     p.population = setdiff(eachindex(p.u), p.integrated)
     p.names = _rk_layout_coordinate_names(p.backend)[p.population]
     p.blocks = [_BRMSlapBlock(b.declaration, b.group, b.K, zmap[b.z], b.omega,

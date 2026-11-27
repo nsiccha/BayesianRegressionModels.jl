@@ -46,17 +46,16 @@ function brm_rw2_coordinates(sigma::Real, phi::AbstractVector{<:Real})
     basis
 end
 
-# The sparse solver integrates the intrinsic RW2 in standardized field values.
-# Only selected walks change frame. Other population coordinates keep the
-# public model's meaning, even when several walks share a time column.
-_rw2_field_plan(p::_RKHeldOutPlan, selected) =
-    _RKHeldOutPlan(_rw2_field_plan(p.parent, selected), p.held_out)
-_rw2_field_plan(p::_RKValuePlan, selected) = _RKValuePlan(
-    _rw2_field_plan(p.regression, selected), p.assignments, p.observations, p.columns, p.completions)
-function _rw2_field_plan(p::_RKStructuralPlan, selected)
+# Selected intrinsic RW2 and independent AR(1) walks integrate in standardized
+# field values. Other population coordinates keep the public model's meaning.
+_brm_laplace_field_plan(p::_RKHeldOutPlan, selected) =
+    _RKHeldOutPlan(_brm_laplace_field_plan(p.parent, selected), p.held_out)
+_brm_laplace_field_plan(p::_RKValuePlan, selected) = _RKValuePlan(
+    _brm_laplace_field_plan(p.regression, selected), p.assignments, p.observations, p.columns, p.completions)
+function _brm_laplace_field_plan(p::_RKStructuralPlan, selected)
     predictors = map(p.predictors) do predictor
         terms = map(predictor.terms) do t
-            t.kind === :rw && t.options.value in selected || return t
+            t.kind in (:rw, :cdar) && t.options.value in selected || return t
             _RKTermSpec(t.kind, t.columns, merge(t.options, (; field_coordinates=true)),
                 t.addressee, t.label)
         end
@@ -67,13 +66,16 @@ function _rw2_field_plan(p::_RKStructuralPlan, selected)
         p.r2d2_priors, p.horseshoe_priors, p.inputs, p.prior_reads)
 end
 
-function _rw2_field_backend(rk, declarations)
-    walks = [r for r in _rk_coordinate_records(rk) if r.kind === :rw &&
-        r.sum_to_zero && r.order == 2 && r.declaration in declarations]
+function _brm_laplace_field_backend(rk, declarations)
+    walks = [r for r in _rk_coordinate_records(rk) if
+        ((r.kind === :rw && r.sum_to_zero && r.order == 2) ||
+         (r.kind === :cdar && r.cor_factor === nothing)) && r.declaration in declarations]
     isempty(walks) && return rk, walks
-    plan = _rw2_field_plan(rk.plan, Set(r.declaration for r in walks))
+    plan = _brm_laplace_field_plan(rk.plan, Set(r.declaration for r in walks))
     _brm_laplace_working_backend(rk, plan), walks
 end
+
+_rw2_field_backend(rk, declarations) = _brm_laplace_field_backend(rk, declarations)
 
 # Re-emit a private integration plan with the public model's fitted binding.
 function _brm_laplace_working_backend(rk, plan)
@@ -86,30 +88,47 @@ function _brm_laplace_working_backend(rk, plan)
     working
 end
 
-function _rw2_draw_frame(working, walks)
+function _brm_laplace_draw_frame(working, walks, integrated)
     isempty(walks) && return nothing
     position = Dict(s => i for (i, s) in enumerate(_rk_layout_coordinate_names(working)))
     blocks = map(walks) do r
         n = length(r.steps)
-        ids = [position[Symbol(r.declaration, ".", r.locals.basis, ".", i)] for i in 1:n]
-        (; r.declaration, ids, scale=Symbol(r.declaration, ".", r.locals.sigma))
+        if r.kind === :rw
+            ids = [position[Symbol(r.declaration, ".", r.locals.basis, ".", i)] for i in 1:n]
+            (; kind=:rw, r.declaration, ids, shape=(1, n),
+                port=Symbol(r.declaration, ".", r.locals.sigma))
+        else
+            ids = vec([position[Symbol(r.declaration, ".", r.locals.eta, ".", g, ".", t)]
+                for g in eachindex(r.levels), t in 1:n])
+            (; kind=:cdar, r.declaration, ids, shape=(length(r.levels), n),
+                port=Symbol(r.declaration, ".", r.locals.rho))
+        end
     end
-    # Read the model's scale port. It can be sampled, fixed or derived from
-    # another parameter, and several walks can use the same observed grid.
-    (; blocks, scales=_rk_value_reader(working, Tuple(b.scale for b in blocks)))
+    _BRMLaplaceFieldFrame(working, blocks, integrated)
 end
 
 _brm_laplace_public_point!(p, u) = u
 function _brm_laplace_public_point!(p::BRMSparseLaplaceProblem, u)
     frame = p.walk_frame
     isnothing(frame) && return u
-    scales = frame.scales(u)
+    values = _brm_laplace_field_values(frame, u)
     for b in frame.blocks
-        field = view(u, b.ids)
-        field .= brm_rw2_coordinates(scales[b.scale], field)
+        if b.kind === :rw
+            field = view(u, b.ids)
+            field .= brm_rw2_coordinates(values[b.port], field)
+        else
+            rho = values[b.port]
+            scale = sqrt(1 - rho^2)
+            field = reshape(view(u, b.ids), b.shape)
+            # Reverse order leaves the preceding state intact in this in-place
+            # conversion back to the public standardized innovations.
+            for t in size(field, 2):-1:2, g in axes(field, 1)
+                field[g, t] = (field[g, t] - rho * field[g, t - 1]) / scale
+            end
+        end
     end
     u
 end
 
-_rw2_releases_walk(p, selected) = p.walk_frame !== nothing &&
+_brm_laplace_releases_field(p, selected) = p.walk_frame !== nothing &&
     any(b -> b.declaration ∉ selected, p.walk_frame.blocks)

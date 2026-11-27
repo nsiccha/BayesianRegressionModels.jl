@@ -154,7 +154,8 @@ function brm_laplace_integration(p::Union{BRMSparseLaplaceProblem,_BRMSampledLap
     calls = Ref(1)
     # Record each retained point while its conditional factor is still live.
     states = Dict{Vector{Float64},Any}()
-    summaries = Dict{Vector{Float64},NTuple{3,Vector{Float64}}}()
+    summaries = Dict{Vector{Float64},NamedTuple{(:mean, :sd, :packed, :draw_mean),
+        NTuple{4,Vector{Float64}}}}()
     function record(φ)
         draws > 0 && (states[φ] = _brm_lint_draw_state(p))
         latent_marginals === :none || (summaries[φ] = _brm_lint_conditional(p, latent_marginals))
@@ -405,7 +406,7 @@ function _brm_lint_draws_at(p::BRMSparseLaplaceProblem, Θ, picks, rng, conditio
         state = get(states, P[:, k], nothing)
         state === nothing ? _brm_spl_mode!(p, view(P, :, k)) : state
     end
-    mean_at = centers === nothing ? nothing : k -> first(centers[P[:, k]])
+    mean_at = centers === nothing ? nothing : k -> centers[P[:, k]].draw_mean
     _brm_spl_draws(p, length(picks), state_at; rng, conditional, mean_at)
 end
 
@@ -432,24 +433,33 @@ _brm_lint_draw_state(p::BRMSparseLaplaceProblem) =
 # Conditional variances on the operator's large components are estimated
 # with its fixed white probes. Squaring the covariance-root actions estimates
 # diag(H⁻¹), including when the logdet uses a signed control variate.
-function _brm_lint_variance(p, state, selection)
+function _brm_lint_variance(p, state, selection, transforms=Dict())
     F = state.F
     if F isa _BRMOperatorFactor
         variances = copy(_brm_operator_logdet!(F).sensitivity[p.diagonal])
-        for (part, ids) in zip(F.parts, F.components)
+        _brm_lint_cdar_variance!(variances, p, selection, transforms)
+        for (component, (part, ids)) in enumerate(zip(F.parts, F.components))
             part.factor === nothing || continue
             v = view(variances, ids)
             fill!(v, 0.0)
             root = similar(v)
             for probe in eachcol(part.probes)
                 _brm_operator_root!(root, F, part, probe)
+                for (a, b, rho, scale) in get(transforms, component, ())
+                    i, j = F.localindex[a], F.localindex[b]
+                    root[i] = (root[i] - rho * root[j]) / scale
+                end
                 v .+= abs2.(root)
             end
             v ./= size(part.probes, 2)
         end
         return variances
     end
-    selection === nothing || return selection[p.diagonal]
+    if selection !== nothing
+        variance = selection[p.diagonal]
+        _brm_lint_cdar_variance!(variance, p, selection, transforms)
+        return variance
+    end
     if F isa _BRMAugmentedFactor
         return diag(_brm_spl_selected(F))[1:length(p.integrated)]
     end
@@ -464,23 +474,55 @@ function _brm_lint_variance(p, state, selection)
     variance
 end
 
-_brm_lint_conditional(p::_BRMSampledLaplaceProblem, method) = (Float64[], Float64[], copy(p.u))
+# Per-component linear maps back to cdar innovations. Reverse time order lets
+# each covariance-root action be transformed in place without losing a state.
+function _brm_lint_cdar_transforms(p)
+    transforms = Dict{Int,Vector{Tuple{Int,Int,Float64,Float64}}}()
+    p.walk_frame === nothing && return transforms
+    for f in p.walk_frame.cdar, t in size(f.z, 2):-1:2, g in axes(f.z, 1)
+        a, b = f.z[g, t], f.z[g, t - 1]
+        entries = get!(() -> Tuple{Int,Int,Float64,Float64}[], transforms, p.component[a])
+        push!(entries,
+            (a, b, f.rho, sqrt(1 - f.rho^2)))
+    end
+    transforms
+end
+
+function _brm_lint_cdar_variance!(variance, p, selection, transforms)
+    # Every transition is in the selected pattern. Both the exact covariance
+    # and its root-probe analogue above retain public innovation marginals.
+    for entries in values(transforms), (a, b, rho, scale) in entries
+        covariance = selection[_brm_spl_nzindex(p.pattern, a, b)]
+        variance[a] = (variance[a] + rho^2 * variance[b] - 2rho * covariance) / scale^2
+    end
+    variance
+end
+
+_brm_lint_conditional(p::_BRMSampledLaplaceProblem, method) =
+    (; mean=Float64[], sd=Float64[], packed=copy(p.u), draw_mean=Float64[])
 function _brm_lint_conditional(p::BRMSparseLaplaceProblem, method)
     state = p.last.state
-    selection = method === :mean_corrected ? _brm_spl_conditional_selection(p, state) : nothing
+    transforms = _brm_lint_cdar_transforms(p)
+    selection = method === :mean_corrected || !isempty(transforms) ?
+        _brm_spl_conditional_selection(p, state) : nothing
     mu = copy(state.z)
     if method === :mean_corrected
         shift = _brm_spl_mean_shift(p, state, selection, Returns(true))
         shift.bad === nothing || _brm_nlme_error("latent mean correction failed at " * shift.bad)
         mu .+= shift.v
     end
-    variance = _brm_lint_variance(p, state, selection)
+    variance = _brm_lint_variance(p, state, selection, transforms)
     all(v -> isfinite(v) && v > 0, variance) || _brm_nlme_error(
         "brm_laplace_integration: nonpositive or nonfinite conditional variance")
     # The point as every reader of a fit takes it, at the conditional centre.
     packed = copy(state.u)
     packed[p.integrated] .= mu
-    mu, sqrt.(variance), _brm_laplace_public_point!(p, packed)
+    _brm_laplace_public_point!(p, packed)
+    public_mean = copy(mu)
+    for entries in values(transforms), (a, b, rho, scale) in entries
+        public_mean[a] = (public_mean[a] - rho * public_mean[b]) / scale
+    end
+    (; mean=public_mean, sd=sqrt.(variance), packed, draw_mean=mu)
 end
 
 function _brm_lint_latent_marginals(p, points, w, summaries, method)
@@ -492,7 +534,8 @@ function _brm_lint_latent_marginals(p, points, w, summaries, method)
     conditional_sd = similar(conditional_mean)
     packed = zeros(length(p.u), length(weights))
     for (k, j) in enumerate(point_indices)
-        mu, sd, u = summaries[points[:, j]]
+        summary = summaries[points[:, j]]
+        mu, sd, u = summary.mean, summary.sd, summary.packed
         conditional_mean[:, k] .= mu
         conditional_sd[:, k] .= sd
         packed[:, k] .= u
@@ -501,7 +544,7 @@ function _brm_lint_latent_marginals(p, points, w, summaries, method)
     if p isa BRMSparseLaplaceProblem && p.walk_frame !== nothing
         names = copy(names)
         for block in p.walk_frame.blocks, (j, i) in enumerate(block.ids)
-            names[i] = Symbol(block.declaration, ".phi.", j)
+            block.kind === :rw && (names[i] = Symbol(block.declaration, ".phi.", j))
         end
     end
     distributions = [MixtureModel(Normal.(view(conditional_mean, i, :),

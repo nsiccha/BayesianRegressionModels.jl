@@ -1947,7 +1947,34 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows,
     push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior),
         _rk_ast_hyper_statement(rho, rho_prior),
         Expr(:(=), P, Expr(:call, :length, groups)),
-        Expr(:(=), W, Expr(:call, :length, steps)),
+        Expr(:(=), W, Expr(:call, :length, steps)))
+    if get(options, :field_coordinates, false)
+        # Private Laplace frame: standardized states, with the same packed
+        # names as the public innovations. Its proper AR(1) density includes
+        # the change-of-variables normalizer. Each row reads just one state.
+        first_state, differences, scale, index = (_rk_block_local!(block, key)
+            for key in (:first_state, :differences, :scale, :index))
+        statements = quote
+            $eta[1:$P, 1:$W] .~ Flat.()
+            $first_state = $eta[:, 1]
+            $first_state .~ Normal.(0, 1)
+            $differences = $eta[:, 2:$W] .- $rho .* $eta[:, 1:($W - 1)]
+            $scale = sqrt(1.0 - $rho^2)
+            $differences .~ Normal.(0, $scale)
+            $index = $group_position .+ $P .* ($step_position .- 1)
+            $value = $sigma .* vec($eta)[$index]
+        end
+        append!(block.statements, Base.remove_linenums!(statements).args)
+        doc = @_rk_definition_doc """
+            Private stationary AR(1) state coordinates for Laplace integration.
+            Each group starts at Normal(0, 1), with subsequent conditional
+            mean rho times its preceding state and variance 1 - rho^2.
+            Returns sigma times each row's state.
+            """
+        call = _rk_ast_block_call!(definitions, taken, "brm_cdar", block, value; doc)
+        return call, (; sigma, rho, eta)
+    end
+    push!(block.statements,
         Expr(:call, :.~, Expr(:ref, eta, Expr(:call, :(:), 1, P), Expr(:call, :(:), 1, W)),
             _rk_ast_dotted(:Normal, 0, 1)))
     innovations = eta
@@ -2556,7 +2583,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     declaration=term.options.value, predictor=predictor.name,
                     step=term.options.source, group=term.options.group,
                     levels=term.options.levels, steps=term.options.steps,
-                    cor_factor=term.options.L, locals))
+                    cor_factor=term.options.L,
+                    field_coordinates=get(term.options, :field_coordinates, false), locals))
                 _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
                     (; sigma=locals.sigma, ar=locals.rho))
             elseif kind === :rw

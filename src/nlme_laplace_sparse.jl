@@ -462,12 +462,17 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
                     draws!(reshape([Symbol(z, ".", k) for k in 1:(n - 1)], 1, :)), (sigma,))
             end
         elseif r.kind === :cdar
-            # standardized innovations, groups × steps; scale and persistence
+            # States read one level per row. The public innovation frame is
+            # retained for walks with a between-group correlation factor.
             eta = Symbol(r.declaration, ".", r.locals.eta)
-            z = draws!([Symbol(eta, ".", g, ".", w) for g in 1:length(r.levels),
-                w in 1:length(r.steps)])
-            block!(r.declaration, r.group, z, (Symbol(r.declaration, ".", r.locals.sigma),
-                Symbol(r.declaration, ".", r.locals.rho)))
+            labels = [Symbol(eta, ".", g, ".", w) for g in 1:length(r.levels),
+                w in 1:length(r.steps)]
+            field = get(r, :field_coordinates, false)
+            z = draws!(labels)
+            field && (z = reshape(z, :, 1))
+            hyper = field ? (Symbol(r.declaration, ".", r.locals.sigma),) :
+                (Symbol(r.declaration, ".", r.locals.sigma), Symbol(r.declaration, ".", r.locals.rho))
+            block!(r.declaration, r.group, z, hyper; prior=field ? :cdar : :standard)
         else
             # an areal field's structured values under its ICAR prior and, for
             # BYM2, each area's iid part
@@ -641,7 +646,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         "brm_laplace_problem: integrate names no grouping"))
     public_backend = backend
     selected_records = _brm_spl_records(backend, integrate; declarations)
-    backend, walks = _rw2_field_backend(backend, _brm_spl_record_declaration.(selected_records))
+    backend, walks = _brm_laplace_field_backend(backend, _brm_spl_record_declaration.(selected_records))
     refusal = _brm_slap_response_refusal(backend; cells=true, values=true)
     refusal === nothing || _brm_nlme_error("brm_laplace_problem: integrate = " *
         "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
@@ -668,7 +673,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     t = _brm_slap_terms(backend, responses, families, ports, _rk_slap_values(kernels, u0),
         (1:nrows,))
     nψ = length(t.port)
-    p = BRMSparseLaplaceProblem(backend, _rw2_draw_frame(backend, walks), population, names[population], integrate,
+    p = BRMSparseLaplaceProblem(backend, _brm_laplace_draw_frame(backend, walks, integrated), population, names[population], integrate,
         integrated, blocks, kernels, nothing, nothing, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], fill(false, length(blocks)), Float64[],
@@ -683,6 +688,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     _brm_spl_gaussian_parameters!(p, u0)
     p.gmrf = _brm_spl_gmrf_prior(p, records, u0)
     _brm_spl_gmrf_parameters!(p, u0)
+    _brm_spl_cdar_parameters!(p, u0)
     _brm_spl_design!(p, u0)
     # A computed log scale or shape can be nonlinear in the outer parameters.
     if !sampled && isempty(promoted)
@@ -968,7 +974,7 @@ function _brm_spl_prior_quad(p::BRMSparseLaplaceProblem, z)
             q += b.λ[c] * sum(l -> z[b.z[l, 1]], levels)^2
         end
     end
-    q + _brm_spl_gmrf_quad(p, z)
+    q + _brm_spl_gmrf_quad(p, z) + _brm_spl_cdar_quad(p, z)
 end
 
 # The integrated draws' prior must match their conditional Gaussian blocks:
@@ -982,6 +988,7 @@ function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
         uA = _brm_slap_zero_integrated!(copy(u), p)
         _brm_spl_gaussian_parameters!(p, uA)
         _brm_spl_gmrf_parameters!(p, uA)
+        _brm_spl_cdar_parameters!(p, uA)
         u[p.integrated] .= z
         Δ = _rk_slap_prior(p.kernels, u) - _rk_slap_prior(p.kernels, uA)
         isapprox(Δ, -_brm_spl_prior_quad(p, z) / 2; rtol=1e-9, atol=1e-9) ||
@@ -991,6 +998,7 @@ function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
     end
     _brm_spl_gaussian_parameters!(p, u0)
     _brm_spl_gmrf_parameters!(p, u0)
+    _brm_spl_cdar_parameters!(p, u0)
     nothing
 end
 
@@ -1343,7 +1351,8 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
         for e in axes(b.edges, 2)]
     edge_weights = [b.weights[e] for b in p.blocks for e in axes(b.edges, 2)]
     # A native field's prior couples its draws through Q's pattern.
-    couplings = p.gmrf === nothing ? edges : vcat(edges, _brm_gmrf_pattern_pairs(p.gmrf))
+    couplings = vcat(edges, _brm_spl_cdar_pairs(p))
+    p.gmrf === nothing || append!(couplings, _brm_gmrf_pattern_pairs(p.gmrf))
     built = _brm_spl_pattern(footprints, n, couplings)
     pattern = built.pattern
     p.pattern_stats = built.stats
@@ -1368,6 +1377,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     p.wcols = [[b.z[l, 1] for l in levels] for b in p.blocks for levels in b.sums]
     p.wλ = [λ for b in p.blocks for λ in b.λ]
     p.pattern = pattern
+    _brm_spl_cdar_positions!(p)
     _brm_spl_pairs!(p)
     # Components by union-find over the terms' effects.
     parent = collect(1:n)
@@ -1599,6 +1609,9 @@ function _brm_spl_step_blocks!(p::BRMSparseLaplaceProblem)
         i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
         push!(neighbours[i], j); push!(neighbours[j], i)
     end
+    for (i, j) in _brm_spl_cdar_pairs(p)
+        push!(neighbours[i], j); push!(neighbours[j], i)
+    end
     queue = [i for i in 1:n if effect_key[i] !== nothing]
     next = 1
     while next <= length(queue)
@@ -1697,6 +1710,7 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
         end
     end
     _brm_spl_gmrf_prior!(fc, g, p, z, fb, correction)
+    _brm_spl_cdar_prior!(fc, g, p, z, fb, correction)
     if hnz !== nothing
         nz = nonzeros(hnz)
         fill!(nz, 0.0)
@@ -1704,6 +1718,7 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
             nz[k] += v
         end
         _brm_spl_gmrf_precision!(nz, p)
+        _brm_spl_cdar_precision!(nz, p)
         if p.gaussian !== nothing
             for b in p.gaussian.blocks, i in b.z
                 nz[p.diagonal[i]] += p.gaussian.precision[i] - 1
@@ -2011,6 +2026,7 @@ function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector;
     _brm_slap_zero_integrated!(uA, p)
     _brm_spl_gaussian_parameters!(p, uA)
     _brm_spl_gmrf_parameters!(p, uA)
+    _brm_spl_cdar_parameters!(p, uA)
     C, dC, A, values = _brm_spl_cmaps(p, uA; tangents)
     (; uA, values, A, C, dC)
 end
@@ -2600,8 +2616,9 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     bad === nothing && !all(isfinite, gradient) &&
         (bad = "the declared Gaussian vectors' prior terms")
     _brm_spl_gmrf_gradient!(gradient, p, state, S, v, active)
+    _brm_spl_cdar_gradient!(gradient, p, state, S, v, active)
     bad === nothing && !all(isfinite, gradient) &&
-        (bad = "the gmrf fields' prior terms")
+        (bad = "the structured fields' prior terms")
     if !prior
         gradient .+= gcell
         _brm_spl_nonfinite_gradient!(p, state, value, gradient, bad)
