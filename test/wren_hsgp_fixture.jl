@@ -6,25 +6,36 @@ using BayesianRegressionModels, Distributions, Random
 # cell-years and observed cell-months; the gathers connect those axes.
 # All basis sizes are fixed, including in the small simulated fixture below.
 const model = @brm begin
-    place ~ 0 + hsgp(east, north; k=(24, 36),
-        domain=((-5.1, 5.1), (-7.7, 7.7))) + (1 | cell)
-    season_cos ~ 0 + hsgp(east, north; k=(10, 15),
-        domain=((-5.1, 5.1), (-7.7, 7.7)))
-    season_sin ~ 0 + hsgp(east, north; k=(10, 15),
-        domain=((-5.1, 5.1), (-7.7, 7.7)))
-    place_year ~ 0 + hsgp(cy_east, cy_north, cy_decade; iso=false,
-        k=(10, 15, 6), domain=((-5.1, 5.1), (-7.7, 7.7), (-0.7, 0.7)))
-    when ~ 1 + hsgp(month; k=4, cov=:periodic, period=12.0) + hsgp(decade; k=8)
-    eta = when + place[cell_pos] + season_cos[cell_pos] .* cos_m +
-        season_sin[cell_pos] .* sin_m + place_year[cy_pos]
+    "Where wrens are reported: a smooth field over the UK plus each cell's own deviation (logit scale)."
+    place ~ 0 + hsgp(east, north; k = (20, 36), domain = ((-4.0, 4.0), (-7.4, 7.4)),
+                     orthogonal_to = :intercept) + (1 | cell)
+    "How the seasonal cycle's first harmonic (cosine part) varies across the UK."
+    season_cos ~ 0 + hsgp(east, north; k = (8, 15), domain = ((-4.0, 4.0), (-7.4, 7.4)),
+                          orthogonal_to = :intercept)
+    "How the seasonal cycle's first harmonic (sine part) varies across the UK."
+    season_sin ~ 0 + hsgp(east, north; k = (8, 15), domain = ((-4.0, 4.0), (-7.4, 7.4)),
+                          orthogonal_to = :intercept)
+    "Regional year-to-year change: a smooth field over space and years."
+    place_year ~ 0 + hsgp(cy_east, cy_north, cy_decade; iso = false, k = (8, 15, 6),
+                          domain = ((-4.0, 4.0), (-7.4, 7.4), (-0.7, 0.7)),
+                          orthogonal_to = :intercept)
+    "When wrens are reported nationally: the seasonal cycle and the trend over the years."
+    when ~ 1 + hsgp(month; k = 4, cov = :periodic, period = 12.0) + hsgp(decade; k = 8)
+    # each cell-month reads its cell's and its cell-year's values by position
+    place_i = place[cell_pos]
+    cos_i = season_cos[cell_pos]
+    sin_i = season_sin[cell_pos]
+    year_i = place_year[cy_pos]
+    eta = when + place_i + cos_i .* cos_m + sin_i .* sin_m + year_i
     p = logistic(eta)
+    "Precision of the beta-binomial: how far checklists in one cell and month scatter beyond the model."
     phi ~ LogNormal(3.0, 1.5)
     wren ~ BetaBinomial2(checklists, p, phi)
 end
 
 # Independent squared-exponential HSGP simulation: tensor Dirichlet
 # eigenfunctions times the square root of the kernel's spectral density.
-function field(rng, axes, modes, widths, rhos; sigma=0.3)
+function field(rng, axes, modes, widths, rhos; sigma=0.3, demean=false)
     result = zeros(length(first(axes)))
     for mode in CartesianIndices(modes)
         omega = [mode[j] * pi / (2widths[j]) for j in eachindex(axes)]
@@ -36,6 +47,7 @@ function field(rng, axes, modes, widths, rhos; sigma=0.3)
                 sqrt(widths[j]) for j in eachindex(axes))
         end
     end
+    demean && (result .-= sum(result) / length(result))
     result
 end
 
@@ -52,11 +64,11 @@ function data(; seed=20261127)
     month = repeat([1.0, 4.0, 7.0, 10.0], 8)
     decade = cy_decade[cy_pos]
     cos_m, sin_m = cos.(2pi .* month ./ 12), sin.(2pi .* month ./ 12)
-    spatial = field(rng, (east, north), (24, 36), (5.1, 7.7), (1.0, 1.0))
-    cosine = field(rng, (east, north), (10, 15), (5.1, 7.7), (2.0, 2.0))
-    sine = field(rng, (east, north), (10, 15), (5.1, 7.7), (2.0, 2.0))
-    annual = field(rng, (cy_east, cy_north, cy_decade), (10, 15, 6),
-        (5.1, 7.7, 0.7), (2.0, 2.0, 0.4))
+    spatial = field(rng, (east, north), (20, 36), (4.0, 7.4), (1.0, 1.0); demean=true)
+    cosine = field(rng, (east, north), (8, 15), (4.0, 7.4), (2.0, 2.0); demean=true)
+    sine = field(rng, (east, north), (8, 15), (4.0, 7.4), (2.0, 2.0); demean=true)
+    annual = field(rng, (cy_east, cy_north, cy_decade), (8, 15, 6),
+        (4.0, 7.4, 0.7), (2.0, 2.0, 0.4); demean=true)
     trend = field(rng, (decade,), (8,), (0.375,), (0.2,))
     # Any fixed harmonic coefficients are an admissible point in the periodic
     # term's full-support Gaussian prior; retain all four harmonics here.

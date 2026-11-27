@@ -2,8 +2,9 @@
 
 `wren_hsgp.jl` builds the full Wren reporting-rate declaration through RKBRMI
 on independently simulated beta-binomial counts. Its six HSGPs retain all
-2,080 basis weights across cell, cell-year and observation row axes, with a
-cell random intercept. The test checks that adaptive centring covers every
+1,696 basis weights across cell, cell-year and observation row axes, with a
+cell random intercept and spatial fields orthogonal to the intercept.
+The test checks that adaptive centring covers every
 weight and cell effect, preserves the density with its Jacobian at zero,
 one and mixed source controls, and gives the correct directional gradient.
 The oracle reads the compiled spectral vectors and includes the documented

@@ -20,11 +20,11 @@ BLAS.set_num_threads(1)
     inventory = adaptive_centering_cells(rk)
     blocks = filter(b -> b.family === :hsgp, inventory.blocks)
     @test length(blocks) == 6
-    @test sort([b.n_basis for b in blocks]) == [8, 8, 150, 150, 864, 900]
+    @test sort([b.n_basis for b in blocks]) == [8, 8, 120, 120, 720, 720]
     @test count(b -> b.spectrum === :periodic, blocks) == 1
-    @test length(inventory.cells) == 2084
+    @test length(inventory.cells) == 1700
     @test count(c -> c.family === :ranef, inventory.cells) == 4
-    @test count(c -> c.family === :hsgp, inventory.cells) == 2080
+    @test count(c -> c.family === :hsgp, inventory.cells) == 1696
     @test all(c -> c.family !== :hsgp || iszero(c.target), inventory.cells)
     @test allunique(c.effect for c in inventory.cells)
 
@@ -96,6 +96,31 @@ BLAS.set_num_threads(1)
         h = 1e-5
         fd = (oracle(source + h * direction) - oracle(source - h * direction)) / (2h)
         @test dot(ga, direction) ≈ fd rtol=2e-5 atol=2e-5
+    end
+    # Stress the authored kernel with long length scales. Read actual native
+    # spectra to identify Float64 underflow, then check the public scoring
+    # plan gives no centring incentive for those weights, even at continuous
+    # controls. This is distinct from merely checking the map's finite floor.
+    stress = copy(q)
+    for b in BRM._rk_adaptive_hsgp_blocks(rk), i in b.length_scales
+        i == 0 || (stress[i] += 3.0)
+    end
+    vs, gs = LogDensityProblems.logdensity_and_gradient(problem, stress)
+    @test isfinite(vs) && all(isfinite, gs)
+    actual = spectrum(stress)
+    underflow = Set(positions[string(r.declaration, ".beta_raw.", b)]
+        for (r, port) in zip(records, ports) for (b, s) in enumerate(actual[port])
+        if iszero(s))
+    @test !isempty(underflow)
+    ir = WarmupHMC.reparametrizer(zero_frame)
+    plan = WarmupHMC.candidate_scoring_plan(zero_frame)
+    frame = plan.prepare(ir, stress, gs)
+    @test all(iszero(last(p).source.c) for p in ir.pairs if first(p) in underflow)
+    @test all(enumerate(ir.pairs)) do (j, (index, rule))
+        index in underflow || return true
+        scores = [plan.score(frame, j, index, rule, WarmupHMC.PartiallyCentered(c))
+                  for c in (0.0, 0.37, 1.0)]
+        all(isfinite, Iterators.flatten(scores)) && allequal(scores)
     end
     @test isequal(data, before)
 end
