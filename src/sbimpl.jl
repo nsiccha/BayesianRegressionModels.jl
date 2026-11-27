@@ -6908,6 +6908,10 @@ end
 # Mark the response data sources `selected` held out (cv), on top of the ones
 # `sb` already holds out.
 Base.@nospecializeinfer function _sb_mark_held_out(@nospecialize(sb::SBBRMI), selected)
+    for binding in values(sb.bindings)
+        get(binding, :condition_response, nothing) in selected && _condition_error(
+            binding.logical, binding.condition_response, "the conditioning response must stay observed")
+    end
     marked = Dict{Symbol,Any}(sb.data)
     for source in setdiff(selected, sb.held_out)
         marked[source] = StanBlocks.stan.maybecv(source, marked[source])
@@ -7222,6 +7226,8 @@ function _sb_cv_sized_group_block(body::Expr, block, idx)
         body.args)
 end
 
+include("condition_groups.jl")
+
 function _sb_mark_resample_groups(sb::SBBRMI, groups)
     marked = Dict{Symbol,Any}(sb.data)
     seen = Set{Symbol}()
@@ -7240,7 +7246,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
     SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out), sb.bindings, sb.source)
 end
 
-function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out)
+function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out, conditions)
     # Redrawing some columns of a joined `|ID|` block conditions on the fitted
     # block the other columns keep reading; a fresh template refits that block
     # on the replay rows, whose coordinates are not the fit's.
@@ -7309,7 +7315,8 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_o
     hybrid = SBBRMI(cv_template.parent, cv_template.model, cv_template.data, preproc,
                     Set{Symbol}(), cv_template.bindings)
     prepared = reprocess(hybrid, new_df; freeze_constants=freeze, held_out)
-    _sb_mark_resample_groups(prepared, groups)
+    conditioned = isempty(conditions) ? prepared : _sb_condition_groups(prepared, conditions, groups)
+    _sb_mark_resample_groups(conditioned, groups)
 end
 
 # The replay rows each masked-only HSGP axis carries (decision 1fk9b29); its
@@ -8163,7 +8170,7 @@ end
 
 """
     reprocess(sb::SBBRMI, new_df; freeze_constants=true,
-              resample_groups=(), resample_covariates=(),
+              resample_groups=(), condition_groups=(;), resample_covariates=(),
               held_out=<the fit's hold-outs>) -> SBBRMI
 
 Re-materialise the SBBRMI's Stan data dict against `new_df`, **re-running** the
@@ -8185,6 +8192,12 @@ concurrent calls and keep mutable scratch private to the call.
   eigenbasis/(mean, L)). This is the operation the downstream PKPD app hand-rolls outside BRM.
 - `freeze_constants=false` (fresh-fit semantics): re-derive each constant from
   `new_df`, then apply.
+- `condition_groups=(slot=:reading,)` draws a fresh Gaussian intercept for each
+  `slot` in the replay, conditional on the observed Normal response `reading`.
+  The response's identity predictor must include the intercept with coefficient
+  one. All readings of a level inform its one shared draw. Location and
+  measurement SD are evaluated at each transported draw. Other groups may be
+  selected separately with `resample_groups`.
 - `resample_groups=()` (default): retain the fitted random-effect coordinates.
   Naming one or more ordinary grouping factors (for example `[:subject]`)
   re-emits the model with cv-contagious sizing for them (the fitted model; with
@@ -8258,9 +8271,14 @@ level in its fitted stratum (a row placing a level in another stratum is
 refused); drawing new levels of one (`resample_groups`) is not supported.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
-                   resample_groups=(),resample_covariates=(),
+                   resample_groups=(), condition_groups=(;), resample_covariates=(),
                    held_out=sb.held_out)
     groups = _sb_resample_group_set(resample_groups)
+    condition_groups isa NamedTuple && all(r -> r isa Symbol, condition_groups) ||
+        throw(ArgumentError("condition_groups expects a named tuple such as (slot=:reading,)"))
+    isempty(intersect(groups, keys(condition_groups))) || throw(ArgumentError(
+        "choose either condition_groups or resample_groups for each grouping column"))
+    union!(groups, keys(condition_groups))
     group_sources = isempty(groups) ? nothing : Dict{Symbol,Symbol}()
     new_df = _brm_collection_replay_data(brm_source(sb), new_df; group_sources)
     if !isnothing(group_sources) && !isempty(group_sources)
@@ -8290,10 +8308,12 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
             "not supported yet (todo `1fnt1zu`); a forecast with `resample_groups` keeps ",
             "the fitted design (`freeze_constants=true`). Otherwise include the response.")
     end
+    isempty(covariates) || isempty(condition_groups) || throw(ArgumentError(
+        "combining condition_groups with resample_covariates is not supported"))
     isempty(covariates) || return _sb_reprocess_covariates(
         sb,new_df,covariates,groups,freeze_constants,held_out)
     isempty(groups) || return _sb_reprocess_resample(
-        sb, new_df, groups, freeze_constants, held_out)
+        sb, new_df, groups, freeze_constants, held_out, condition_groups)
     # Current kernel(...) emitters record each gathered/index ragged input, but
     # an SBBRMI serialized by the short-lived fail-closed implementation may
     # still lack that provenance. Diagnose such a legacy artifact up front;
@@ -8464,10 +8484,19 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # numeric inputs. StanBlocks types every data key, including unused ones.
     _sb_prune_prepared_inputs!(new_data, new_preproc, sb.model.model.args)
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
-    _sb_apply_held_out(
-        SBBRMI(sb.parent, new_model, new_data, new_preproc, forecast, sb.bindings,
-               sb.source),
-        held_out; cover_all=true, prefix="sbimpl: reprocess")
+    replay = SBBRMI(sb.parent, new_model, new_data, new_preproc, forecast, sb.bindings,
+                    sb.source)
+    # Rebinding rows of a conditional replay preserves its generated intercepts
+    # and the population redraws with which they were originally emitted.
+    redraw_groups = nothing
+    for binding in values(sb.bindings)
+        haskey(binding, :condition_response) || continue
+        redraw_groups = binding.redraw_groups
+        binding.condition_response in forecast && _condition_error(binding.logical,
+            binding.condition_response, "the replay must supply its historical measurement")
+    end
+    replay = _sb_apply_held_out(replay, held_out; cover_all=true, prefix="sbimpl: reprocess")
+    isnothing(redraw_groups) ? replay : _sb_mark_resample_groups(replay, Set(redraw_groups))
 end
 
 # The data columns a response data source is read from, or `nothing` for one
@@ -8498,37 +8527,36 @@ function _sb_absent_responses(sb::SBBRMI, df)
 end
 
 function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
-                   resample_groups=(),resample_covariates=(),
+                   resample_groups=(), condition_groups=(;), resample_covariates=(),
                    held_out=plan.held_out)
     sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc,
                 copy(plan.held_out), plan.bindings)
     groups = _sb_resample_group_set(resample_groups)
     replayed = reprocess(sb, new_df; freeze_constants,
-                         resample_groups=groups,resample_covariates,held_out)
+                         resample_groups=groups, condition_groups, resample_covariates, held_out)
+    union!(groups, keys(condition_groups))
     _generative_plan(replayed, plan.builder,
                      isempty(groups) ? plan.cv_groups : groups)
 end
 
 """
     restan_data(sb::SBBRMI, new_df; freeze_constants=true,
-                resample_groups=(), resample_covariates=(),
+                resample_groups=(), condition_groups=(;), resample_covariates=(),
                 held_out=<the fit's hold-outs>) -> Dict
 
 Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
 `new_df`, ready for a `param_constrain!` replay. Equivalent to
-`stan_data(reprocess(sb, new_df; freeze_constants, resample_groups, held_out))`.
-Same `freeze_constants` semantics (default `true` = training constants applied
-to new data), and accepts the same `resample_groups` and `held_out` keywords.
-A non-empty `resample_groups` also changes the Stan program; call `reprocess`
+`stan_data(reprocess(sb, new_df; kwargs...))` with the same replay keywords.
+Selecting `resample_groups` or `condition_groups` changes the Stan program. Call `reprocess`
 when you need the corresponding `SBBRMI`/source as well as this data-only
 convenience result.
 See [`reprocess`](@ref) for the covered-terms list and error cases.
 """
 restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
-            resample_groups=(),resample_covariates=(),
+            resample_groups=(), condition_groups=(;), resample_covariates=(),
             held_out=sb.held_out) =
-    stan_data(reprocess(sb, new_df; freeze_constants, resample_groups,resample_covariates,
-                        held_out))
+    stan_data(reprocess(sb, new_df; freeze_constants, resample_groups, condition_groups,
+                        resample_covariates, held_out))
 
 # ---- top-level op dispatch ---------------------------------------------------
 

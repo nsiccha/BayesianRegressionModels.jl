@@ -228,7 +228,10 @@ function _adaptive_numeric_columns(brmi, context, predictor, n, coordinate)
     op = linear_predictor_op(brmi, predictor)
     isnothing(op) && return out
     _, rhs = getargs(op, 2)
-    terms = Tuple(t for t in _brm_additive_terms(rhs) if !_brm_prepares_term(t))
+    # Offsets have no population coefficient to project. Their values can
+    # depend on another predictor and therefore need not be data columns.
+    terms = Tuple(t for t in _brm_additive_terms(rhs) if
+                  !_brm_prepares_term(t) && !(t isa ExprColumn{typeof(offset)}))
     design = _brm_population_design(predictor, terms, context.data,
                                     get(context.target_obs, predictor, nothing))
     isnothing(design) && return out

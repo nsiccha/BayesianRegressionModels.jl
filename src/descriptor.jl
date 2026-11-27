@@ -199,10 +199,11 @@ BRM adds:
   | `:scale` | the per-margin between-group SDs `tau` (per stratum for a stratified `gr(g, by=b)` block), sampled or derived (R2D2) |
   | `:log_scale` | the sampled log SD of a scalar `(1 \\| g)` block, whose SD is `exp(log_scale)` |
   | `:correlation_cholesky` | the Cholesky factor `L` of the correlation matrix (`L L'`), per stratum for a stratified block |
-  | `:standardized` | the standard-normal draw the effects are scaled from (`effects = diag(tau) L z`), in any of its shapes |
+  | `:standardized` | the standardized draw the effects are scaled from (`effects = diag(tau) L z`), including an intercept drawn conditionally in replay |
   | `:effects` | the per-level effects on the link scale — under `centered_groups` the sampled coordinate itself |
   | `:contribution` | the per-row values the block adds to its linear predictor |
   | `:mixing_weight` | a Student-t block's per-level mixing weight |
+  | `:conditional_moments` | per-level conditional mean and SD of a standardized Gaussian intercept in a measurement-conditioned replay |
   | `:level_scale`, `:level_correlation_cholesky` | a stratified block's stratum `tau` and `L`, gathered per level |
   | `:auxiliary` | an intermediate of the block's construction that is none of the above: a value StanBlocks hoists out of the block's plate (a centred block's covariance factor `diag(tau) L`), the permuted factor and onion draws of an omitted response's completion |
 
@@ -1782,7 +1783,11 @@ function _brm_ranef_components(outputs, plan, stan)
         spec = get(_RANEF_FAMILIES, family, nothing)
         isnothing(spec) && continue
         mine = get!(carriers, d.target, Symbol[])
-        for (name, component) in _ranef_component_carriers(d.target, spec, d.keywords)
+        parts = _ranef_component_carriers(d.target, spec, d.keywords)
+        if haskey(get(plan.bindings, d.target, (;)), :condition_response)
+            push!(parts, Symbol(d.target, :_conditional_moments) => :conditional_moments)
+        end
+        for (name, component) in parts
             name === d.target || push!(mine, name)
             name in output_names ? claim!(name, component) :
                                    push!(traced, (d.target, name, component))
@@ -2183,9 +2188,9 @@ function _brm_derive_operations(plan, stan, outputs, columns)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
             (d, new_df; freeze_constants::Bool=true, highlights=d.highlight_specs,
-             resample_groups=(), held_out=d.plan.held_out, kwargs...) ->
+             resample_groups=(), condition_groups=(;), held_out=d.plan.held_out, kwargs...) ->
                 brm_descriptor(
-                    reprocess(d.plan, new_df; freeze_constants, resample_groups, held_out);
+                    reprocess(d.plan, new_df; freeze_constants, resample_groups, condition_groups, held_out);
                     highlights, kwargs...)))
     end
     ops

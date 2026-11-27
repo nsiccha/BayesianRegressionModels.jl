@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.414
+
+- Stan replay accepts `condition_groups=(site=:reading,)` to draw a fresh
+  Gaussian group intercept conditional on a measured Normal response. Readings
+  of the same level inform a shared draw. The response can use fitted
+  predictors and row-specific sampling errors. Adaptive centring also accepts
+  a latent predictor used as an offset when projecting population coefficients.
+  The ReactiveKernelsPPL backend requires 0.1.268 for per-chain copies of
+  bound plans in WarmupHMC.
+
 ## 0.2.413
 
 - On RKBRMI, a record component can use a caller's scalar data or fitted

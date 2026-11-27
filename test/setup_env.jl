@@ -477,7 +477,8 @@ const PINS = [
     # RKPPL 0.1.259 preserves nested reading axes when a sibling response uses a fitted predictor.
     # RK 0.1.387 / RKPPL 0.1.262 retain fitted constructors for finite bounds and nested child kernels.
     # RKPPL 0.1.265 provides the joint parameter generator used by rk_prior_draws.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "834fd733f89afdf0bcd853584d35cb9ce392d125"),
+    # RKPPL 0.1.268 copies a bound plan for each WarmupHMC chain.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ed3d762ae53768c26ca20cc9bd5ce333d54b7174"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
