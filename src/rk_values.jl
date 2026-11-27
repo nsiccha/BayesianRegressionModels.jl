@@ -1276,7 +1276,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
             # One array per subject, observed per subject (RKPPL nested plates).
             _rk_validate_nested_bounds(o, o.response, context.data)
             value_columns[o.name] = o.response
-            return _RKNestedObservation(o, cells)
+            return _RKNestedObservation(o, cells, o.name)
         end
         modifier = _rk_kernel_response_modifier!(value_columns, taken, derived, o, layout)
         modifier === nothing ||
