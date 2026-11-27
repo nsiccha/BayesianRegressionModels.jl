@@ -1730,7 +1730,8 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
                 Expr(:ref, input.source, Expr(:ref, input.rows, index))) :
             Expr(:ref, input.source, index)
     end
-    body = Any[_rk_kernel_cell_reads(statement, reads) for statement in cell]
+    body = Any[_brm_plate_bind_index(_rk_kernel_cell_reads(statement, reads), index)
+        for statement in cell]
     for (k, (cells, _)) in enumerate(written)
         body[end - length(written) + k].args[1] = Expr(:ref, cells, index)
     end

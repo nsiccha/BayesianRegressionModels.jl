@@ -9429,6 +9429,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     outputs = Set(dcol_names[j] for j in kept if _sb_plate_output(dcols[j + 1], data))
     plate_inputs = Any[input in outputs ? Expr(:call, brm_plate_cells, input) : input
         for input in kept_names]
+    if _brm_plate_has_index(plate_body)
+        occupied = _rk_source_symbols!(Set{Symbol}(keys(data)), plate_body)
+        union!(occupied, kept_params)
+        index = _rk_ast_fresh_name("brm_cell_index", occupied)
+        count = nsub_sym === nothing ? Expr(:call, :length, first(plate_inputs)) : nsub_sym
+        push!(plate_inputs, Expr(:call, :linspaced_int_array, count, 1, count))
+        push!(kept_params, index)
+        plate_body = _brm_plate_bind_index(plate_body, index)
+    end
     plate_call = nsub_sym === nothing ? Expr(:call, :plate, plate_inputs...) :
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
