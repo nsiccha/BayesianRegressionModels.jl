@@ -1,5 +1,16 @@
 # Running the tests
 
+`wren_hsgp.jl` builds the full Wren reporting-rate declaration through RKBRMI
+on independently simulated beta-binomial counts. Its six HSGPs retain all
+2,080 basis weights across cell, cell-year and observation row axes, with a
+cell random intercept. The test checks that adaptive centring covers every
+weight and cell effect, preserves the density with its Jacobian at zero,
+one and mixed source controls, and gives the correct directional gradient.
+The oracle reads the compiled spectral vectors and includes the documented
+smooth scale floor used only by the coordinate map. Native differentiation
+uses Enzyme Reverse. No observed bird data or sampling run is required.
+Run `julia --startup-file=no --project=test test/wren_hsgp.jl`.
+
 `string_ranef.jl` checks plain String random slopes in the Stan backend:
 cell means and treatment contrasts, merged and uncorrelated blocks, shared
 coefficient addresses, and frozen replay. It compares generated programs and
