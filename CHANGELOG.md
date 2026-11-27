@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.418
+
+- The Stan backend accepts plain String categorical random slopes, including
+  `(0 + c | g)` with one effect per level and `(1 + c | g)` with treatment
+  contrasts. Shared group-effect blocks, coefficient names and frozen replay
+  use the same fitted level coding as explicitly declared categorical columns.
+
 ## 0.2.417
 
 - The sparse Laplace solver recognizes a row-aligned identity-link predictor

@@ -12647,6 +12647,13 @@ _sb_cat_levels_vec(v::CA.CategoricalVector) = v
 _sb_cat_levels_vec(v::_SBReleveledFactor{<:AbstractString}) = v
 _sb_cat_levels_vec(_v) = nothing
 
+# Random slopes follow the shared formula classifier, including plain strings.
+# Keep this separate from `_sb_cat_levels`: population string terms use the
+# shared design matrix, not the dedicated integer/categorical `cat_*` blocks.
+_sb_ranef_levels(t::NamedColumn) =
+    isnothing(_brm_categorical_term_block(t)) ? nothing : parent(parent(t))
+_sb_ranef_levels(_t) = nothing
+
 # A bare integer-typed column in a population formula is treatment-coded
 # into its own `cat_<lp>_<col>` block and is ABSENT from `beta_pop` -- the
 # Integer-means-categorical rule -- which reads as "dropped" to a consumer
@@ -12946,7 +12953,7 @@ end
 # `num_elements` would give it rows*cols and it is deliberately NOT threaded.
 function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing,
                          term_overrides=Dict{Symbol,Any}(), target=nothing)
-    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms;
+    _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_ranef_levels(t), gterms;
                              group_idx, term_overrides, target)
 end
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
@@ -13005,7 +13012,7 @@ end
 
 function _sb_ranef_cols!(cols, data, _stmts, t::_SBCellMeansTerm, _gterms=();
                          kwargs...)
-    _sb_ranef_factor_dummies!(cols, data, t.term, _sb_cat_levels(t.term), 1)
+    _sb_ranef_factor_dummies!(cols, data, t.term, _sb_ranef_levels(t.term), 1)
 end
 
 # Columns `<c>_dummy_<lvl>` for `lvl in first_level:K`: `first_level = 2` is
@@ -14824,9 +14831,9 @@ _sb_group_desc_matches(_, _) = false
 # scalar NamedColumn -> 1; categorical NamedColumn -> (n_levels-1); ExprColumn
 # submodel terms (mo/s/ar/me) -> 1.
 _sb_ranef_term_ncols(t::Int, _) = t == 0 ? 0 : 1
-_sb_ranef_term_ncols(t::NamedColumn, _data) = _sb_ranef_named_ncols(_sb_cat_levels(t))
+_sb_ranef_term_ncols(t::NamedColumn, _data) = _sb_ranef_named_ncols(_sb_ranef_levels(t))
 _sb_ranef_term_ncols(t::_SBCellMeansTerm, _data) =
-    _sb_level_index(_sb_cat_levels(t.term))[1]
+    _sb_level_index(_sb_ranef_levels(t.term))[1]
 _sb_ranef_named_ncols(::Nothing) = 1
 _sb_ranef_named_ncols(levels) = _sb_level_index(levels)[1] - 1
 # `a & b` expands to one column per operand-contrast product (the population
