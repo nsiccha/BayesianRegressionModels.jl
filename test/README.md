@@ -1,5 +1,12 @@
 # Running the tests
 
+`string_ranef.jl` checks plain String random slopes in the Stan backend:
+cell means and treatment contrasts, merged and uncorrelated blocks, shared
+coefficient addresses, and frozen replay. It compares generated programs and
+data with declared categorical columns and numeric indicators, and evaluates
+BridgeStan densities and gradients for a Normal model and the reported grouped
+AR1 model. Run `julia --startup-file=no --project=test test/string_ranef.jl`.
+
 `rk_descriptor.jl` checks `brm_descriptor(rk::RKBRMI)`. A whole-series law
 registered only through `_rk_observation_source!` (no `@lpxf` twin) makes the
 Stan descriptor fail at transpile, while the RK descriptor of the same model

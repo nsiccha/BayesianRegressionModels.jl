@@ -393,10 +393,16 @@ ranef_df() = (; c=repeat([1, 2, 3], 4), g=repeat([1, 2, 3, 4]; inner=3),
                 x=collect(range(-1.0, 1.0; length=12)),
                 y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5, -1.2, -1.0, -0.9, -0.6, -0.4, -0.1])
 
-# The right-hand side of the one `Z_<lp>_<suffix> = hcat(...)` statement.
-zcols(code, z) = only(
-    String(strip(last(split(strip(l), " = "; limit=2)), ';'))
-    for l in split(code, '\n') if occursin(" $z = hcat(", l))
+# Read the ordered design columns independently of StanBlocks lowering a
+# variadic `hcat` into nested binary `append_col` calls.
+function zcols(code, z)
+    rhs = only(String(strip(last(split(strip(l), " = "; limit=2)), ';'))
+        for l in split(code, '\n') if occursin(" $z = ", l))
+    columns(ex) = ex isa Expr && ex.head === :call &&
+        ex.args[1] in (:hcat, :append_col) ?
+        reduce(vcat, columns.(ex.args[2:end])) : [string(ex)]
+    "hcat(" * join(columns(Meta.parse(rhs)), ", ") * ")"
+end
 
 @testset "random effects: an intercept-free LHS codes its first factor per level" begin
     df = ranef_df()
