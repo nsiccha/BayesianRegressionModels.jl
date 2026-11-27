@@ -20,6 +20,9 @@ instead of failing at run time.
   preserves its fitted margins, including when they are interleaved with omitted
   margins. Reuse a batch with `rk_draw_values` on frozen designs, or take
   `(; backend, points) = rk_generated_replay(rk, batch)` for an RK graph query.
+  RKPPL's predictive queries can simulate a gathered response on each design,
+  including subjects with zero rows. For an opaque array-valued location,
+  `rk_generated_replay` accepts RKPPL's `response_cell_ranks` declaration.
 
 ## 0.2.415
 

@@ -474,5 +474,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.387 / RKPPL 0.1.262 retain fitted constructors for finite bounds and nested child kernels.
 # RKPPL 0.1.265 provides the joint parameter generator used by rk_prior_draws.
 # RKPPL 0.1.268 copies a bound plan for each WarmupHMC chain.
-# RKPPL 0.1.269 generates one submodel realization per record and exports its locals.
-rev = "394dc25dab9457917d46f88fc1a66e690d37ab1e"
+# RKPPL 0.1.271 binds the cell rank of an omitted ragged response.
+rev = "d982c0bdce391a3a794a20ef165d2a8a66ad122f"

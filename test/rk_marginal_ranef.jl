@@ -59,6 +59,15 @@ const CELL = (; subject=[1, 2, 3, 4], x=[-1.0, 0.5, 0.0, 1.5],
     ya=[[0.3, 0.9], [-0.2], [0.1, 1.2], [-0.8, 0.0]],
     yc=[[-0.4], [0.8, 0.3], [0.5], [-0.6, 0.1]])
 const CELL_OMIT_C = (; CELL.subject, CELL.x, CELL.ya)
+direct_series(data) = @brm data begin
+    level ~ 1 + (1 | subject)
+    slope ~ Normal(0.0, 1.0)
+    @plate for i in eachindex(level)
+        location = level[i] .+ slope .* times[i]
+        yc[i] ~ Normal(location, 0.4)
+        ya[i] ~ Normal(level[i], 0.5)
+    end
+end
 cell(data) = @brm data begin
     a_loc ~ 1 + x + (1 | p | subject)
     b_loc ~ 1 + (1 | p | subject)
@@ -517,6 +526,7 @@ end
     batch = rk_generated_draws(fit, U; seed=8)
     dense = (; RKM.LONG.subject, RKM.LONG.x, obs_subject=[1, 2, 2, 4, 4, 4],
         t=[0.1, 0.3, 0.8, 0.2, 0.5, 0.9])
+    @test_throws ArgumentError rk_generated_replay(fit, batch; response_cell_ranks=(yc=2,))
     for data in (RKM.LONG_OMIT_C, dense)
         target = rk_generated_replay(reprocess(fit, data), batch)
         control = reprocess(observed, data)
@@ -530,6 +540,28 @@ end
             @test length.(actual) == length.(locs[k])
             @test actual == reference(u, Xoshiro(17)).yc
             @test all(mean.(cell) ≈ loc for (cell, loc) in zip(predictive_laws(pred, u).yc, locs[k]))
+        end
+    end
+end
+
+@stestset "direct vector RK prediction after first-binding response omission" begin
+    data = (; RKM.CELL.subject, RKM.CELL.ya, times=[[0.1], Float64[], [0.2, 0.3], [0.4]])
+    fit = RKBRMI(RKM.direct_series(data))
+    observed = RKBRMI(RKM.direct_series(merge(data, (; yc=zero.(data.times)))))
+    U = randn(Xoshiro(18), fit.model.layout.total, 2)
+    batch = rk_generated_draws(fit, U; seed=21)
+    for times in (data.times, reverse(data.times))
+        design = merge(data, (; times))
+        target = rk_generated_replay(reprocess(fit, design), batch; response_cell_ranks=(yc=1,))
+        plan = rk_bound_plan(target.backend)
+        @test predictive_targets(target.backend.model, plan).yc.rank == 1
+        predict = prepare_predictive(target.backend.model, plan)
+        control = reprocess(observed, design)
+        reference = prepare_predictive(control.model, rk_bound_plan(control))
+        for u in eachcol(target.points)
+            actual = predict(u, Xoshiro(42)).yc
+            @test length.(actual) == length.(times)
+            @test actual == reference(u, Xoshiro(42)).yc
         end
     end
 end

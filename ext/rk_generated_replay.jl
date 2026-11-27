@@ -1,3 +1,15 @@
+function BRM._rk_ranked_replay(backend, ranks)
+    program = _rk_program(backend)
+    bound = _rk_bind_program(program, backend.plan; frozen=_rk_frozen(backend),
+        response_cell_ranks=ranks)
+    model = build_kernel(bound; cache=program.builds)
+    coordinate_names(model.layout) == BRM._rk_bound_coordinate_names(backend) ||
+        throw(DimensionMismatch("rk_generated_replay: the declared response cell ranks change the parameter coordinates"))
+    BRM.RKBRMI(parent(backend), backend.plan, model; program=backend.program,
+        bound=BRM._RKOnce(bound), source=BRM.brm_source(backend), fitted=backend.fitted,
+        draw_binding=backend.prepared.draw_binding, generated_design=backend.generated_design)
+end
+
 function _rk_ordinary_generator(readout)
     (; fit, target) = readout
     emitted = BRM._rk_retained_program(target)

@@ -334,16 +334,21 @@ function rk_draw_values(rk::RKBRMI, draws::_RKGeneratedBatch, names; submodel=no
 end
 
 """
-    rk_generated_replay(rk::RKBRMI, draws)
+    rk_generated_replay(rk::RKBRMI, draws; response_cell_ranks=(;))
 
 Return `(; backend, points)` for a batch from [`rk_generated_draws`](@ref).
 Each column of `points` is a packed unconstrained draw for `backend`, including
 the parameters of omitted responses. Use this pair with RK graph readers,
 [`rk_design_binder`](@ref), or a posterior-predictive query on
 [`rk_bound_plan`](@ref). A compatible frozen replay of the fit can reuse the
-same batch.
+same batch. BRM supplies the cell rank for gathered responses. When an opaque
+cell calculation hides the rank, pass `response_cell_ranks=(y=1,)` for a
+vector per plate index or `(y=2,)` for a matrix. The predictive law supplies
+each cell's dimensions on the current design. Prepare this backend once for
+the design and pass its columns to the query.
 """
-function rk_generated_replay(rk::RKBRMI, draws::_RKGeneratedBatch)
+function rk_generated_replay(rk::RKBRMI, draws::_RKGeneratedBatch;
+        response_cell_ranks::Union{NamedTuple,AbstractDict}=(;))
     rk.prepared.draw_binding === draws.binding || throw(ArgumentError(
         "rk_draw_values: use the generated batch on its fit or a compatible frozen design replay"))
     readout = _rk_generated_readout(rk)
@@ -355,9 +360,12 @@ function rk_generated_replay(rk::RKBRMI, draws::_RKGeneratedBatch)
         positions = Dict(name => i for (i, name) in pairs(draws.coordinates))
         draws.points[[positions[name] for name in readout.coordinates], :]
     end
-    (; readout.backend, points)
+    backend = isempty(response_cell_ranks) ? readout.backend :
+        _rk_ranked_replay(readout.backend, response_cell_ranks)
+    (; backend, points)
 end
 function _rk_generated_points end
+function _rk_ranked_replay end
 
 # Resolve authored fields through the actual property reads emitted by the
 # collection. An earlier declaration may already own a candidate graph name.
