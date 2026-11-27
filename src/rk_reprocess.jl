@@ -171,7 +171,8 @@ function _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariate
     # a callable differs under the same name.
     program = _rk_same_callables(retained, replayed) ? rk.program : _RKOnce()
     replay = _rk_seed_coordinate_records!(RKBRMI(parent(rk), plan, rk.model; program,
-        source=brm_source(rk), model_plan=rk.model_plan), records)
+        source=brm_source(rk), model_plan=rk.model_plan,
+        draw_binding=isempty(groups) && isempty(covariates) ? rk.prepared.draw_binding : Ref(nothing)), records)
     # Same coordinates, so the fit's draws mean the same thing on the replay.
     # Resampled groups size their effects by the new data's levels; a
     # forecast covariate's missing entries are the design's.
@@ -197,7 +198,7 @@ function _rk_prior_values(rk::RKBRMI)
     rk.plan isa _RKUnconditionedPlan || throw(ArgumentError(
         "RK prior replay requires an unconditioned fit. Keep the observation statements " *
         "and omit the response columns when constructing RKBRMI."))
-    _rk_once!(rk.prepared.prior_values) do
+    _rk_once!(rk.prepared.readout) do
         binding = rk.plan.replay
         if binding === nothing
             backend = _rk_prior_value_backend(rk)
@@ -244,6 +245,35 @@ function rk_prior_draws(rk::RKBRMI, n::Integer; seed::Integer)
     _RKPriorDraws(points, values.id)
 end
 function _rk_generate_prior end
+
+struct _RKGeneratedDraws{D}
+    physical::D
+    binding::Base.RefValue{Nothing}
+    coordinates::Vector{Symbol}
+end
+Base.length(draws::_RKGeneratedDraws) = length(draws.physical)
+
+"""
+    rk_generated_draws(rk::RKBRMI, U; seed)
+
+Draw the unobserved parameters of keyed components conditional on each posterior
+column of `U`. Each skipped sampling declaration must have a normalized
+generator. Its joint realization is drawn once per column.
+Pass the resulting batch to `rk_draw_values` on the fit or a compatible frozen
+`reprocess` design to reuse the same physical member parameters across fields
+and schedules. Supply the same integer seed to reproduce the batch.
+"""
+function rk_generated_draws(rk::RKBRMI, U::AbstractMatrix; seed::Integer)
+    isempty(_brm_collection_axes(brm_source(rk))) && throw(ArgumentError(
+        "rk_generated_draws requires a model with keyed components"))
+    rk.plan isa _RKUnconditionedPlan && throw(ArgumentError(
+        "rk_generated_draws requires a fitted observation. Use rk_prior_draws for a prior-only model."))
+    U = _brm_cut_draws(U, _rk_layout_coordinate_names(rk); prefix="rk_generated_draws")
+    readout = _rk_keyed_readout(rk)
+    physical = _rk_generate_members(rk, readout, U, Random.Xoshiro(seed))
+    _RKGeneratedDraws(physical, rk.prepared.draw_binding, readout.coordinates)
+end
+function _rk_generate_members end
 
 # The kernel of a backend's own binding (ReactiveKernels package extension).
 function _rk_rebuild_model end

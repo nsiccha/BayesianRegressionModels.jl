@@ -138,6 +138,51 @@ function _rk_prior_rng_source(emitted::_RKEmittedProgram)
     _RKEmittedProgram(defs, main, emitted.bindings)
 end
 
+# Slice the augmented program in reverse dependency order. Fitted declarations
+# are inputs to generation. Within a collection plate retain the original
+# sampling call and the cell locals on which its arguments depend.
+function _rk_generation_statements(statements, roots, fitted, block_reads)
+    needed = setdiff(Set{Symbol}(roots), fitted)
+    kept = Any[]
+    for statement in Iterators.reverse(statements)
+        outputs = _rk_source_outputs!(Set{Symbol}(), statement)
+        isdisjoint(outputs, needed) && continue
+        body = _rk_plate_body(statement)
+        if body !== nothing
+            plate = _brm_undoc(statement)
+            loop = last(plate.args)
+            cells = _rk_generation_statements(body, intersect(needed, outputs), Set{Symbol}(), block_reads)
+            statement = Expr(:macrocall, plate.args[1:2]...,
+                Expr(:for, first(loop.args), Expr(:block, cells...)))
+        end
+        push!(kept, statement)
+        setdiff!(needed, outputs)
+        reads = _rk_source_references(statement, block_reads)
+        union!(needed, setdiff!(reads, fitted))
+    end
+    reverse!(kept)
+end
+
+# Expose the physical sampled declarations under their native parameter paths.
+# The returned component value can omit a local needed on a different design.
+function _rk_generated_source(fit, full, paths)
+    fitted = Set{Symbol}()
+    foreach(s -> _rk_source_outputs!(fitted, s), fit.main.args)
+    generated = _rk_generation_statements(full.main.args, first.(paths), fitted,
+        _rk_block_free_reads(full.defs))
+    taken = _rk_source_symbols!(Set{Symbol}(), full.main)
+    aliases = map(paths) do path
+        length(path) == 1 && return only(path)
+        field = foldl((base, name) -> Expr(:., base, QuoteNode(name)), path)
+        alias = _rk_ast_fresh_name(join(path, "_"), taken)
+        push!(generated, Expr(:(=), alias, field))
+        alias
+    end
+    block = Expr(:macrocall, Symbol("@generate"), LineNumberNode(0), Expr(:block, generated...))
+    source = _rk_with_main(full, Expr(:block, fit.main.args..., block))
+    (; source, aliases)
+end
+
 _rk_plan_summary(plan::_RKHeldOutPlan) =
     _rk_plan_summary(plan.parent) * " (withheld: " *
     join(string.(sort!(collect(plan.held_out))), ", ") * ")"
@@ -362,6 +407,17 @@ function _rk_source_samples(statement)
     false
 end
 
+function _rk_source_references(statement, block_reads)
+    names = _rk_source_symbols!(Set{Symbol}(), statement)
+    pending = collect(names)
+    for name in pending, dependency in get(block_reads, name, ())
+        dependency in names && continue
+        push!(names, dependency)
+        push!(pending, dependency)
+    end
+    names
+end
+
 # Fitted density follows the original observation graph. Independent priors
 # never used by any response become generated draws on the Stan route. Resolve
 # this before withholding, so a parameter used by a held-out response stays.
@@ -386,18 +442,8 @@ function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothin
     isempty(conditioned) && return emitted
     statements = emitted.main.args
     outputs = [_rk_source_outputs!(Set{Symbol}(), statement) for statement in statements]
-    references = [_rk_source_symbols!(Set{Symbol}(), statement) for statement in statements]
     block_reads = _rk_block_free_reads(emitted.defs)
-    for names in references
-        pending = collect(names)
-        for name in pending
-            for dependency in get(block_reads, name, ())
-                dependency in names && continue
-                push!(names, dependency)
-                push!(pending, dependency)
-            end
-        end
-    end
+    references = [_rk_source_references(statement, block_reads) for statement in statements]
     kept = [_rk_source_observes(statement, conditioned) ||
         !isdisjoint(outputs[i], required) for (i, statement) in enumerate(statements)]
     needed = Set{Symbol}()

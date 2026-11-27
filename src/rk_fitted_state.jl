@@ -406,7 +406,8 @@ function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
         declaration=state.declaration)
     model_plan = previous !== nothing && model === previous.model ? previous.model_plan : plan
     backend = RKBRMI(_brm_resolve_optional_priors(template), plan, model;
-        program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups), model_plan)
+        program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups), model_plan,
+        draw_binding=previous !== nothing && isempty(groups) ? previous.prepared.draw_binding : Ref(nothing))
     if isempty(groups)
         names = _rk_layout_coordinate_names(backend)
         if coordinates === :growing
