@@ -2751,6 +2751,14 @@ Bernoulli response on a separate axis. It compares compiled predictive draws
 with valid placeholder labels and checks fitted parameter coordinates, finite
 densities and gradients, all ordinal links, one-level fits, and group redraws.
 
+`ar1_forecast.jl` checks fitted `AR1Normal` replay without the response, with
+shared or row-varying arguments and with or without time gaps. It verifies
+changed, unequal group lengths, fitted parameter coordinates, predictive twin
+equality, conditional likelihoods, stationary starts and independent standardized
+innovations at fixed fitted parameters. Fresh prior omission remains a separate
+control. Run `julia --startup-file=no --project=test test/ar1_forecast.jl`;
+it accepts `shared`, `varying` or `stepped` testset filters.
+
 `rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
 singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged

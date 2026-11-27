@@ -77,7 +77,7 @@ OptimizationBase = "5.10.1"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.66"
+StanBlocks = "0.2.68"
 StatsBase = "0.34"
 Treebars = "0.1.5"
 WarmupHMC = "0.3"
@@ -176,7 +176,7 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 
 # 0.2.53 retains cell-specific sorted indices for repeated grouped time smooths.
 # StanBlocks 0.2.63 reports both endpoint and subject boundaries for nested plate outputs.
-rev = "81211fa4376453a34b001e775710084a607b4cf1"
+rev = "ffece1b266940a5190c425c3ff51ef70b68918e1"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
