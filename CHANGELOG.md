@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.418
+
+- Sparse Laplace integration of independent `cdar` walks uses local AR(1)
+  states and a tridiagonal prior, removing the all-step innovation cliques
+  from row assembly and gradient contractions. The proper prior normalizer
+  and moving-precision derivatives preserve the exact marginal. Public outer
+  coordinates, joint draws and latent innovation summaries retain their
+  meanings, including when a plan releases a walk back to sampling.
+
 ## 0.2.417
 
 - The sparse Laplace solver recognizes a row-aligned identity-link predictor

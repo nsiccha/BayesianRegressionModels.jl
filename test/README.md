@@ -389,6 +389,12 @@ The synthetic drivers
 in `research/matrixfree_conditional/` measure operator/exact algebra and a full
 Poisson/ICAR target separately; neither represents a fitted consumer model.
 
+`cdar_laplace_coordinates.jl` checks independent AR(1) state integration against
+an exact Gaussian marginal and public innovation-coordinate densities. It covers
+nonlinear exact/operator gradients, fixed and derived persistence, single-step
+paths, sparse support growth, plan restriction, chain copies, and public latent
+means and variances against a dense conditional oracle.
+
 `runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
 expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
 printed-source round trips. It exercises constants feeding a parameter-dependent
