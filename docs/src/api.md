@@ -213,6 +213,8 @@ recover_population_draws
 recover_s2z_draws
 rk_draw_tree
 rk_draw_values
+rk_generated_draws
+rk_generated_replay
 rk_prior_draws
 rk_restore_draws
 term_draws
