@@ -2901,6 +2901,15 @@ coordinates. Caller ownership is preserved and complete printed-source replay
 is bit-identical. Optional testset filters select individual block cases.
 Graph structure checks use RK's public `recipe_inventory`, including retained
 child plates and scans.
+
+`rk_statistical_first_call.jl` checks, in a fresh process, that the first
+`rkppl_model(name)` call of a session returns every catalogue body: one call
+reads them all, including the first read, which builds their module. On
+Julia 1.12 and later a body read in the world that call started in is not
+visible yet, so the test fails there if the read does not use the latest
+world; a warning about a binding read before its definition world fails it
+too. Julia 1.10 passes either way. It needs only BRM, ReactiveKernels and
+ReactiveKernelsPPL.
 `rk_prepared_data_source.jl` checks emitted categorical/ordinal preparation and
 completed-covariate geometry, including declared level order, empty and
 all-missing partitions, retained numerical recipes, printed replay and cached

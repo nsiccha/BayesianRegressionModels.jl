@@ -538,8 +538,12 @@ function _rk_statistical_model_module()
     end
 end
 
+# The first call builds the module, so the bodies are defined in a world newer
+# than the one this call runs in. Julia 1.12 and later hide such a binding from
+# the older world (a plain read raises `UndefVarError`), so read it in the
+# latest world.
 BRM.rkppl_model(name::Symbol) = hasproperty(BRM._BRM_STATISTICAL_MODELS, name) ?
-    getproperty(_rk_statistical_model_module(), name) :
+    Base.invokelatest(getglobal, _rk_statistical_model_module(), name) :
     throw(ArgumentError("unknown BRM statistical model `$name`"))
 
 """

@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.423
+
+- `rkppl_model(name)` returns its body on the first call of a session on
+  Julia 1.12 and later. That call builds the module BRM's statistical bodies
+  are defined in and then read the body in the world the call started in,
+  where Julia 1.12 and later do not show a binding defined afterwards. It
+  raised ``UndefVarError: `<name>` not defined … The binding may be too new``,
+  and only a second call returned the body. The call now reads the body in
+  the latest world. Julia 1.10 was not affected.
+
 ## 0.2.422
 
 - `brm_description` describes `BetaBinomial2(trials, mean, precision)` in
