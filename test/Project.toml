@@ -77,7 +77,7 @@ OptimizationBase = "5.10.1"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.68"
+StanBlocks = "0.2.69"
 StatsBase = "0.34"
 Treebars = "0.1.5"
 WarmupHMC = "0.3"
@@ -176,7 +176,7 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 
 # 0.2.53 retains cell-specific sorted indices for repeated grouped time smooths.
 # StanBlocks 0.2.63 reports both endpoint and subject boundaries for nested plate outputs.
-rev = "ffece1b266940a5190c425c3ff51ef70b68918e1"
+rev = "3e62090cd56391bfb711fda59c54aa52d29ace7c"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -475,4 +475,4 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RKPPL 0.1.265 provides the joint parameter generator used by rk_prior_draws.
 # RKPPL 0.1.268 copies a bound plan for each WarmupHMC chain.
 # RKPPL 0.1.271 binds the cell rank of an omitted ragged response.
-rev = "d982c0bdce391a3a794a20ef165d2a8a66ad122f"
+rev = "a710126311c29fbdd0b07339e2fc6ca24dcd10db"
