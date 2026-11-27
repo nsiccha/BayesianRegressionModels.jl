@@ -256,6 +256,7 @@ include("model_view.jl")
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
 export BRMComponent, brm_components
+export brm_subject_value
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, constant, protect, factor
 export restricted
 export LKJCovarianceFactor, MvNormalCholesky

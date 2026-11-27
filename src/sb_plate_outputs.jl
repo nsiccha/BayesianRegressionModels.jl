@@ -12,6 +12,11 @@
 # methods are inlined, so a scalar output keeps its Stan source (snag
 # `sum-a-vector-pla-812e04d2`, decision `09e0gc5`).
 StanBlocks.@deffun begin
+    # A keyed member may return one scalar for every subject or a vector with
+    # one value per subject. Give both shapes the same parent-cell read.
+    @inline brm_subject_value(x::real, i::int)::real = x
+    @inline brm_subject_value(x::vector[n], i::int)::real = x[n == 1 ? 1 : i]
+
     # A downstream plate iterates producer cells, not the storage's first
     # dimension. Fixed-width vector cells occupy matrix columns; all other
     # carriers already iterate one value per cell. EachCol is a compiler view.
@@ -97,6 +102,13 @@ StanBlocks.@deffun begin
         end
         rv
     end
+end
+
+# One Julia method handles both member shapes, so RK's `Vector{Any}` collection
+# does not dispatch by the run-time member type in every parent cell.
+@inline function brm_subject_value(x, i::Integer)::Float64
+    x isa AbstractVector && return Float64(x[length(x) == 1 ? 1 : i])
+    return Float64(x)
 end
 
 _sb_julia_stan_call(::typeof(_brm_concat_members), args) = Expr(:call, brm_concat_members, args...)

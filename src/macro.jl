@@ -1367,6 +1367,14 @@ _brm_plate_param(x::Expr) = _brm_plate_grouping_args(x).positional[1]::Symbol # 
 
 _brm_plate_indexed(x, i) = Meta.isexpr(x, :ref, 2) && x.args[2] === i
 
+# An ordinal read inside the cell is supplied by the backend's plate index.
+# Keep it distinct from a model name and from names bound by an inner loop.
+_brm_plate_has_index(x) = false
+_brm_plate_has_index(x::Expr) = x.head === :brm_plate_index || any(_brm_plate_has_index, x.args)
+_brm_plate_bind_index(x, index) = x
+_brm_plate_bind_index(x::Expr, index) = x.head === :brm_plate_index ? index :
+    Expr(x.head, map(a -> _brm_plate_bind_index(a, index), x.args)...)
+
 # An observation samples data, so that omitting the data turns it into a prior
 # draw; a name the cell defines by `=` has nothing to draw. StanBlocks refuses
 # such a `~` inside every plate cell, but its message names BRM's lowered kernel
@@ -1567,11 +1575,35 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     # `groups(...)` plate's cells are its grouping's labels instead.
     header === nothing && add_input(grouped(_brm_plate_range_input(range)))
 
-    function rewrite(ex)
-        ex === i && error(
-            "@brm: a kernel `@plate` loop index is structural; use it only in " *
-            "`x[$i]` reads")
+    function rewrite(ex, bound=Set{Symbol}())
+        if ex === i && !(i in bound)
+            header === nothing || error(
+                "@brm: a grouped `@plate` index selects a group's rows; use it in `x[$i]` reads")
+            return Expr(:brm_plate_index)
+        end
         ex isa Expr || return ex
+        if ex.head === :generator
+            inner = copy(bound)
+            function specification(spec)
+                if Meta.isexpr(spec, :(=), 2)
+                    source = rewrite(spec.args[2], inner)
+                    _brm_bound_symbols!(inner, spec.args[1])
+                    return Expr(:(=), spec.args[1], source)
+                elseif Meta.isexpr(spec, :filter)
+                    bindings = map(specification, spec.args[2:end])
+                    return Expr(:filter, rewrite(first(spec.args), inner), bindings...)
+                else
+                    return rewrite(spec, inner)
+                end
+            end
+            specs = map(specification, ex.args[2:end])
+            return Expr(:generator, rewrite(first(ex.args), inner), specs...)
+        elseif ex.head === :->
+            inner = _brm_bound_symbols!(copy(bound), first(ex.args))
+            return Expr(:->, first(ex.args), rewrite(last(ex.args), inner))
+        elseif i in bound || (ex.head === :ref && first(ex.args) isa Symbol && first(ex.args) in bound)
+            return Expr(ex.head, map(a -> rewrite(a, bound), ex.args)...)
+        end
         read = _brm_plate_binding_read(ex, i, groupings)
         indexed = _brm_plate_indexin_read(ex, i, groupings)
         if header !== nothing && (read !== nothing || indexed !== nothing)
@@ -1638,7 +1670,7 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                 "@brm: kernel `@plate` inputs use one cell slice `x[$i]`; got " *
                 "`$(repr(ex))`")
         end
-        Expr(ex.head, map(rewrite, ex.args)...)
+        Expr(ex.head, map(a -> rewrite(a, bound), ex.args)...)
     end
 
     rewritten = Any[]
@@ -3135,15 +3167,34 @@ capturedata(df, names::Tuple) = (;
 # second argument is a tuple of value expressions, visited exactly like an
 # ordinary call's arguments; its callee is skipped like a call head. Callers
 # keep only names they can resolve — `_brm` real df columns (via `capturedata`)
-# that are not formula names, the RK kernel planner model names — so do-block
-# params and cell-locals fall away there and no exclusion set is needed here.
+# that are not formula names, the RK kernel planner model names. Inner lambda
+# formals and comprehension bindings are excluded in their own lexical scopes;
+# a same-named model or data value outside that scope remains a capture.
 _brm_is_broadcast_call(x) = Meta.isexpr(x, :., 2) && Meta.isexpr(x.args[2], :tuple)
-_brm_cell_value_refs!(acc, x) = acc
-_brm_cell_value_refs!(acc, x::Symbol) = (push!(acc, x); acc)
-function _brm_cell_value_refs!(acc, x::Expr)
-    values = if Meta.isexpr(x, :->)
-        (x.args[2],)
-    elseif Meta.isexpr(x, :block) && _brm_cell_has_no_result(x.args)
+_brm_cell_value_refs!(acc, x, bound=Set{Symbol}()) = acc
+_brm_cell_value_refs!(acc, x::Symbol, bound=Set{Symbol}()) =
+    (x in bound || push!(acc, x); acc)
+function _brm_cell_value_refs!(acc, x::Expr, bound=Set{Symbol}())
+    if Meta.isexpr(x, :->)
+        inner = _brm_bound_symbols!(copy(bound), x.args[1])
+        return _brm_cell_value_refs!(acc, x.args[2], inner)
+    elseif Meta.isexpr(x, :generator)
+        inner = copy(bound)
+        function specification(spec)
+            if Meta.isexpr(spec, :(=), 2)
+                _brm_cell_value_refs!(acc, spec.args[2], inner)
+                _brm_bound_symbols!(inner, spec.args[1])
+            elseif Meta.isexpr(spec, :filter)
+                foreach(specification, spec.args[2:end])
+                _brm_cell_value_refs!(acc, first(spec.args), inner)
+            else
+                _brm_cell_value_refs!(acc, spec, inner)
+            end
+        end
+        foreach(specification, x.args[2:end])
+        return _brm_cell_value_refs!(acc, first(x.args), inner)
+    end
+    values = if Meta.isexpr(x, :block) && _brm_cell_has_no_result(x.args)
         # A cell body's terminal `nothing` marks "no collected result"; it
         # reads no value (an observation-only `@plate` cell ends in it).
         _brm_cell_without_result(x.args)
@@ -3156,7 +3207,7 @@ function _brm_cell_value_refs!(acc, x::Expr)
     else
         x.args
     end
-    foreach(value -> _brm_cell_value_refs!(acc, value), values)
+    foreach(value -> _brm_cell_value_refs!(acc, value, bound), values)
     acc
 end
 
