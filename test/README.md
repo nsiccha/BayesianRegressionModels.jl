@@ -2269,6 +2269,13 @@ under the test project:
 julia --startup-file=no --project=test test/description_known_values.jl
 ```
 
+`description_beta_binomial.jl` checks `BetaBinomial2` scientific descriptions
+in English and German: formula responses, scalar and predictor-driven
+plate-cell observations, argument order and count moments. It also checks
+that describing a prepared model preserves its code,
+data, identity and effective prior IDs. Run
+`julia --startup-file=no --project=test test/description_beta_binomial.jl`.
+
 `description_cell_functions.jl` describes the elementary functions a `@plate`
 cell's statements use: `log1p` and `expm1` by their standard names,
 StanBlocks' `reshape(v, m, n)` as the column-major fill, and StatsFuns'

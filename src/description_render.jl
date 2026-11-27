@@ -269,6 +269,7 @@ _brmd_law(::Type{<:Bernoulli}) = :bernoulli
 _brmd_law(::Type{<:BernoulliLogit}) = :bernoulli_logit
 _brmd_law(::Type{<:Binomial}) = :binomial
 _brmd_law(::Type{<:BinomialLogit}) = :binomial_logit
+_brmd_law(::Type{<:BetaBinomial2}) = :beta_binomial_mean_precision
 _brmd_law(::Type{<:Poisson}) = :poisson
 # `Categorical` is Distributions' `DiscreteNonParametric` over `1:K`; name it as written.
 _brmd_law(::Type{<:Categorical}) = :categorical
@@ -315,6 +316,8 @@ _brmd_law_math(c,::Val{:gamma_rate},a) = "\\operatorname{Gamma}_{\\mathrm{"*_brm
 _brmd_law_math(c,::Val{:lognormal_sd},a) = "\\operatorname{LogNormal}_{\\mathrm{"*_brmd_text(c,:math_log_sd)*"}}(" * join(a,",") * ")"
 _brmd_law_math(_c,::Val{:bernoulli_logit},a) = "\\operatorname{Bernoulli}(\\operatorname{logit}^{-1}(" * only(a) * "))"
 _brmd_law_math(_c,::Val{:binomial_logit},a) = "\\operatorname{Binomial}(" * a[1] * ",\\operatorname{logit}^{-1}(" * a[2] * "))"
+_brmd_law_math(c,::Val{:beta_binomial_mean_precision},a) = "\\operatorname{BetaBinomial}_{\\mathrm{" *
+    _brmd_text(c,:math_trials_mean_precision) * "}}(" * join(a,",") * ")"
 _brmd_law_math(_c,::Val{:lkj},a) = "\\operatorname{LKJCholesky}(" * join(a,",") * ")"
 _brmd_law_math(c,::Val{:negative_binomial_mean},a) = "\\operatorname{NegBinomial}_{\\mathrm{"*
     _brmd_text(c,:math_mean_dispersion)*"}}(" * join(a,",") * ")"
@@ -357,6 +360,7 @@ _brmd_law_prose(c,::Val{:affine}) = _brmd_text(c,:law_affine)
 _brmd_law_prose(c,::Val{:mvnormal_cholesky}) = _brmd_text(c,:law_mvnormal_cholesky)
 _brmd_law_prose(c,::Val{:exact_total}) = _brmd_text(c,:law_exact_total)
 _brmd_law_prose(c,::Val{:negative_binomial_mean}) = _brmd_text(c,:law_negative_binomial_mean)
+_brmd_law_prose(c,::Val{:beta_binomial_mean_precision}) = _brmd_text(c,:law_beta_binomial_mean_precision)
 _brmd_law_prose(c,::Val{L}) where L = _brmd_text(c,:law_declared;law=L)
 
 # Children `(id..., :coordinate, i)` of a BRM-generated vector prior.

@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.422
+
+- `brm_description` describes `BetaBinomial2(trials, mean, precision)` in
+  English and German, including its beta mixing shapes and count moments.
+  Formula responses and plate-cell observations retain the declared argument
+  order and no longer report this family as a scientific-description gap.
+
 ## 0.2.421
 
 - Fitted `SBBRMI` models with grouped `AR1Normal` responses can replay onto
