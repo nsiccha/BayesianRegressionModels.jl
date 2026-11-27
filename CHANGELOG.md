@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.416
+
+- The sparse Laplace solver recognizes a row-aligned identity-link predictor
+  used as an offset. Gaussian measurements and negative-binomial counts with
+  a positive scale or shape held fixed during the conditional solve can use
+  regression rows, including a measurement SD computed from baseline variance
+  and nonnegative contributions with sampled scales.
+
 ## 0.2.415
 
 - `rk_draw_values(rk, U, names; submodel=(collection, key))` reads a skipped

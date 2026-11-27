@@ -493,32 +493,59 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         partitioned=_rk_spl_partitioned(backend, integrated))
 end
 
-# A computed NB2 shape may vary by row and sampled scalar, while staying
-# constant in a conditional mode search. Recognize positive row arithmetic
-# over those inputs only. Leave arbitrary calls and latent reads as factors.
-function _brm_spl_positive_shape(x, scalars, static, data, n)
-    positive(v) = v isa Real && isfinite(v) && v > 0
-    x isa Real && return positive(x)
+# A row's computed scale must be strictly positive and fixed throughout the
+# conditional search. Carry nonnegativity as well: a data mask can be zero in
+# a variance contribution while a positive baseline keeps the sum positive.
+function _brm_spl_scale_sign(x, scalars, static, data, n)
     if x isa _BRMPreparedRef
-        x.name in scalars && return true
-        x.name in static || return false
-        v = data[x.name]
-        return positive(v) || (v isa AbstractVector && length(v) == n && all(positive, v))
+        x.name in scalars && return :positive
+        x.name in static || return :unknown
+        x = data[x.name]
     end
-    x isa _BRMPreparedExpr && isempty(x.kwargs) || return false
-    f = x.callable isa _BRMBroadcastCall ? x.callable.f : x.callable
-    (f in (+, *, /, _brm_dotted_product) || (x.callable isa _BRMBroadcastCall && f === inv)) &&
-        all(arg -> _brm_spl_positive_shape(arg, scalars, static, data, n), x.args)
+    if x isa Real || x isa AbstractVector
+        v = x isa Real ? (x,) : x
+        x isa AbstractVector && length(x) != n && return :unknown
+        all(t -> t isa Real && isfinite(t) && t >= 0, v) || return :unknown
+        return all(>(0), v) ? :positive : :nonnegative
+    end
+    x isa _BRMPreparedExpr && isempty(x.kwargs) || return :unknown
+    broadcast = x.callable isa _BRMBroadcastCall
+    f = broadcast ? x.callable.f : x.callable
+    signs = map(arg -> _brm_spl_scale_sign(arg, scalars, static, data, n), x.args)
+    :unknown in signs && return :unknown
+    if f === (+)
+        return :positive in signs ? :positive : :nonnegative
+    elseif f in (*, _brm_dotted_product)
+        return all(==(:positive), signs) ? :positive : :nonnegative
+    elseif f === (/) && length(signs) == 2 && last(signs) === :positive
+        return first(signs)
+    elseif broadcast && length(signs) == 1
+        f === sqrt && return only(signs)
+        f === inv && only(signs) === :positive && return :positive
+    end
+    :unknown
 end
 
 # Row design requires each term to read at most one level per integrated
 # block, with loadings fixed except for the block's own scales/correlations.
-function _brm_spl_nb2_predictor(predictor, regression, static, data, n)
-    predictor.link === :log || return false
+# Adding another identity-link predictor row for row preserves that property.
+# An expression, gather, or a predictor on the response scale of another link
+# needs the general cell route. Memoize shared predictors within a row axis.
+function _brm_spl_row_predictor(name, link, predictors, regression, static, data, n, cache)
+    predictor = get(predictors, name, nothing)
+    predictor === nothing && return false
+    predictor.link === link || return false
+    haskey(cache, name) && return cache[name]
+    cache[name] = false
     row_column(k) = k in static && data[k] isa AbstractVector && length(data[k]) == n
     predictor.row_source === nothing || row_column(predictor.row_source) || return false
-    all(predictor.terms) do term
-        all(row_column, term.columns) && !_rk_model_offset(term) || return false
+    cache[name] = all(predictor.terms) do term
+        all(row_column, term.columns) || return false
+        if _rk_model_offset(term)
+            source = term.options.expression
+            return source isa Symbol && _brm_spl_row_predictor(source, :identity,
+                predictors, regression, static, data, n, cache)
+        end
         if term.kind === :cdar
             o = term.options
             return o.factor === nothing && row_column(o.group) && row_column(o.source) &&
@@ -535,7 +562,7 @@ function _brm_spl_nb2_predictor(predictor, regression, static, data, n)
     end
 end
 
-function _brm_spl_nb2_rows(backend, records)
+function _brm_spl_fixed_scale_rows(backend, records)
     plan = backend.plan
     responses = _brm_slap_responses(plan)
     promoted = Symbol[]
@@ -545,8 +572,9 @@ function _brm_spl_nb2_rows(backend, records)
         o isa _BRMPreparedObservation && o.modifier === nothing && o.weight === nothing &&
             o.missing_response === nothing || return false
         d = o.distribution
-        d isa _BRMPreparedExpr && d.callable === NegativeBinomial2 && isempty(d.kwargs) &&
-            length(d.args) == 2
+        d isa _BRMPreparedExpr && isempty(d.kwargs) && length(d.args) == 2 || return false
+        law = d.callable isa _BRMBroadcastCall ? d.callable.f : d.callable
+        law in (NegativeBinomial2, Normal)
     end
     isempty(candidates) && return backend, responses, promoted
     reg = plan.regression
@@ -563,26 +591,34 @@ function _brm_spl_nb2_rows(backend, records)
     specs = NamedTuple[]
     taken = _rk_plan_taken(plan)
     nrows = isempty(responses) ? nothing : length(data[first(responses).response])
+    predictors = Dict(p.name => p for p in reg.predictors)
+    row_checks = Dict{Int,Dict{Symbol,Bool}}()
     for o in candidates
+        d = o.distribution
+        law = d.callable isa _BRMBroadcastCall ? d.callable.f : d.callable
+        gaussian = law === Normal
         mu, shape = o.distribution.args
         y = get(data, o.name, nothing)
         y isa AbstractVector && !isempty(y) || continue
         nrows === nothing || nrows == length(y) || continue
-        mu isa _BRMPreparedRef && any(p -> p.name === mu.name &&
-            _brm_spl_nb2_predictor(p, reg, static, data, length(y)), reg.predictors) || continue
-        all(v -> v isa Real && isinteger(v) && v >= 0, y) || continue
-        expr = shape isa _BRMPreparedRef ? get(assignments, shape.name, nothing) : shape
-        expr isa _BRMPreparedExpr && _brm_spl_positive_shape(expr, scalars, static, data, length(y)) ||
-            continue
+        mu isa _BRMPreparedRef && _brm_spl_row_predictor(mu.name,
+            gaussian ? :identity : :log, predictors, reg, static, data, length(y),
+            get!(Dict{Symbol,Bool}, row_checks, length(y))) || continue
+        all(v -> v isa Real && isfinite(v) && (gaussian || (isinteger(v) && v >= 0)), y) || continue
+        expr = shape isa _BRMPreparedRef ? get(assignments, shape.name, shape) : shape
+        _brm_spl_scale_sign(expr, scalars, static, data, length(y)) === :positive || continue
         scale = if shape isa _BRMPreparedRef
             shape.name
+        elseif shape isa Real
+            shape
         else
             isempty(extra) && _rk_source_outputs!(taken, _rk_retained_program(backend).main)
             name = _rk_ast_fresh_name(string(o.name, "_laplace_shape"), taken)
             push!(extra, _BRMPreparedAssignment(name, expr, _brm_prepared_references(expr)))
             name
         end
-        push!(specs, (; family=:nb2_log, response=o.name, predictor=mu.name, scale,
+        family = gaussian ? :gaussian : :nb2_log
+        push!(specs, (; family, response=o.name, predictor=mu.name, scale,
             scale_predictor=nothing, trials=nothing))
         push!(promoted, o.name)
         nrows = length(y)
@@ -623,7 +659,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     selected = Set(_brm_spl_record_declaration(r) for r in records)
     sampled = any(r -> r.kind in _BRM_SPL_LATENT && _brm_spl_record_declaration(r) ∉ selected,
         _rk_coordinate_records(backend))
-    backend, responses, promoted = _brm_spl_nb2_rows(backend, records)
+    backend, responses, promoted = _brm_spl_fixed_scale_rows(backend, records)
     families, ports = _brm_slap_ports(backend, responses)
     u0 = zeros(Float64, length(names))
     kernels = _rk_slap_kernels(backend, Tuple(ports), (), omega, u0, ad_backend)
@@ -648,7 +684,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     p.gmrf = _brm_spl_gmrf_prior(p, records, u0)
     _brm_spl_gmrf_parameters!(p, u0)
     _brm_spl_design!(p, u0)
-    # A computed log shape can be nonlinear in the outer parameters.
+    # A computed log scale or shape can be nonlinear in the outer parameters.
     if !sampled && isempty(promoted)
         _brm_slap_population_design!(p, u0)
     end
