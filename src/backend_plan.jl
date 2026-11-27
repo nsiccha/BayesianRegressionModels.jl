@@ -1269,13 +1269,21 @@ struct _BRMPopulationFixedTerm{V<:AbstractVector,P}
     preprocess::P
 end
 
-struct _BRMPopulationDesign{C<:Union{Tuple,AbstractVector},M<:AbstractMatrix,T<:Tuple,V<:AbstractVector}
+# Column and offset lists describe the formula. Only the numeric storage
+# types are relevant to code working with the design matrix and fixed values.
+struct _BRMPopulationDesign{M<:AbstractMatrix,V<:AbstractVector}
     target::Symbol
-    columns::C
+    columns::Union{Tuple,AbstractVector}
     matrix::M
     row_source::Symbol
-    fixed_terms::T
+    fixed_terms::Tuple
     fixed::V
+
+    function _BRMPopulationDesign(target::Symbol, @nospecialize(columns::Union{Tuple,AbstractVector}),
+            matrix::M, row_source::Symbol, @nospecialize(fixed_terms::Tuple),
+            fixed::V) where {M<:AbstractMatrix,V<:AbstractVector}
+        new{M,V}(target, columns, matrix, row_source, fixed_terms, fixed)
+    end
 end
 
 _brm_replay_expression(value::Number, _data) = value

@@ -291,7 +291,8 @@ function (builder::_BRMCollectionBuilder)(df)
     brm(source; mod=builder.scope)(_BRMReplayData(df, columns))
 end
 
-function _brm_collection_axes(brmi)
+# Collection discovery walks declarations through the shared operation reader.
+Base.@nospecializeinfer function _brm_collection_axes(@nospecialize(brmi::BRMI))
     axes = _BRMCollectionAxis[]
     for column in _brm_operation_values(brmi)
         column isa NamedColumn && parent(column) isa DataColumn || continue
@@ -303,7 +304,7 @@ end
 
 # The backend plate has one native component call per declaration variant,
 # with its first dimension indexing the records. Present the authored paths.
-function _brm_collection_paths(brmi)
+Base.@nospecializeinfer function _brm_collection_paths(@nospecialize(brmi::BRMI))
     Dict(axis.path => axis for axis in _brm_collection_axes(brmi) if !isempty(axis.path))
 end
 
@@ -319,7 +320,7 @@ function _brm_collection_member(model, submodel, caller)
     throw(ArgumentError("$caller: unknown record member `$submodel`; use (collection, key)"))
 end
 
-function _brm_collection_public_records(brmi, records)
+Base.@nospecializeinfer function _brm_collection_public_records(@nospecialize(brmi::BRMI), records)
     axes = _brm_collection_paths(brmi)
     isempty(axes) && return map(_brm_public_component_record, records)
     result = NamedTuple[]

@@ -40,8 +40,7 @@ Base.@nospecializeinfer function _rk_prior_value_plan(@nospecialize(brmi::BRMI),
     source = BRMI((; entries...), brmi.documentation)
     program = _brm_prepare_program(source;
         context=_brm_backend_context(source; retain_mm_sources=true))
-    kernels = Tuple(_rk_prepare_kernel_value(source, program, name, rhs)
-        for (name, rhs) in _rk_kernel_ops(source))
+    kernels = _rk_prepare_kernel_values(program)
     submodels = _rk_prepare_submodel_values(program)
     roots = Tuple(op.name for op in program.operations
         if op.role in (:parameter, :assignment, :predictor))

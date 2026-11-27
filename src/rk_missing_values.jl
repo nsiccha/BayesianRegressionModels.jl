@@ -65,7 +65,7 @@ function _rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(~)}
     # group rows. The number of group levels is a coefficient axis, not this
     # predictor's row axis; no parameter values are invented to resolve it.
     geometry = _rk_model_predictor_geometry(context.parent, context, name(value);
-        available_predictors=Tuple(p.name for p in linear_predictors(context.parent)),
+        available_predictors=Symbol[p.name for p in linear_predictors(context.parent)],
         tolerant_default=true)
     (; source=geometry.design.row_source, nrows=size(geometry.design.matrix, 1))
 end
@@ -270,7 +270,7 @@ Base.@nospecializeinfer function _rk_model_predictor_geometry(@nospecialize(brmi
         columns
     end
     function fallback_row_source()
-        axis = _rk_model_offset_row_axis(brmi, geometry_context, target)
+        axis = _rk_model_offset_row_axis(geometry_context.parent, geometry_context, target)
         isnothing(axis) && return nothing
         # As for a modeled covariate above, the rows are metadata.
         haskey(data, axis.source) || (data[axis.source] = Base.OneTo(axis.nrows))

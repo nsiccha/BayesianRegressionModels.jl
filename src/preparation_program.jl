@@ -9,12 +9,12 @@ struct _BRMPreparedOperation
     dependencies::Tuple
 end
 
-# Ordered operations remain a tuple; their expression types are not compiler
-# parameters of the whole program. Leaf dispatch still sees each original node.
-struct _BRMPreparedProgram{C,N}
+# Operations are an ordered collection of one node type. A vector lets every
+# model width reuse the same compiled traversals (including generators).
+struct _BRMPreparedProgram{C}
     context::C
-    operations::Tuple
-    order::N
+    operations::Vector{_BRMPreparedOperation}
+    order::Tuple{Vararg{Symbol}}
 end
 
 """
@@ -164,16 +164,15 @@ Base.@nospecializeinfer function _brm_prepare_program(@nospecialize(brmi::BRMI);
     # A model-scope read of a cell's non-collected indexed output depends on
     # that cell, as a read of its collected output does through its name.
     output_reads = _brm_kernel_output_reads(brmi)
-    prepared = Vector{_BRMPreparedOperation}(undef, length(entries))
+    operations = Vector{_BRMPreparedOperation}(undef, length(entries))
     for (index, (key, raw)) in enumerate(entries)
         op = _named_op(raw)
         isnothing(op) && (op = raw)
         role = _brm_operation_role(op)
         dependencies = haskey(output_reads, key) ? (output_reads[key],) :
             _brm_operation_dependencies(op, names, key, role, output_reads)
-        prepared[index] = _BRMPreparedOperation(key, role, op, dependencies)
+        operations[index] = _BRMPreparedOperation(key, role, op, dependencies)
     end
-    operations = Tuple(prepared)
     order = _brm_operation_order(operations)
     byname = Dict(op.name => op for op in operations)
     # An assignment preserves its consumers' observation axis. Propagate this
