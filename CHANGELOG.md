@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.421
+
+- Fitted `SBBRMI` models with grouped `AR1Normal` responses can replay onto
+  new rows without response values. Forecasts retain fitted parameter
+  coordinates and draw each group's whole trajectory from its stationary
+  first row, including unequal group lengths and integer time gaps. This
+  requires StanBlocks 0.2.68, now the dependency floor and test pin.
+
 ## 0.2.420
 
 - `reprocess(::SBBRMI, new_data)` can forecast an `Ordinal` response with
