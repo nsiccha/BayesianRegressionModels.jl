@@ -54,9 +54,10 @@ _rk_kernel_column_name(column::NamedColumn) = name(column)
 struct _RKNestedObservation{O}
     observation::O
     cells::Dict{Symbol,Symbol}
+    axis::Symbol
 end
 Base.getproperty(observation::_RKNestedObservation, field::Symbol) =
-    field in (:observation, :cells) ? getfield(observation, field) :
+    field in (:observation, :cells, :axis) ? getfield(observation, field) :
         getproperty(getfield(observation, :observation), field)
 
 # A response a kernel cell's `@scan` observes entry by entry. RKPPL computes
@@ -86,7 +87,7 @@ function _rk_observation_statement(observation::_RKNestedObservation, base, take
     cell = Expr(:call, joint ? :~ : :.~, Expr(:ref, observation.name, index),
         _rk_ast_index_cells(base, observation.cells, index))
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-        Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, observation.name)),
+        Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, observation.axis)),
             Expr(:block, cell)))
 end
 _rk_ast_index_cells(value::Symbol, cells, index) =
@@ -1393,9 +1394,15 @@ function _rk_with_kernel_observations(plan, kernels, program)
             prepared = _BRMPreparedObservation(observation.source,
                 NamedColumn(observation.source, DataColumn(response)), distribution, response,
                 modifier, weight)
-            push!(observations, _RKNestedObservation(prepared, Dict{Symbol,Symbol}(
-                route.ref => route.ref for route in (routes..., bound_routes...)
-                if route.route in (:input, :plate))))
+            # A labelled plate has one row per cell, even when it has no
+            # measurements. Index that design so prediction can run on its own.
+            axis = something(kernel.cell_column, observation.source)
+            if kernel.cell_column !== nothing
+                get!(plan.columns, axis, program.context.data[axis])
+            end
+            cells = Dict{Symbol,Symbol}(route.ref => route.ref
+                for route in (routes..., bound_routes...) if route.route in (:input, :plate))
+            push!(observations, _RKNestedObservation(prepared, cells, axis))
             continue
         end
         # A flat response's bounds are not read per entry here; coarsened
@@ -2108,7 +2115,7 @@ end
 _rk_observation_input_cells(observation, cells) = observation
 function _rk_observation_input_cells(observation::_RKNestedObservation, cells)
     _RKNestedObservation(observation.observation, Dict{Symbol,Symbol}(
-        name => get(cells, source, source) for (name, source) in observation.cells))
+        name => get(cells, source, source) for (name, source) in observation.cells), observation.axis)
 end
 
 # A per-subject observation reads its kernel's cells entry by entry, and RK's
@@ -2193,7 +2200,7 @@ function _rk_nested_observation_reads(observation, distribution, reads)
     args = Tuple(haskey(hoisted, k) ? _BRMPreparedRef(hoisted[k], :whole) : argument
         for (k, argument) in enumerate(distribution.args))
     cells = merge(observation.cells, Dict{Symbol,Symbol}(n => n for n in values(hoisted)))
-    _RKNestedObservation(observation.observation, cells),
+    _RKNestedObservation(observation.observation, cells, observation.axis),
         _BRMPreparedExpr(distribution.callable, args, distribution.kwargs)
 end
 

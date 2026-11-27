@@ -7,6 +7,9 @@
 # exact marginal law — LKJ(a, eta + (K - a)/2) and the kept margins' own scale
 # priors — exactly as SBBRMI samples it (test/marginal_ranef.jl).
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
+using Random: Xoshiro
+using LinearAlgebra: cholesky, Symmetric
+using Statistics: mean, std
 
 module RKMarginalRanef
 using BayesianRegressionModels, Distributions, StanBlocks
@@ -19,6 +22,14 @@ const DF = (;
     yc = [-0.4, -0.1, 0.8, 0.3, 0.5, 0.2, -0.6, 0.1],
 )
 const OMIT_B = (; DF.subject, DF.x, DF.ya, DF.yc)
+
+conditional(data) = @brm data begin
+    a ~ Normal(0.0, 1.0)
+    sigma ~ LogNormal(a, 0.3)
+    b ~ Normal(a, sigma)
+    y ~ Normal(a, 0.2)
+    z ~ Normal(b, 1.0)
+end
 
 plain(data) = @brm data begin
     a_loc ~ 1 + x + (1 + x | p | subject)
@@ -48,6 +59,15 @@ const CELL = (; subject=[1, 2, 3, 4], x=[-1.0, 0.5, 0.0, 1.5],
     ya=[[0.3, 0.9], [-0.2], [0.1, 1.2], [-0.8, 0.0]],
     yc=[[-0.4], [0.8, 0.3], [0.5], [-0.6, 0.1]])
 const CELL_OMIT_C = (; CELL.subject, CELL.x, CELL.ya)
+direct_series(data) = @brm data begin
+    level ~ 1 + (1 | subject)
+    slope ~ Normal(0.0, 1.0)
+    @plate for i in eachindex(level)
+        location = level[i] .+ slope .* times[i]
+        yc[i] ~ Normal(location, 0.4)
+        ya[i] ~ Normal(level[i], 0.5)
+    end
+end
 cell(data) = @brm data begin
     a_loc ~ 1 + x + (1 | p | subject)
     b_loc ~ 1 + (1 | p | subject)
@@ -417,4 +437,149 @@ end
                   if a isa BRM._RKPreparedKernelAssignment)
     @test :c_out in kernel.outputs
     @test any(s -> Meta.isexpr(s, :(=)) && first(s.args) === :c_mu, kernel.body)
+end
+
+@stestset "conditional RK replay restores omitted plate outputs on dense designs" begin
+    fit = RKBRMI(RKM.reported_data(RKM.LONG_OMIT_C))
+    full = RKBRMI(RKM.reported_data(RKM.LONG))
+    U = randn(Xoshiro(12), fit.model.layout.total, 5)
+    saved = copy(U)
+    batch = rk_generated_draws(fit, U; seed=19)
+    (; backend, points) = rk_generated_replay(fit, batch)
+    @test (size(U, 1), size(points)) == (14, (24, 5))
+    @test coordinate_names(backend.model.layout) == coordinate_names(full.model.layout)
+    @test U == saved
+    @test rk_generated_replay(fit, rk_generated_draws(fit, U; seed=19)).points == points
+    @test rk_generated_replay(fit, rk_generated_draws(fit, U; seed=11)).points != points
+    @test_throws ArgumentError rk_generated_replay(full, batch)
+    fitted = rk_draw_values(fit, U, (:a_loc, :b_loc))
+    restored = rk_draw_values(fit, batch, (:a_loc, :b_loc, :c_loc, :c_out))
+    @test fitted.a_loc ≈ restored.a_loc
+    @test fitted.b_loc ≈ restored.b_loc
+    @test restored.c_out == rk_draw_values(full, points, (:c_out,)).c_out
+    dense = (; RKM.LONG.subject, RKM.LONG.x, obs_subject=repeat(RKM.LONG.subject; inner=3),
+        t=repeat([0.2, 0.4, 0.6]; outer=4))
+    design = reprocess(fit, dense)
+    target = rk_generated_replay(design, batch)
+    @test target.points == points
+    dense_values = rk_draw_values(design, batch, (:c_out,)).c_out
+    for k in axes(U, 2), i in eachindex(dense.subject)
+        @test dense_values[k][i] ≈ fitted.a_loc[k][i] .+ fitted.b_loc[k][i] .+
+            restored.c_loc[k][i] .* [0.2, 0.4, 0.6]
+    end
+    @test haskey(rk_design_binder(backend)(dense), :subject)
+    new = (; subject=[10, 11], x=[-0.4, 0.4], obs_subject=[10, 11, 11], t=[0.1, 0.2, 0.3])
+    binder = rk_design_binder(backend; resample_groups=[:subject])
+    effects = rk_new_population_effects(binder, new, points; seed=41)
+    @test size(effects.b_p_subject) == (2, 3, size(U, 2))
+end
+
+@stestset "conditional RK replay draws interleaved LKJ margins under the configured priors" begin
+    fit = RKBRMI(RKM.configured(RKM.OMIT_B))
+    u = collect(range(-0.7, 0.8; length=fit.model.layout.total))
+    U = repeat(u, 1, 512)
+    batch = rk_generated_draws(fit, U; seed=8)
+    target = rk_generated_replay(fit, batch)
+    pred = prepare_predictive(target.backend.model, rk_bound_plan(target.backend))
+    loc = only(rk_draw_values(target.backend, target.points[:, 1:1], (:b_loc,)).b_loc)
+    @test mean.(predictive_laws(pred, target.points[:, 1]).yb) ≈ loc
+    @test size(pred(target.points[:, 1], Xoshiro(42)).yb) == size(loc)
+    active = constrain(fit.model.layout, u).b_p_subject
+    active_cor = active.L * active.L'
+    order = [1, 2, 4, 3]
+    radii, scales, innovations = Float64[], Float64[], Float64[]
+    for point in eachcol(target.points)
+        all = constrain(target.backend.model.layout, point).b_p_subject
+        cor = all.L * all.L'
+        @test cor[order[1:3], order[1:3]] ≈ active_cor
+        standardized = all.z * all.L'
+        @test standardized[:, order[1:3]] ≈ active.z * active.L'
+        L = cholesky(Symmetric(cor[order, order])).L
+        push!(radii, sum(abs2, L[4, 1:3]))
+        push!(scales, all.tau_3)
+        append!(innovations, (L \ transpose(standardized[:, order]))[4, :])
+    end
+    @test mean(radii) ≈ mean(Beta(1.5, 2.0)) atol=0.04
+    @test mean(scales) ≈ mean(Exponential(0.2)) atol=0.035
+    @test abs(mean(innovations)) < 0.08
+    @test std(innovations) ≈ 1.0 atol=0.08
+end
+
+@stestset "conditional RK replay uses completed ancestors in downstream priors" begin
+    fit = RKBRMI(RKM.conditional((; y=[0.1, 0.3])))
+    U = reshape([-0.4, 0.3, 1.2], 1, :)
+    function read_at(points)
+        batch = rk_generated_draws(fit, points; seed=28)
+        rk_draw_values(fit, batch, (:a, :sigma, :b))
+    end
+    first = read_at(U)
+    shifted = read_at(U .+ 1.0)
+    @test first.a == vec(U)
+    @test log.(shifted.sigma) ≈ log.(first.sigma) .+ 1
+    @test (shifted.b .- shifted.a) ./ shifted.sigma ≈ (first.b .- first.a) ./ first.sigma
+end
+
+@stestset "ragged RK prediction after first-binding response omission" begin
+    fit = RKBRMI(RKM.reported_data(RKM.LONG_OMIT_C))
+    observed = RKBRMI(RKM.reported_data(RKM.LONG))
+    U = randn(Xoshiro(63), fit.model.layout.total, 2)
+    batch = rk_generated_draws(fit, U; seed=8)
+    dense = (; RKM.LONG.subject, RKM.LONG.x, obs_subject=[1, 2, 2, 4, 4, 4],
+        t=[0.1, 0.3, 0.8, 0.2, 0.5, 0.9])
+    @test_throws ArgumentError rk_generated_replay(fit, batch; response_cell_ranks=(yc=2,))
+    for data in (RKM.LONG_OMIT_C, dense)
+        target = rk_generated_replay(reprocess(fit, data), batch)
+        control = reprocess(observed, data)
+        plan = rk_bound_plan(target.backend)
+        @test predictive_targets(target.backend.model, plan).yc.kind === :cells
+        pred = prepare_predictive(target.backend.model, plan)
+        reference = prepare_predictive(control.model, rk_bound_plan(control))
+        locs = rk_draw_values(target.backend, target.points, (:c_out,)).c_out
+        for (k, u) in enumerate(eachcol(target.points))
+            actual = pred(u, Xoshiro(17)).yc
+            @test length.(actual) == length.(locs[k])
+            @test actual == reference(u, Xoshiro(17)).yc
+            @test all(mean.(cell) ≈ loc for (cell, loc) in zip(predictive_laws(pred, u).yc, locs[k]))
+        end
+    end
+end
+
+@stestset "direct vector RK prediction after first-binding response omission" begin
+    data = (; RKM.CELL.subject, RKM.CELL.ya, times=[[0.1], Float64[], [0.2, 0.3], [0.4]])
+    fit = RKBRMI(RKM.direct_series(data))
+    observed = RKBRMI(RKM.direct_series(merge(data, (; yc=zero.(data.times)))))
+    U = randn(Xoshiro(18), fit.model.layout.total, 2)
+    batch = rk_generated_draws(fit, U; seed=21)
+    for times in (data.times, reverse(data.times))
+        design = merge(data, (; times))
+        target = rk_generated_replay(reprocess(fit, design), batch; response_cell_ranks=(yc=1,))
+        plan = rk_bound_plan(target.backend)
+        @test predictive_targets(target.backend.model, plan).yc.rank == 1
+        predict = prepare_predictive(target.backend.model, plan)
+        control = reprocess(observed, design)
+        reference = prepare_predictive(control.model, rk_bound_plan(control))
+        for u in eachcol(target.points)
+            actual = predict(u, Xoshiro(42)).yc
+            @test length.(actual) == length.(times)
+            @test actual == reference(u, Xoshiro(42)).yc
+        end
+    end
+end
+
+@stestset "scalar RK plate prediction after first-binding response omission" begin
+    data = (; RKM.CELL.subject, RKM.CELL.x, ya=first.(RKM.CELL.ya))
+    fit = RKBRMI(RKM.cell(data))
+    observed = RKBRMI(RKM.cell(merge(data, (; yc=first.(RKM.CELL.yc)))))
+    U = randn(Xoshiro(33), fit.model.layout.total, 2)
+    target = rk_generated_replay(fit, rk_generated_draws(fit, U; seed=8))
+    model, plan = target.backend.model, rk_bound_plan(target.backend)
+    @test predictive_targets(model, plan).yc.kind === :array
+    predict = prepare_predictive(model, plan)
+    control = reprocess(observed, data)
+    reference = prepare_predictive(control.model, rk_bound_plan(control))
+    for u in eachcol(target.points)
+        actual = predict(u, Xoshiro(17)).yc
+        @test size(actual) == size(data.subject)
+        @test mean.(predictive_laws(predict, u).yc) ≈ mean.(predictive_laws(reference, u).yc)
+    end
 end

@@ -438,9 +438,23 @@ function _rk_lower_program(program::_RKProgram, plan::_RK_PLAN_TYPES; frozen=not
     lower_rkppl(program.emitted.main, columns; mod=program.mod, conditioned,
         frozen), columns
 end
-function _rk_bind_program(program::_RKProgram, plan::_RK_PLAN_TYPES; frozen=nothing)
+function _rk_bind_program(program::_RKProgram, plan::_RK_PLAN_TYPES; frozen=nothing,
+        response_cell_ranks=(;))
     unbound, columns = _rk_lower_program(program, plan; frozen)
-    bind_data(unbound, columns)
+    # A gathered response indexes the original rows even when no values were
+    # supplied. Its rank follows from the BRM gather. RKPPL gets each cell's
+    # size from the law at the current draw.
+    ranks = Dict{Symbol,Any}(pairs(response_cell_ranks))
+    for kernel in BRM._rk_plan_kernels(plan), obs in kernel.observations
+        obs.input.kind === :gather && obs.nested && !haskey(columns, obs.source) || continue
+        BRM._rk_joint_observation(obs.callable) && continue
+        obs.source in BRM._rk_observed_names(plan) || continue
+        rank = obs.input.matrix_rows ? 2 : 1
+        get!(ranks, obs.source, rank) == rank || throw(ArgumentError(
+            "response_cell_ranks: BRM gathers rank-$rank cells for `$(obs.source)`"))
+    end
+    isempty(ranks) && return bind_data(unbound, columns)
+    bind_data(unbound, columns; response_cell_ranks=ranks)
 end
 
 _rk_translate_from_emitted(plan::_RK_PLAN_TYPES, emitted::BRM._RKEmittedProgram) =
@@ -662,6 +676,8 @@ function BRM._rk_generate_members(rk, readout, U, rng)
         physical
     end
 end
+
+include("rk_generated_replay.jl")
 
 function BRM._rk_generated_points(backend, physical)
     layout = backend.model.layout

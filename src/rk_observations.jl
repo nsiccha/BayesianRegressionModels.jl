@@ -118,24 +118,24 @@ function _rk_backend_from_plan end
 # base law conditional on its bounds. The placement check above is essential:
 # dropping the probability of those bounds can otherwise bias ancestors.
 # Change only the law of a sampling site in the generator's private source.
-function _rk_prior_rng_expr(x::Expr, in_law=false)
+function _rk_prior_rng_expr(x::Expr, normalize, in_law=false)
     args = copy(x.args)
-    if in_law && x.head in (:call, :.) && !isempty(args) && args[1] === :restricted
+    if in_law && x.head in (:call, :.) && !isempty(args) && args[1] === :restricted && normalize(x)
         args[1] = :truncated
     end
     sampled = Meta.isexpr(x, :call, 3) && args[1] in (:~, :.~)
     for i in eachindex(args)
         args[i] isa Expr || continue
-        args[i] = _rk_prior_rng_expr(args[i], in_law || (sampled && i == 3))
+        args[i] = _rk_prior_rng_expr(args[i], normalize, in_law || (sampled && i == 3))
     end
     Expr(x.head, args...)
 end
 
-function _rk_prior_rng_source(emitted::_RKEmittedProgram)
-    main = _rk_prior_rng_expr(emitted.main)
-    defs = map(_rk_prior_rng_expr, emitted.defs)
+function _rk_prior_rng_source(emitted::_RKEmittedProgram, normalize=Returns(true))
+    main = _rk_prior_rng_expr(emitted.main, normalize)
+    defs = map(def -> _rk_prior_rng_expr(def, normalize), emitted.defs)
     main == emitted.main && defs == emitted.defs && return emitted
-    _RKEmittedProgram(defs, main, emitted.bindings)
+    _RKEmittedProgram(defs, main, emitted.bindings, emitted.reusable_code)
 end
 
 # Slice the augmented program in reverse dependency order. Fitted declarations
