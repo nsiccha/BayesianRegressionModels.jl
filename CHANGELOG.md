@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.424
+
+- Keyed components can return scalar or per-subject vector values for a parent
+  `@plate` to gather in record order. `brm_subject_value(value, i)` reads either
+  shape at subject `i` on SBBRMI and RKBRMI. Plate cells preserve lexical
+  comprehension bindings and expose the ordinal loop index as a cell value.
+
 ## 0.2.423
 
 - `rkppl_model(name)` returns its body on the first call of a session on

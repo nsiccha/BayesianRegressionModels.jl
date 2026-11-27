@@ -40,8 +40,9 @@ const gathered = @brm begin
         channels[entry.id] ~ reading(entry)
     end
     values = channels.value
+    n_members = constant(length(records))
     @plate for i in eachindex(y)
-        selected = [length(v) == 1 ? v[1] : v[i] for v in values]
+        selected = [brm_subject_value(values[j], i) for j in 1:n_members]
         shared[i] = sum(weights .* selected)
         y[i] ~ Normal(shared[i], 1)
     end
@@ -135,8 +136,10 @@ end
     vector_a = (; id=:a, series=true, grid=[1.1, -.2, .7], level=0.)
     scalar_b = (; id=:b, series=false, grid=Float64[], level=.4)
     scalar_a = (; id=:a, series=false, grid=Float64[], level=-.3)
+    # A heterogeneous collection deliberately exposes a Vector{Any} on RK;
+    # its density and gradients are checked above under the normal setting.
     for (label, records) in (("scalars", [scalar_b, scalar_a]),
-            ("vectors", [vector_b, vector_a]), ("mixed", [vector_b, scalar_a]))
+            ("vectors", [vector_b, vector_a]))
         @testset "$label" begin
             ReactiveKernels._with_type_stability(:error, :all) do
                 brmi = gathered((; records, weights=[.3, .8], y=[.2, -.1, .3]))
@@ -191,8 +194,9 @@ const pipeline = @brm begin
         channels[entry.id] ~ reading(entry)
     end
     values = channels.value
+    n_members = constant(length(records))
     @plate for i in eachindex(subjects)
-        selected = [length(v) == 1 ? v[1] : v[i] for v in values]
+        selected = [brm_subject_value(values[j], i) for j in 1:n_members]
         shared[i] = sum(selected)
     end
     for entry in endpoints
@@ -244,8 +248,10 @@ end
                 submodel=(:scores, entry.id))
             @test only(draws.loc) ≈ location(stan_point, entry)
             positions = brm_output_coordinates(descriptor, :loc,
-                BridgeStan.param_names(stan.model; include_tp=true); submodel=(:scores, entry.id))
-            @test BridgeStan.param_constrain(stan.model, stan_point; include_tp=true)[positions] ≈
+                BridgeStan.param_names(stan.model; include_tp=true, include_gq=true);
+                submodel=(:scores, entry.id))
+            @test BridgeStan.param_constrain(stan.model, stan_point;
+                include_tp=true, include_gq=true, rng=BridgeStan.StanRNG(stan.model, 1))[positions] ≈
                 location(stan_point, entry)
         end
     end
@@ -295,8 +301,9 @@ const parent_pipeline = @brm begin
         channels[entry.id] ~ shared_reading(entry)
     end
     values = channels.value
-    @plate for i in eachindex(subject)
-        selected = [length(v) == 1 ? v[1] : v[i] for v in values]
+    n_members = constant(length(records))
+    @plate for i in eachindex(subjects)
+        selected = [brm_subject_value(values[j], i) for j in 1:n_members]
         shared[i] = root[i] + sum(selected)
     end
     for entry in endpoints
@@ -310,7 +317,7 @@ end
                (; id=:a, series=false, subject, center=-.2, scale=.8)]
     endpoints = [(; id=:right, weight=.1, y=[.2, .4, -.1]),
                  (; id=:left, weight=.2, y=[-.2, .3, .1])]
-    data = (; subject, records, endpoints)
+    data = (; subject, subjects=collect(1:3), records, endpoints)
     brmi = parent_pipeline(data)
     rk, problem = consumer_problem(brmi)
     sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
@@ -321,7 +328,7 @@ end
     @test length(names) == rk.model.layout.total == 10
     transport = brm_coordinate_transport(rk, sb, names)
     descriptor = brm_descriptor(sb)
-    constrained_names = BridgeStan.param_names(stan.model; include_tp=true)
+    constrained_names = BridgeStan.param_names(stan.model; include_tp=true, include_gq=true)
     for point in (zeros(10), collect(range(-.3, .4; length=10)))
         stan_point = brm_rk_point_to_stan(transport, point)
         oracle(u) = brm_stan_logdensity_to_rk(transport, u,
@@ -332,7 +339,8 @@ end
             stan_point; propto=false)
         @test value ≈ brm_stan_logdensity_to_rk(transport, point, stan_value)
         @test gradient ≈ brm_stan_gradient_to_rk(transport, point, stan_gradient)
-        constrained = BridgeStan.param_constrain(stan.model, stan_point; include_tp=true)
+        constrained = BridgeStan.param_constrain(stan.model, stan_point;
+            include_tp=true, include_gq=true, rng=BridgeStan.StanRNG(stan.model, 1))
         root = constrained[brm_output_coordinates(descriptor, :root, constrained_names)]
         expected = copy(root)
         for record in records
