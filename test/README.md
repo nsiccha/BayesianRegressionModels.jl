@@ -2947,6 +2947,21 @@ and every cell's 11 candidate losses against an independent weighted-correlation
 oracle at zero, mixed and one source controls. It tests the fixed-frame scoring
 proxy; it does not measure online window winners or sampler convergence.
 
+`julia --project=test test/online_centering.jl` checks the observations passed
+to WarmupHMC from actual SBBRMI and RKBRMI gradients. It exchanges the weak
+and strong groups' standard errors, checks the prior-only group's curve, and
+transports a correlated block between seeded controls. A sampler test can
+reuse the fitted target and its cell addresses as follows.
+
+```julia
+include("test/online_centering_fixture.jl")
+using BayesianRegressionModels
+using .OnlineCenteringFixture: prepare, scalar_model, wrap
+fit = prepare(RKBRMI, scalar_model())  # or SBBRMI
+controls = [c.level == "strong" ? 0.75 : 0.2 for c in fit.schema.cells]
+adaptive = wrap(fit, controls)
+```
+
 `adaptive_centering_cells.jl` reconstructs the wrapper's map from the public
 plain-data `adaptive_centering_cells` rows, without reading BRM's internal
 block types or mapping helpers. On both backends it checks random-effect,
