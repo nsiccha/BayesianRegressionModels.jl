@@ -84,7 +84,7 @@ end
         y ~ NegativeBinomial2(mu, a .* mu)
     end)
     records = BRM._brm_spl_records(latent_shape, [:g])
-    @test isempty(last(BRM._brm_spl_nb2_rows(latent_shape, records)))
+    @test isempty(last(BRM._brm_spl_fixed_scale_rows(latent_shape, records)))
 end
 
 @stestset "computed NB2 promotion distinguishes arithmetic and kernel shapes in one model" begin
@@ -100,9 +100,76 @@ end
         other ~ NegativeBinomial2(mu, kernel_shape)
     end)
     records = BRM._brm_spl_records(rk, [:g])
-    _, responses, promoted = BRM._brm_spl_nb2_rows(rk, records)
+    _, responses, promoted = BRM._brm_spl_fixed_scale_rows(rk, records)
     @test promoted == [:y]
     @test only(responses).scale === :shape
+end
+
+@stestset "affine predictor offsets and noisy Gaussian measurements share sparse rows" begin
+    d = (; site=["a", "b", "a", "c"], reading=[0.4, -0.8, 0.6, 0.1],
+        y=[0, 3, 2, 1], variance=[0.2, 0.3, 0.1, 0.4], flag=[0, 1, 0, 1],
+        exposure=[1, 2, 1, 3])
+    rk = RKBRMI(@brm d begin
+        level ~ 1 + (1 | site)
+        sd(level, site) = 0.7
+        log(mu) ~ 1 + offset(level)
+        tau ~ Exponential(1)
+        a ~ LogNormal(0, 1)
+        noise = sqrt.(variance .+ flag .* tau .* tau)
+        shape = a .* exposure
+        reading .~ Normal.(level, noise)
+        y ~ NegativeBinomial2(mu, shape)
+    end)
+    p = brm_laplace_problem(rk; integrate=:site, ad_backend=NLME_AD)
+    @test isempty(p.cells)
+    @test count(==(:reading), p.response) == count(==(:y), p.response) == length(d.y)
+    @test BRM._brm_spl_concave(p)
+
+    # Evaluate the authored joint at independent scalar modes. Both the
+    # Gaussian measurement and the count contribute to each site's precision.
+    joint = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    reader = BRM._rk_value_reader(rk, (:level, :mu, :noise, :shape))
+    function oracle(x)
+        u = zeros(length(p.u))
+        u[p.population] .= x
+        law = reader(u)
+        correction = 0.0
+        for (j, site) in enumerate(sort(unique(d.site)))
+            rows = findall(==(site), d.site)
+            z = 0.0
+            for iter in 1:30
+                mu = law.mu[rows] .* exp(0.7z)
+                prob = mu ./ (law.shape[rows] .+ mu)
+                dispersion = law.shape[rows] .+ d.y[rows]
+                residual = d.reading[rows] .- law.level[rows] .- 0.7z
+                prec = 1 ./ abs2.(law.noise[rows])
+                score = 0.7 * sum(d.y[rows] .- dispersion .* prob .+ residual .* prec) - z
+                h = 1 + 0.7^2 * sum(dispersion .* prob .* (1 .- prob) .+ prec)
+                if abs(score) < 1e-12
+                    correction += 0.5 * log(2pi / h)
+                    break
+                end
+                iter == 30 && error("reference conditional mode did not converge")
+                z += score / h
+            end
+            u[p.integrated[j]] = z
+        end
+        LogDensityProblems.logdensity(joint, u) + correction
+    end
+    for x in (zeros(length(p.names)), 0.3 .* randn(Xoshiro(87), length(p.names)))
+        v, g = LogDensityProblems.logdensity_and_gradient(p, x)
+        @test v ≈ oracle(x) atol=1e-8
+        @test g ≈ values_fd(oracle, x) rtol=2e-7 atol=2e-8
+    end
+
+    nonlinear = RKBRMI(@brm d begin
+        log(level) ~ 1 + (1 | site)
+        log(mu) ~ 1 + offset(level)
+        a ~ LogNormal(0, 1)
+        y ~ NegativeBinomial2(mu, a .* exposure)
+    end)
+    records = BRM._brm_spl_records(nonlinear, [:site])
+    @test isempty(last(BRM._brm_spl_fixed_scale_rows(nonlinear, records)))
 end
 
 @stestset "non-centered shares retain completion density corrections" begin
