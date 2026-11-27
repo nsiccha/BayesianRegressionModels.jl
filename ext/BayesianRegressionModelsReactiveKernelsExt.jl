@@ -2,6 +2,7 @@ module BayesianRegressionModelsReactiveKernelsExt
 
 using BayesianRegressionModels
 using LogDensityProblems
+import Random
 using ReactiveKernels
 using ReactiveKernelsPPL
 using ReactiveKernelsDistributionKernels: DistributionKernelSources
@@ -566,9 +567,10 @@ Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); hel
 end
 
 Base.@nospecializeinfer function BRM._rk_backend_from_plan(@nospecialize(brmi::BRM.BRMI),
-        @nospecialize(plan), @nospecialize(source::BRM.BRMI))
-    program = _RKProgram(BRM._rk_emit_ast(plan; documentation=BRM.brm_documentation(source)))
-    bound = _rk_bind_program(program, plan)
+        @nospecialize(plan), @nospecialize(source::BRM.BRMI);
+        emitted=BRM._rk_emit_ast(plan; documentation=BRM.brm_documentation(source)), frozen=nothing)
+    program = _RKProgram(emitted)
+    bound = _rk_bind_program(program, plan; frozen)
     BRM.RKBRMI(brmi, plan, build_kernel(bound);
         program=BRM._RKOnce(program), bound=BRM._RKOnce(bound), source)
 end
@@ -622,6 +624,49 @@ function BRM._rk_generate_prior(rk, generator, rng, n)
     layout = rk.model.layout
     points = Matrix{Float64}(undef, layout.total, n)
     for (i, draw) in enumerate(query(rng, n))
+        points[:, i] = unconstrain(layout, draw)
+    end
+    points
+end
+
+function _rk_with_generated(values::NamedTuple, path, value)
+    name = first(path)
+    field = length(path) == 1 ? value :
+        _rk_with_generated(get(values, name, (;)), Base.tail(path), value)
+    merge(values, NamedTuple{(name,)}((field,)))
+end
+
+function BRM._rk_generate_members(rk, readout, U, rng)
+    fit_layout = _rk_bound_layout(rk)
+    generator = BRM._rk_once!(readout.generator) do
+        fitted = Set(Tuple(p.path) for p in parameter_metadata(fit_layout))
+        paths = [Tuple(p.path) for p in parameter_metadata(readout.backend.model.layout)
+            if Tuple(p.path) ∉ fitted]
+        isempty(paths) && return (; query=nothing, paths, aliases=Symbol[])
+        program = BRM._rk_generated_source(BRM._rk_retained_program(rk),
+            BRM._rk_retained_program(readout.backend), paths)
+        bound = _rk_bind_program(_RKProgram(program.source), rk.plan; frozen=_rk_frozen(rk))
+        coordinate_names(assign_layout(bound)) == coordinate_names(fit_layout) || error(
+            "rk_generated_draws: generated declarations changed the fitted coordinate layout")
+        (; query=ReactiveKernelsPPL.prepare_generated(bound), paths, program.aliases)
+    end
+    map(eachcol(U)) do u
+        point = collect(u)
+        physical = constrain(fit_layout, point)
+        isnothing(generator.query) && return physical
+        # prepare_generated copies its RNG. Give each column its own stream.
+        sampled = generator.query(point, Random.Xoshiro(rand(rng, UInt64)))
+        for (path, alias) in zip(generator.paths, generator.aliases)
+            physical = _rk_with_generated(physical, path, sampled[alias])
+        end
+        physical
+    end
+end
+
+function BRM._rk_generated_points(backend, physical)
+    layout = backend.model.layout
+    points = Matrix{Float64}(undef, layout.total, length(physical))
+    for (i, draw) in pairs(physical)
         points[:, i] = unconstrain(layout, draw)
     end
     points
@@ -1178,22 +1223,48 @@ function BRM._rk_svi_conditional_reader(rk::BRM.RKBRMI, record, base, positions,
 end
 
 # Graph values of a backend at an unconstrained point, from one prepared query.
-function BRM._rk_value_reader(rk::BRM.RKBRMI, names::Tuple{Vararg{Symbol}})
+function _rk_value_query(rk, names)
     bound = BRM.rk_bound_data(rk)
-    query = ReactiveKernels.prepare(rk.model.spec;
+    ReactiveKernels.prepare(rk.model.spec;
         have=(:unconstrained, keys(bound)...), want=names, bound)
-    function read(u)
-        values = Base.invokelatest(query, Vector{Float64}(u))
-        length(names) == 1 && return NamedTuple{names}((values,))
-        values isa NamedTuple ? NamedTuple{names}(Tuple(values[n] for n in names)) :
-            NamedTuple{names}(Tuple(values))
+end
+
+function _rk_query_values(query, names, args...)
+    values = Base.invokelatest(query, args...)
+    length(names) == 1 && return NamedTuple{names}((values,))
+    values isa NamedTuple ? NamedTuple{names}(Tuple(values[n] for n in names)) :
+        NamedTuple{names}(Tuple(values))
+end
+
+function BRM._rk_value_reader(rk::BRM.RKBRMI, names::Tuple{Vararg{Symbol}})
+    query = _rk_value_query(rk, names)
+    u -> _rk_query_values(query, names, Vector{Float64}(u))
+end
+
+function BRM._rk_member_value_reader(readout, names, member)
+    bound = BRM.rk_bound_data(readout.backend)
+    live = filter(n -> !haskey(bound, n), names)
+    if isempty(live)
+        fixed = NamedTuple{names}(map(n -> bound[n][member], names))
+        return (; read=u -> fixed, footprint=u -> ())
     end
+    spec = readout.backend.model.spec
+    for name in live
+        spec = ReactiveKernels.plate_cell(spec, name; index=readout.index, name=readout.selected[name])
+    end
+    want = map(n -> readout.selected[n], live)
+    query = ReactiveKernels.prepare(spec; have=(:unconstrained, readout.index, keys(bound)...),
+        want, bound)
+    function read(u)
+        values = _rk_query_values(query, want, u, member)
+        NamedTuple{names}(map(n -> haskey(bound, n) ? bound[n][member] : values[readout.selected[n]], names))
+    end
+    support = partition_footprint_kernel(query)
+    (; read, footprint=u -> Base.invokelatest(support, u, member).unconstrained)
 end
 
 function BRM._rk_spl_value_reads(rk::BRM.RKBRMI, names::Tuple, u0)
-    bound = BRM.rk_bound_data(rk)
-    query = ReactiveKernels.prepare(rk.model.spec;
-        have=(:unconstrained, keys(bound)...), want=names, bound)
+    query = _rk_value_query(rk, names)
     reads = Base.invokelatest(partition_footprint_kernel(query), u0).unconstrained
     reads === :whole ? collect(eachindex(u0)) : reads
 end

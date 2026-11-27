@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.415
+
+- `rk_draw_values(rk, U, names; submodel=(collection, key))` reads a skipped
+  member's returns that depend only on fitted coordinates and record data.
+  For a stochastic return, `draws = rk_generated_draws(rk, U; seed=42)` samples
+  the missing parameters once per posterior column. Use `draws` in place of
+  `U` to share the same physical values across fields and frozen designs.
+
 ## 0.2.414
 
 - Stan replay accepts `condition_groups=(site=:reading,)` to draw a fresh

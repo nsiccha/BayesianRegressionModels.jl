@@ -247,27 +247,79 @@ shape, as the model reads it: after `out[i] = v`, `value[i]` is cell `i`'s
 number, vector or matrix. `reduce(vcat, value)` concatenates vector cells.
 
 Pass `submodel=(:sensors, key)` to read named fields returned by one keyed
-component. Each draw then contains just that member's value.
+component. Each draw then contains just that member's value. For an
+unobserved member, a matrix of fitted draws can supply any field that reads
+only record data and fitted coordinates, even if another field reads a
+member-specific parameter that requires generation. For stochastic fields,
+pass a batch from [`rk_generated_draws`](@ref) to reuse each member's sampled
+parameters across separate reads and compatible frozen design replays.
 """
 function rk_draw_values(rk::RKBRMI, U::AbstractMatrix, names; submodel=nothing)
     names = Tuple(Symbol.(names))
     U = _brm_cut_draws(U, _rk_layout_coordinate_names(rk); prefix="rk_draw_values")
     cells = _rk_plate_output_cell_names(rk)
-    sources, member = if isnothing(submodel)
-        map(name -> get(cells, name, name), names), nothing
-    else
-        axis, index = _brm_collection_member(brm_source(rk), submodel, :rk_draw_values)
-        fields = _rk_collection_return_cells(rk.plan, axis, cells)
-        missing = setdiff(names, keys(fields))
-        isempty(missing) || throw(ArgumentError("rk_draw_values: member `$submodel` has no " *
-            "returned graph value $(join(missing, ", ")); available fields: $(Tuple(keys(fields)))"))
-        map(name -> fields[name], names), index
+    if isnothing(submodel)
+        sources = map(name -> get(cells, name, name), names)
+        return _rk_read_draw_columns(rk, U, names, sources, nothing)
     end
-    read = _rk_value_reader(rk, Tuple(unique(sources)))
-    values = [read(U[:, k]) for k in axes(U, 2)]
-    at(value) = isnothing(member) ? value : value[member]
+    axis, member = _brm_collection_member(brm_source(rk), submodel, :rk_draw_values)
+    fields = _rk_collection_return_outputs(rk.plan, axis)
+    missing = setdiff(names, keys(fields))
+    isempty(missing) || throw(ArgumentError("rk_draw_values: member `$submodel` has no " *
+        "returned graph value $(join(missing, ", ")); available fields: $(Tuple(keys(fields)))"))
+    outputs = map(name -> fields[name], names)
+    if all(in(keys(cells)), outputs)
+        return _rk_read_draw_columns(rk, U, names, map(output -> cells[output], outputs), member)
+    end
+    readout = _rk_keyed_readout(rk)
+    sources = map(output -> readout.cells[output], outputs)
+    _rk_read_draw_columns(readout.backend, U, names, sources, member; readout, submodel)
+end
+
+function _rk_read_draw_columns(rk, U, names, sources, member; readout=nothing, submodel=nothing)
+    ports = Tuple(unique(sources))
+    values = if isnothing(readout)
+        read = _rk_value_reader(rk, ports)
+        [read(U[:, k]) for k in axes(U, 2)]
+    else
+        query = _rk_member_value_reader(readout, ports, member)
+        map(eachcol(U)) do u
+            # A field may index by the draw. Check its structural support at
+            # that point before evaluating it. Filler slots must be unread.
+            point = zeros(length(readout.coordinates))
+            point[readout.fitted] = u
+            needed = query.footprint(point)
+            absent = needed === :whole ? readout.absent : intersect(readout.absent, needed)
+            isempty(absent) || throw(ArgumentError("rk_draw_values: reading $names from member " *
+                "`$submodel` requires generated draws for $(join(readout.coordinates[absent], ", ")). " *
+                "Use rk_generated_draws(rk, U; seed)."))
+            query.read(point)
+        end
+    end
+    at(value) = isnothing(member) || !isnothing(readout) ? value : value[member]
     NamedTuple{names}(Tuple([at(v[source]) for v in values] for source in sources))
 end
+
+# A collection return can share its cell with a prior absent from the fitted
+# density. Root the member returns in a separate graph. RK's query footprint
+# identifies the packed coordinates the requested fields actually read.
+function _rk_keyed_readout(rk::RKBRMI)
+    _rk_once!(rk.prepared.readout) do
+        roots = [first(axis.path) for axis in _brm_collection_axes(brm_source(rk))
+            if !isempty(axis.path)]
+        emitted = _rk_emit_ast(rk.plan; value_roots=roots)
+        frozen = isnothing(rk.fitted) ? nothing : rk.fitted.frozen
+        backend = _rk_backend_from_plan(parent(rk), rk.plan, brm_source(rk); emitted, frozen)
+        coordinates = _rk_layout_coordinate_names(backend)
+        positions = Dict(name => i for (i, name) in pairs(coordinates))
+        fitted = [positions[name] for name in _rk_layout_coordinate_names(rk)]
+        cells = _rk_plate_output_cell_names(backend)
+        selected = Dict(source => gensym(source) for source in values(cells))
+        (; backend, cells, selected, index=gensym(:member), generator=_RKOnce(), coordinates, fitted,
+            absent=setdiff(eachindex(coordinates), fitted))
+    end
+end
+function _rk_member_value_reader end
 
 function rk_draw_values(rk::RKBRMI, draws::_RKPriorDraws, names; submodel=nothing)
     target = _rk_prior_values(rk)
@@ -276,9 +328,20 @@ function rk_draw_values(rk::RKBRMI, draws::_RKPriorDraws, names; submodel=nothin
     rk_draw_values(target.backend, draws.points, names; submodel)
 end
 
+function rk_draw_values(rk::RKBRMI, draws::_RKGeneratedDraws, names; submodel=nothing)
+    rk.prepared.draw_binding === draws.binding || throw(ArgumentError(
+        "rk_draw_values: use the generated batch on its fit or a compatible frozen design replay"))
+    readout = _rk_keyed_readout(rk)
+    issetequal(readout.coordinates, draws.coordinates) || throw(DimensionMismatch(
+        "rk_draw_values: the replay changes the generated parameter coordinates"))
+    points = _rk_generated_points(readout.backend, draws.physical)
+    rk_draw_values(readout.backend, points, names; submodel)
+end
+function _rk_generated_points end
+
 # Resolve authored fields through the actual property reads emitted by the
 # collection. An earlier declaration may already own a candidate graph name.
-function _rk_collection_return_cells(plan, axis, cells)
+function _rk_collection_return_outputs(plan, axis)
     sources = Dict{Symbol,Symbol}()
     for kernel in _rk_plan_kernels(plan)
         kernel.name === first(axis.path) || continue
@@ -292,7 +355,7 @@ function _rk_collection_return_cells(plan, axis, cells)
         assignments[kernel.name] = kernel.collected
         for (name, local_name) in pairs(fields), output in (kernel.name, kernel.outputs...)
             get(assignments, output, nothing) == Expr(:., member, QuoteNode(local_name)) || continue
-            haskey(cells, output) && (sources[name] = cells[output])
+            sources[name] = output
         end
     end
     sources

@@ -1,6 +1,7 @@
 module KeyedReadingsTest
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using ReactiveKernelsDistributionKernels
+using Statistics: mean, std
 
 @brm function sensor(record, signal)
     offset ~ Normal(0, 1)
@@ -19,6 +20,82 @@ const model = @brm begin
     y ~ Normal(sensors.total, 1)
 end
 
+@brm function station(spec, slope)
+    offset ~ Normal(slope, 0.3)
+    drift ~ Normal(offset, 0.4)
+    innovation = drift - offset
+    baseline = spec.times .* slope
+    adjusted = baseline .+ drift
+    return (; baseline, adjusted, drift, innovation)
+end
+
+const monitoring = @brm begin
+    slope ~ Normal(0, 1)
+    y ~ Normal(slope, 1)
+    for spec in instruments
+        stations[spec.id] ~ station(spec, slope)
+    end
+end
+
+@stestset "Unobserved keyed member returns at fitted points" begin
+    training = (; y=[0.4, 0.6], instruments=[
+        (; id=:west, times=[-1.0]), (; id=:east, times=[1.0, 2.0, 3.0])])
+    changed = (; training..., instruments=[
+        (; id=:east, times=Float64[]), (; id=:west, times=[2.0, 0.0])])
+    fit, problem = consumer_problem(monitoring(training))
+    U = reshape([-1.2, 0.4, 2.0], 1, :)
+    @test BRM._rk_layout_coordinate_names(fit) == [:slope]
+    oracle(u) = logpdf(Normal(), only(u)) + sum(logpdf.(Normal(only(u), 1), training.y))
+    check_consumer_point(problem, [0.4], oracle)
+    for (r, data) in ((fit, training), (reprocess(fit, changed), changed)), spec in data.instruments
+        key = (:stations, spec.id)
+        values = rk_draw_values(r, U, (:baseline,); submodel=key)
+        for j in axes(U, 2)
+            @test values.baseline[j] ≈ spec.times .* U[1, j]
+        end
+        # An unconstrained posterior read supplies only the fitted coordinates (1skhpag).
+        position = spec.id === :east ? 1 : 2
+        @test_throws "requires generated draws for stations_member_all.drift.$position." rk_draw_values(
+            r, U, (:baseline, :drift); submodel=key)
+        @test_throws "no returned graph value" rk_draw_values(r, U, (:unknown,); submodel=key)
+    end
+    @testset "Seeded conditional draws shared across member fields and designs" begin
+        posterior = repeat(U, 1, 100)
+        batch = rk_generated_draws(fit, posterior; seed=29)
+        @test length(batch) == size(posterior, 2)
+        replay = reprocess(fit, changed)
+        other = RKBRMI(monitoring(changed))
+        @test_throws "compatible frozen design" rk_draw_values(other, batch, (:drift,);
+            submodel=(:stations, :east))
+        repeated = rk_generated_draws(fit, posterior; seed=29)
+        changed_seed = rk_generated_draws(fit, posterior; seed=30)
+        for spec in changed.instruments
+            key = (:stations, spec.id)
+            # Separate reads of the same batch must retain the same member draw.
+            drift = rk_draw_values(fit, batch, (:drift,); submodel=key).drift
+            expected = rk_draw_values(replay, batch, (:baseline, :adjusted, :drift, :innovation); submodel=key)
+            @test drift == expected.drift
+            @test expected.baseline == [spec.times .* slope for slope in posterior[1, :]]
+            @test expected.adjusted == [base .+ d for (base, d) in zip(expected.baseline, drift)]
+            @test rk_draw_values(fit, repeated, (:drift,); submodel=key).drift == drift
+            @test rk_draw_values(fit, changed_seed, (:drift,); submodel=key).drift != drift
+            # The unreturned offset and the conditional innovation are distinct
+            # parts of the same physical realization on both designs.
+            @test expected.innovation == rk_draw_values(fit, batch, (:innovation,); submodel=key).innovation
+            residuals = drift .- vec(posterior)
+            @test abs(std(residuals .- expected.innovation) - 0.3) < 0.06
+            @test abs(std(expected.innovation) - 0.4) < 0.06
+            @test abs(mean(residuals)) < 0.10
+            @test abs(std(residuals) - 0.5) < 0.07
+        end
+        east = rk_draw_values(fit, batch, (:drift,); submodel=(:stations, :east)).drift
+        west = rk_draw_values(fit, batch, (:drift,); submodel=(:stations, :west)).drift
+        @test east != west
+    end
+    check_consumer_point(problem, [0.4], oracle)
+    @test BRM._rk_layout_coordinate_names(fit) == [:slope]
+end
+
 @stestset "Read one component's scalar and variable-length returns by key" begin
     data = (; x=[2., -3., .75], records=[(; id=:b, picks=[1, 3]), (; id=:a, picks=[2])], y=[.3, .1])
     changed = (; data..., records=[(; id=:a, picks=Int[]), (; id=:b, picks=[2, 1, 3])], y=reverse(data.y))
@@ -28,6 +105,10 @@ end
     U = [.5 -.25; .1 -.4; .25 .7] # gain, then offsets in key order
     @test_throws ArgumentError rk_draw_values(rk, U, (:loc,); submodel=(:sensors, :missing))
     @test_throws ArgumentError rk_draw_values(rk, U, (:unreturned,); submodel=(:sensors, :a))
+    batch = rk_generated_draws(rk, U; seed=17)
+    key = (:sensors, :b)
+    @test rk_draw_values(rk, batch, (:loc, :total); submodel=key) ==
+        rk_draw_values(rk, U, (:loc, :total); submodel=key)
     path = joinpath(mkpath(joinpath(tempdir(), "brm-rk-consumer")), "keyed-reading-returns.stan")
     for (design, r, s) in ((data, rk, sb), (changed, reprocess(rk, changed), reprocess(sb, changed)))
         stan = BRM.stan_instantiate(s; path).model

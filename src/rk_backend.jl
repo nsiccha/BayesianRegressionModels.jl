@@ -566,11 +566,15 @@ mutable struct _BRMPreparedSlot
     const lock::ReentrantLock
     const factors::_RKOnce
     const coordinates::_RKOnce
-    # The parameter and readout graph of an unconditioned fit or its replay.
-    const prior_values::_RKOnce
-    _BRMPreparedSlot() = new(nothing, ReentrantLock(), _RKOnce(), _RKOnce(), _RKOnce())
+    # The prior graph of an unconditioned fit, or the augmented readout graph
+    # of a conditioned fit with unobserved collection members.
+    const readout::_RKOnce
+    # A batch belongs to the fit and replays that keep its sampled units.
+    const draw_binding::Base.RefValue{Nothing}
+    _BRMPreparedSlot(draw_binding=Ref(nothing)) =
+        new(nothing, ReentrantLock(), _RKOnce(), _RKOnce(), _RKOnce(), draw_binding)
 end
-Base.deepcopy_internal(::_BRMPreparedSlot, ::IdDict) = _BRMPreparedSlot()
+Base.deepcopy_internal(slot::_BRMPreparedSlot, ::IdDict) = _BRMPreparedSlot(slot.draw_binding)
 
 """
     RKBRMI(brmi; held_out=(), completions=:centered, car_units=nothing)
@@ -680,11 +684,11 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
             bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing,
-            model_plan=plan)
+            model_plan=plan, draw_binding=Ref(nothing))
         parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
             plan, model, program, bound, source, fitted, model_plan,
-            _BRMPreparedSlot())
+            _BRMPreparedSlot(draw_binding))
     end
 end
 
