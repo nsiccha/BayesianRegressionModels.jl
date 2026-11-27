@@ -12,6 +12,12 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.413
+
+- On RKBRMI, a record component can use a caller's scalar data or fitted
+  `constant(...)` as the location or scale of a population-effect prior.
+  Frozen replay keeps the fitted constant. A fresh replay recalculates it.
+
 ## 0.2.412
 
 - On Stan, a record component can return a scalar for some members and a
