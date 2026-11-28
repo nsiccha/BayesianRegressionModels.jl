@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.429
+
+- `rkppl_source(rk)` returns the ReactiveKernelsPPL program an `RKBRMI` runs as
+  source text: each definition under its docstring (a submodel as `@rkppl
+  name(args...) = begin … end`, a numerical graph as `ReactiveKernels.@kernel`),
+  then the model as `@rkppl begin … end` with each authored docstring above its
+  statement. `part = :main` returns the main block's statements alone and
+  `part = :definitions` the definitions alone. The text has four columns per
+  level, no `Core.@doc` call and no line marker, writes a conditional value as
+  `a ? b : c` and a sum of several terms as `a .+ b .+ c`. It replaces printing
+  the internal `_rk_emit_ast(rk.plan)` by hand. The emitted program itself is
+  unchanged, so fitted states and checkpoints are not affected.
+
 ## 0.2.428
 
 - A fitted `RKBRMI`'s per-design entry points compile once per process for
