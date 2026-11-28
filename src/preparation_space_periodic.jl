@@ -22,6 +22,9 @@ function _brm_prepare_space_periodic_term(term::ExprColumn{typeof(hsgp)},
     haskey(kw, :domain) || error(
         "hsgp: spatial × periodic `hsgp(...; periodic=...)` needs the " *
         "spatial `domain=` to fix its basis box")
+    haskey(kw, :k) || error(
+        "hsgp: spatial × periodic `hsgp(...; periodic=...)` needs `k=` " *
+        "for each spatial axis and the periodic axis")
     n_space = n_axes - 1
     K = _brm_axis_option(:hsgp, :k, get(kw, :k, 20), n_axes,
         x -> x isa Integer && !(x isa Bool) && x >= 1, "positive integers")

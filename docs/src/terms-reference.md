@@ -47,6 +47,7 @@ Main.BRMTermsReference.table(:columns)
 | `hsgp(x...; k=20, c=1.5, iso=true)` | Hilbert basis with `prod(k)` weights; approximate squared-exponential covariance | `sd`, `length_scale` |
 | `gp(x; cov=:periodic, period, jitter=1e-9)` | Exact one-axis periodic covariance | `sd`, `length_scale` |
 | `hsgp(x; k=20, cov=:periodic, period)` | `k` harmonics, `2k` sine/cosine weights; excludes the constant | `sd`, `length_scale` |
+| `hsgp(east, north, month; periodic=:month, period=12, k=(8,12,3), domain=box, at=cell_pos)` | Separable spatial squared-exponential × periodic-season basis; `2prod(k)` weights | Default priors only |
 
 `s` and `t2` work on Stan and RK. Stan accepts explicit smoothing-SD
 priors `Exponential(scale)`; RK currently keeps the default half-standard
@@ -72,10 +73,24 @@ observations does not change the centring measure or duplicate basis work.
 after the `at=` lookup if present. This spells a numeric varying-coefficient
 smooth while keeping the basis and its centring on the field's own rows.
 
+For a spatial field that changes through a repeating season, put the periodic
+axis last and name it with `periodic=`. The spatial coordinates live on the
+distinct location table; the periodic coordinate and `at=` position live on
+observation rows. The spatial basis is evaluated and optionally centered once
+per location, then combined with the small Fourier basis on observations.
+The term has one shared spatial length scale and one periodic length scale;
+`period` is in the periodic coordinate's units. It needs a fixed spatial
+`domain=`, an explicit basis size `k=`, and `iso=true`. Its seasonal Fourier
+basis excludes the constant,
+so this is a spatial × season interaction with a different prior from two
+handwritten first-harmonic spatial fields. Both length scales and the field SD
+currently use default lognormal priors; addressed prior overrides and
+hyper-predictors are not available for this term.
+
 For a periodic kernel the covariance is
 ``\sigma^2\exp[-2\sin^2(\pi(x-x')/p)/\rho^2]``. Its length is in dimensionless
-chord units. Periodic HSGP rejects `c`, `domain`, `by`, anisotropy, latent
-inputs and orthogonalization. Exact periodic replay evaluates the kernel
+chord units. A single-axis periodic HSGP rejects `c`, `domain`, `by`,
+anisotropy, latent inputs and orthogonalization. Exact periodic replay evaluates the kernel
 at the new coordinates.
 
 ```@eval

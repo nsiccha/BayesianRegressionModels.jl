@@ -17182,6 +17182,8 @@ function _sb_hsgp_space_periodic_term!(stmts, data, t, term_overrides, target;
                                        scope::Symbol=:population)
     kw = getkwargs(t)
     args = getargs(t)
+    haskey(kw, :k) || error(
+        "sbimpl: spatial × periodic HSGP needs `k=` for each axis")
     names, _, raw = _sb_hsgp_raw_axes(args)
     length(names) >= 2 || error("sbimpl: `periodic=` needs spatial and periodic axes")
     last(names) === kw.periodic || error(

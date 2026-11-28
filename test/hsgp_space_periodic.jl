@@ -61,4 +61,12 @@ end
     @test size(sb.data[:PHI_period_hsgp_east_north_month]) == (7, 4)
     @test StanBlocks.stanc_check(StanBlocks.stan_code(sb.model);
         warn_pedantic=false).ok
+    replay_data = merge(data, (; month=data.month .+ 0.5,
+        cell_pos=reverse(data.cell_pos)))
+    replay = reprocess(sb, replay_data)
+    @test replay.data[:PHI_space_hsgp_east_north_month] ==
+        sb.data[:PHI_space_hsgp_east_north_month]
+    @test replay.data[:PHI_period_hsgp_east_north_month] !=
+        sb.data[:PHI_period_hsgp_east_north_month]
+    @test replay.data[:cell_pos] == replay_data.cell_pos
 end
