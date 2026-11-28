@@ -2792,6 +2792,15 @@ innovations at fixed fitted parameters. Fresh prior omission remains a separate
 control. Run `julia --startup-file=no --project=test test/ar1_forecast.jl`;
 it accepts `shared`, `varying` or `stepped` testset filters.
 
+`ar1_normal_cost.jl` checks that one RKBRMI log-density value of a per-group
+recurrence allocates in proportion to the rows: `AR1Normal` with shared or
+row-varying arguments and with or without `time`, and the `@scan` written in
+the cell, each at 250, 500 and 1,000 rows per group. It compares allocated
+bytes, which do not depend on the host's load, and needs neither a Stan
+toolchain nor a derivative backend. Run
+`julia --startup-file=no --project=test test/ar1_normal_cost.jl`; it accepts
+its testset names as filters.
+
 `rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
 singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged
