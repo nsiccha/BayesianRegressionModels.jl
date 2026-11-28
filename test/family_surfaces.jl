@@ -734,7 +734,9 @@ end
     @test occursin("student_t(", code)
     @test occursin("beta_binomial(", code)
     @test occursin("bb_mean .* bb_precision", code)
-    @test occursin("(1 - bb_mean) .* bb_precision", code)
+    # The logit-linked mean's complement is read on the logit scale.
+    @test occursin("inv_logit((-logit_bb_mean)) .* bb_precision", code)
+    @test !occursin("(1 - bb_mean)", code)
     @test occursin("y_cat ~ categorical_logit(y_cat_categorical_logits);", code)
     @test occursin("categorical_logit_lpmf(", code)
     @test occursin("y_cat_categorical_logits", code)

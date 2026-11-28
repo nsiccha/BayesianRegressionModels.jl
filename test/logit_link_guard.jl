@@ -78,16 +78,19 @@ end
         logit(p) ~ 1 + x
         y ~ Bernoulli(p)
     end)(df))
+    # The sanctioned pairing applies the link once: the density reads the
+    # linear predictor (snag sbbrmi-logit-lin-2c4202f8), never `p` through a
+    # second logit.
     @test occursin("p = inv_logit(logit_p);", linked_prob)
-    @test occursin("y ~ bernoulli(p);", linked_prob)
-    @test !occursin("bernoulli_logit", linked_prob)
+    @test occursin("y ~ bernoulli_logit(logit_p);", linked_prob)
+    @test !occursin("bernoulli_logit(p)", linked_prob)
 
     linked_binom = link_code((@brm begin
         logit(p) ~ 1 + x
         count ~ Binomial(trials, p)
     end)(df))
-    @test occursin("count ~ binomial(trials, p);", linked_binom)
-    @test !occursin("binomial_logit", linked_binom)
+    @test occursin("count ~ binomial_logit(trials, logit_p);", linked_binom)
+    @test !occursin("binomial_logit(trials, p)", linked_binom)
 
     plain_logit = link_code((@brm begin
         eta ~ 1 + x
