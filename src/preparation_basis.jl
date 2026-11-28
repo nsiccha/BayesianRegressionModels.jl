@@ -75,9 +75,6 @@ function _brm_apply_spline(fit, x::AbstractVector{<:Real})
     Xnull, Zpen
 end
 
-_brm_spline_basis_tps(x::AbstractVector{<:Real}; k::Int=10) =
-    _brm_apply_spline(_brm_fit_spline(x; k), x)
-
 # Cubic regression spline margin used by `t2`. Knots follow R's default
 # quantile algorithm (type 7) over the sorted unique training values. `F` maps
 # knot values to the natural cubic spline's second derivatives, while `S` is

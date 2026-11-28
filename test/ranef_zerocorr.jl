@@ -168,7 +168,7 @@ const both_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3],
     plan = BayesianRegressionModels.generative_plan(sb)
     for b in blocks
         raw = BayesianRegressionModels.column_data(plan.parent, b.group)
-        levels = collect(BayesianRegressionModels._sb_fit_levels(raw))
+        levels = collect(BayesianRegressionModels._brm_fit_levels(raw))
         idx = plan.data[Symbol(b.group, :_idx)]
         @test all(indexin(raw, levels) .== idx)
     end

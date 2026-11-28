@@ -2731,7 +2731,7 @@ function _brm_hsgp_label_tail(t)
 end
 _brm_term_label(::typeof(hsgp), t) =
     Symbol(:hsgp_, _brm_hsgp_axes_suffix(t), _brm_hsgp_label_tail(t))
-_brm_term_label(f, t) = _sb_term_key(t)
+_brm_term_label(f, t) = _brm_prepared_term_key(t)
 _brm_term_label(f, t, _target) = _brm_term_label(f, t)
 _brm_term_label(::typeof(dar), t, target) =
     Symbol(:dar_, target, :_, name(_sb_named_inner(:dar, only(getargs(t)))))
@@ -2770,7 +2770,7 @@ function _brm_term_owner_labels(::typeof(hsgp), t, target)
     scoped === base ? (base,) : (scoped, base)
 end
 # The other structured terms are labelled by their formula spelling
-# (`_sb_term_key`), while their carriers follow the emitter's own naming:
+# (`_brm_prepared_term_key`), while their carriers follow the emitter's own naming:
 # `s`/`gp` disambiguate like `mo`/`hsgp` (`_sb_unique_structured_term_names`),
 # `t2` is always scoped to its predictor, and `me`/`interval_censored` are
 # named by their columns alone.
@@ -2821,7 +2821,7 @@ _brm_term_parameter_bindings(::typeof(mo1), _t) =
 function _brm_term_parameter_bindings(::typeof(hsgp), t)
     haskey(getkwargs(t), :periodic) &&
         return (; length_scale=:rho, sd=:sigma, basis_weights=:beta_raw)
-    rho = _sb_gp_iso(getkwargs(t), :hsgp) ? :rho_iso : :rho
+    rho = _brm_gp_iso(getkwargs(t), :hsgp) ? :rho_iso : :rho
     haskey(getkwargs(t), :by) && return (; length_scale=rho, sd=:sigma)
     n_basis = _brm_term_coordinate_count(hsgp, t, Val(:basis_weights), nothing)
     partial = any(!iszero, _brm_hsgp_centeredness(getkwargs(t), n_basis))
@@ -2885,7 +2885,7 @@ _brm_term_has_value(::typeof(gmrf)) = true
 function _brm_term_hyper_plans(plan, logical::Symbol, t)
     getf(t) === hsgp || return ()
     plans = _sb_collect_hyper_plans(plan.parent)
-    key = _sb_term_key(t)
+    key = _brm_prepared_term_key(t)
     Tuple(p for p in plans if p.lp === logical && p.term_key === key)
 end
 
@@ -2913,7 +2913,7 @@ function _brm_term_coordinate_entries(brmi, logical::Symbol)
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
     length(predictors) == 1 || return NamedTuple[]
     link = only(predictors).link_lhs_fn
-    target = _sb_lp_emitted_name(logical, link)
+    target = _brm_lp_emitted_name(logical, link)
     entries = NamedTuple[]
     # `occurrence` ranks the term among the predictor's terms of the same full
     # key in formula order (the address map keeps that order within a key), the
@@ -2921,7 +2921,7 @@ function _brm_term_coordinate_entries(brmi, logical::Symbol)
     entry(label, t) = (; term=label, value=t, link,
         occurrence=1 + count(e -> _brm_term_full_key(e.value) ===
                                   _brm_term_full_key(t), entries))
-    for terms in values(_sb_term_address_map(brmi, logical)), t in terms
+    for terms in values(_brm_term_address_map(brmi, logical)), t in terms
         push!(entries, entry(_brm_term_label(getf(t), t, target), t))
     end
     # `ar` has no configurable prior, so the prior address map omits it; its
@@ -2940,15 +2940,15 @@ _brm_term_coordinate_count(_f, _t, _parameter, output) =
     _brm_output_coordinate_count(output)
 _brm_term_coordinate_count(::typeof(hsgp), t, ::Val{:length_scale}, _output) =
     haskey(getkwargs(t), :periodic) ? 2 :
-    (_sb_gp_iso(getkwargs(t), :hsgp) ? 1 : length(getargs(t)))
+    (_brm_gp_iso(getkwargs(t), :hsgp) ? 1 : length(getargs(t)))
 _brm_term_coordinate_count(::typeof(hsgp), _t, ::Val{:sd}, _output) = 1
 function _brm_term_coordinate_count(::typeof(hsgp), t,
                                     ::Val{:basis_weights}, _output)
     kw = getkwargs(t)
-    K, _ = _sb_hsgp_options(kw, length(getargs(t)))
+    K, _ = _brm_hsgp_options(kw, length(getargs(t)))
     # The periodic basis carries a cosine AND a sine column per harmonic.
     haskey(kw, :periodic) && return 2 * prod(K)
-    _sb_gp_cov(kw, :hsgp) === :periodic ? 2 * only(K) : prod(K)
+    _brm_gp_cov(kw, :hsgp) === :periodic ? 2 * only(K) : prod(K)
 end
 
 """
@@ -3205,7 +3205,7 @@ function _brm_term_owner_output(d, logical::Symbol, entry)
     length(owners) == 1 || error(
         "brm_descriptor: term `$(entry.term)` on logical predictor `$logical` has " *
         "$(length(owners)) logical output owners across emitted candidates " *
-        "$(_brm_term_owner_labels(getf(entry.value), entry.value, _sb_lp_emitted_name(logical, entry.link))); " *
+        "$(_brm_term_owner_labels(getf(entry.value), entry.value, _brm_lp_emitted_name(logical, entry.link))); " *
         "expected exactly one.")
     only(owners)
 end
@@ -3213,7 +3213,7 @@ end
 # Every output that can own the term: none when the term emitted nothing (a
 # single-level `mo1(c)`), several only for an ambiguous trace.
 function _brm_term_owners(d, logical::Symbol, entry)
-    emitted_lp = _sb_lp_emitted_name(logical, entry.link)
+    emitted_lp = _brm_lp_emitted_name(logical, entry.link)
     # Repeated axes can belong to distinct qualified terms. The emitter
     # records the exact source key beside the carrier it actually chose, and
     # which occurrence of that key it carries (`_sb_record_term_binding!`): the
@@ -3251,7 +3251,7 @@ end
 # one the emitter recorded for this occurrence of the term, as in
 # `_brm_term_owners`.
 function _brm_term_call_keyword(plan, logical::Symbol, entry, key::Symbol)
-    emitted_lp = _sb_lp_emitted_name(logical, entry.link)
+    emitted_lp = _brm_lp_emitted_name(logical, entry.link)
     term_key = _brm_term_full_key(entry.value)
     carriers = Set(k for (k, b) in plan.bindings if
         get(b, :term_predictor, nothing) === emitted_lp &&
@@ -3459,7 +3459,7 @@ function _brm_categorical_effect_entries(plan::GenerativePlan, logical::Symbol,
     op = linear_predictor_op(plan.parent, logical)
     isnothing(op) && return NamedTuple[]
     _, rhs = getargs(op, 2)
-    emitted_lp = _sb_lp_emitted_name(logical, link)
+    emitted_lp = _brm_lp_emitted_name(logical, link)
     # The same first-match rule the emitter applies (`_sb_linear_predictor!`).
     cellmeans_block = _brm_predictor_cellmeans_block(plan.parent, logical)
     entries = NamedTuple[]

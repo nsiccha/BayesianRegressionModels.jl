@@ -246,7 +246,7 @@ function hsgp_boundary_check(d::BRMDescriptor, draws::AbstractMatrix, names;
     length(getargs(t)) == 1 || error(
         "HSGP boundary check: term `$term` spans " *
         "$(length(getargs(t))) axes; v1 covers one-dimensional terms only")
-    _sb_gp_iso(kw, :hsgp) || error(
+    _brm_gp_iso(kw, :hsgp) || error(
         "HSGP boundary check: term `$term` is anisotropic; v1 covers " *
         "isotropic terms only")
     for a in getargs(t)

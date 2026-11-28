@@ -4262,7 +4262,7 @@ function _rk_ranef_dummies!(margins::Vector{_RKRanefMargin}, target::Symbol,
     eltype(raw) === Bool && error(
         "$prefix: $what slope `$source` is a Bool column; the draws " *
         "regime needs integer codes (recodify true/false as 1/0)")
-    fitted = collect(_sb_fit_levels(raw))
+    fitted = collect(_brm_fit_levels(raw))
     first_level == 2 && length(fitted) < 2 && error(
         "$prefix: $what slope `$source` has a single observed level, so " *
         "a treatment contrast is empty (SB drops such slopes silently; " *

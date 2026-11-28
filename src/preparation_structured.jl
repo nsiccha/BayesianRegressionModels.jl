@@ -1,5 +1,7 @@
 # Backend-neutral normalization and group resolution for structured term fields.
 
+# Normalize a term's declaration (legacy single-block NT or general `fields` NT)
+# into a uniform Vector of field specs, or `nothing` if the term declares none.
 _brm_structured_fields(::Nothing, _f) = nothing
 function _brm_structured_fields(decl::NamedTuple, f)
     haskey(decl, :fields) && return decl.fields
@@ -30,6 +32,11 @@ function _brm_structured_group_column(gspec, term, data; prefix="BRM")
     args[pos]
 end
 
+# The grouping column's name, without materialising data. Used to build the
+# disambiguating block name (`b_<field>_<gname>`) in both the emit pass and the
+# find pass so they agree on the per-instance block. For a `group_fn` spec this
+# is `fn_name` by construction (the synthesised column is named `fn_name`), so
+# no data is needed here; only `_brm_structured_group_column` reads it.
 _brm_structured_group_name(gspec, term) =
     haskey(gspec, :fn) ? gspec.fn_name :
     haskey(gspec, :kwarg) ? name(getkwargs(term)[gspec.kwarg]) :

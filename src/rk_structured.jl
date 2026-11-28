@@ -7,40 +7,6 @@ function brm_structured_effect(block, prepared_inputs, field_index)
     _brm_native_structured_effect(prepared, block, prepared.state.fields[field_index])
 end
 
-# The statistical reader applies each group's weights to the same fitted
-# Hilbert basis. Shared hypers remain scalars; authored hyper predictors are
-# vectors with one value per declared group, and rho floors act per group.
-function brm_hsgp_grouped(PHI, omega2, z, group_index, rho, sigma)
-    values = similar(z, size(PHI,1))
-    if rho isa Number && sigma isa Number
-        spectrum = brm_hsgp_sqrt_spd(omega2, sigma, rho)
-        for i in axes(PHI,1)
-            value = zero(eltype(z))
-            for j in axes(PHI,2)
-                value += PHI[i,j] * z[group_index[i],j] * spectrum[j]
-            end
-            values[i] = value
-        end
-        return values
-    end
-    spectra = similar(z)
-    for g in axes(z,1)
-        spectrum = brm_hsgp_sqrt_spd(omega2,
-            sigma isa Number ? sigma : sigma[g], rho isa Number ? rho : rho[g])
-        for j in axes(z,2)
-            spectra[g,j] = spectrum[j]
-        end
-    end
-    for i in axes(PHI,1)
-        value = zero(eltype(z))
-        for j in axes(PHI,2)
-            value += PHI[i,j] * z[group_index[i],j] * spectra[group_index[i],j]
-        end
-        values[i] = value
-    end
-    values
-end
-
 # The authored prior of one HSGP hyperparameter, in the original statement
 # order: a shared scale's positive law, or a stated hyper-intercept law.
 function _rk_ast_hsgp_hyper_prior(options, hyper, bindings, taken)

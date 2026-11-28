@@ -53,7 +53,7 @@ function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any
     end
     preproc = pop!(data, _SB_PREPROC_KEY)
     emission = pop!(data, _SB_BINDINGS_KEY)
-    predictors = Tuple((; logical=lp.name, emitted=_sb_lp_emitted_name(lp.name, lp.link_lhs_fn),
+    predictors = Tuple((; logical=lp.name, emitted=_brm_lp_emitted_name(lp.name, lp.link_lhs_fn),
         link=lp.link_lhs_fn) for lp in linear_predictors(model) if lp.name in program.targets)
     (; data, preproc, statements, bindings=emission, predictors, declaration_constants)
 end
@@ -250,7 +250,7 @@ function _sb_replay_cell_formulas!(data, preproc, handled, key, entry, df, freez
                 row = findfirst(isequal(labels[i]), current_labels)
                 row === nothing && throw(ArgumentError(
                     "cell formula replay needs the per-cell input `$source` for fitted cell $(labels[i])"))
-                raw[param] = _sb_df_column(df, source)[row]
+                raw[param] = _brm_df_column(df, source)[row]
             end
         end
         new_data, new_preproc, cell_handled = Dict{Symbol,Any}(), Dict{Symbol,PreprocEntry}(), Set{Symbol}()

@@ -1463,7 +1463,7 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                     out, descriptor, plan, unc_names, logical, entry, kw)
                 continue
             end
-            covariance = _sb_gp_cov(kw, :hsgp)
+            covariance = _brm_gp_cov(kw, :hsgp)
             if covariance === :periodic
                 _adaptive_periodic_hsgp_block!(
                     out, descriptor, plan, unc_names, logical, entry, kw)
@@ -1672,7 +1672,7 @@ end
 # resolves to that predictor's block.
 function _adaptive_grouped_hsgp_weights(brmi, logical, entry)
     base = _sb_group_block_base(
-        only(_sb_structured_fields(_sb_term_group_block(hsgp, entry.value), hsgp)),
+        only(_brm_structured_fields(_sb_term_group_block(hsgp, entry.value), hsgp)),
         entry.value)
     suffixes = unique(gb.suffix for gb in
                       _sb_group_block_plan(_sb_collect_group_block_terms(brmi))
@@ -1698,7 +1698,7 @@ function _adaptive_grouped_hsgp_blocks!(
     # A term whose levels are correlated or scaled per level is mapped across
     # its levels (`_adaptive_hsgp_level_centering_blocks`), not here.
     _adaptive_hsgp_level_mapped(plan, logical, entry, kw) && return out
-    K, _ = _sb_hsgp_options(kw, length(getargs(entry.value)))
+    K, _ = _brm_hsgp_options(kw, length(getargs(entry.value)))
     B = prod(K)
     gname = name(kw[:by])
     n_key = Symbol(:n_, gname)
@@ -1859,7 +1859,7 @@ function _adaptive_hsgp_level_centering_blocks(model, unc_names)
             getf(entry.value) === hsgp || continue
             _adaptive_term_generated(hsgp, descriptor, logical, entry) && continue
             kw = getkwargs(entry.value)
-            _sb_gp_cov(kw, :hsgp) === :exp_quad || continue
+            _brm_gp_cov(kw, :hsgp) === :exp_quad || continue
             _adaptive_hsgp_level_mapped(plan, logical, entry, kw) || continue
             push!(out, _adaptive_hsgp_level_block(
                 descriptor, plan, pos, unc_names, logical, entry, kw))
@@ -1878,7 +1878,7 @@ end
 function _adaptive_hsgp_level_block(descriptor, plan, pos, unc_names, logical,
                                     entry, kw)
     what = "BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor `$logical`"
-    K, _ = _sb_hsgp_options(kw, length(getargs(entry.value)))
+    K, _ = _brm_hsgp_options(kw, length(getargs(entry.value)))
     B = prod(K)
     gname = name(kw[:by])
     G = get(plan.data, Symbol(:n_, gname), nothing)

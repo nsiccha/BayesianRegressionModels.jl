@@ -431,7 +431,7 @@ function _ranef_levels_equal(levels, recorded)
     isequal(collect(levels), collect(recorded))
 end
 _ranef_labels_recorded(col::AbstractVector, recorded) =
-    all(in(Set{Any}(recorded)), _sb_group_values(col))
+    all(in(Set{Any}(recorded)), _brm_group_values(col))
 _ranef_labels_recorded(::Any, ::Any) = false
 
 # Formula-level grouping evidence, consulted ONLY for genuine ties (coexisting
@@ -472,7 +472,7 @@ end
 function _ranef_matches_index(col::AbstractVector, idx_val::AbstractVector, levels)
     length(col) == length(idx_val) || return false
     code = Dict{Any,Int}(level => i for (i, level) in enumerate(levels))
-    values = _sb_group_values(col)
+    values = _brm_group_values(col)
     all(i -> get(code, values[i], 0) == idx_val[i], eachindex(values, idx_val))
 end
 _ranef_matches_index(::Any, ::Any, ::Any) = false
@@ -492,7 +492,7 @@ function _ranef_raw_group(group::Symbol, brmi, idx_val, recorded_levels)
     # concrete index's column carries some or all of its recorded labels.
     concrete = !(idx_val isa StanBlocks.StanExpr)
     carries(col) = concrete ? _ranef_labels_recorded(col, rec) :
-        col isa AbstractVector && _ranef_levels_equal(_sb_fit_levels(col), rec)
+        col isa AbstractVector && _ranef_levels_equal(_brm_fit_levels(col), rec)
     base_ok = carries(base_col)
     literal_ok = carries(literal_col)
     # Initialized up front so no branch-analysis slip can leave the
@@ -527,8 +527,8 @@ function _ranef_raw_group(group::Symbol, brmi, idx_val, recorded_levels)
             # A frozen replay keeps the training columns while its index codes
             # the replay rows, so no column can reproduce it: the column whose
             # labels are exactly the recorded ones is the coded one.
-            base_eq = _ranef_levels_equal(_sb_fit_levels(base_col), rec)
-            literal_eq = _ranef_levels_equal(_sb_fit_levels(literal_col), rec)
+            base_eq = _ranef_levels_equal(_brm_fit_levels(base_col), rec)
+            literal_eq = _ranef_levels_equal(_brm_fit_levels(literal_col), rec)
             base_eq && !literal_eq && return base
             literal_eq && !base_eq && return group
             reason = "neither candidate's coding reproduces the emitted index"
@@ -669,7 +669,7 @@ function _ranef_blocks(plan, stan)
             isnothing(raw) && error(
                 "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is ",
                 "neither a data column nor a data-only assignment of this model.")
-            levels = collect(isnothing(recorded) ? _sb_fit_levels(raw) : recorded.levels)
+            levels = collect(isnothing(recorded) ? _brm_fit_levels(raw) : recorded.levels)
             if idx_val isa StanBlocks.StanExpr
                 # RESAMPLE target: `resample_groups` marked this factor's index
                 # with `maybecv(...)`, so it is a Stan-side expression (not a data
@@ -1936,11 +1936,11 @@ function _hsgp_population_curve_term(d::BRMDescriptor, predictor::Symbol,
     haskey(kw, :by) && error(
         "BRM prediction: grouped HSGP term `$term` has no single population " *
         "curve; `hsgp_population_curve` excludes subject/group effects.")
-    _sb_gp_iso(kw, :hsgp) || error(
+    _brm_gp_iso(kw, :hsgp) || error(
         "BRM prediction: model-derived HSGP term `$term` must be isotropic.")
 
-    K, _ = _sb_hsgp_options(kw, 1)
-    fits = _sb_hsgp_domain_fits(kw, 1; required=true)
+    K, _ = _brm_hsgp_options(kw, 1)
+    fits = _brm_hsgp_domain_fits(kw, 1; required=true)
     (; value, K=only(K), fit=only(fits))
 end
 
@@ -2068,7 +2068,7 @@ function hsgp_population_curve(d::BRMDescriptor, draws::AbstractMatrix,
         "BRM prediction: term `$term` exposes $(length(weight_coordinates)) " *
         "basis weights but its fitted formula requires $(spec.K).")
 
-    PHI_grid_raw, omega = _sb_apply_hsgp(
+    PHI_grid_raw, omega = _brm_apply_hsgp(
         (spec.fit,), (grid_values,), (spec.K,))
     n_draws, n_grid = size(draws, 1), length(grid_values)
     linear = Matrix{Float64}(undef, n_draws, n_grid)
@@ -2079,7 +2079,7 @@ function hsgp_population_curve(d::BRMDescriptor, draws::AbstractMatrix,
         all(isfinite, x_train) || error(
             "BRM prediction: model-derived HSGP axis `$coefficient` contains " *
             "a non-finite value in constrained draw $draw.")
-        PHI_train_raw, _ = _sb_apply_hsgp(
+        PHI_train_raw, _ = _brm_apply_hsgp(
             (spec.fit,), (x_train,), (spec.K,))
         PHI = _hsgp_population_curve_basis(
             PHI_grid_raw, grid_values, PHI_train_raw, x_train)

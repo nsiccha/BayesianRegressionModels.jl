@@ -49,7 +49,7 @@ function _grouped_hsgp_blocks(plan, stan)
         push!(seen, suffix)
         block = Symbol(:b_, suffix)
         weights = Symbol(:zflat_, suffix)
-        group = _sb_group_name(field.group, rhs_e)
+        group = _brm_structured_group_name(field.group, rhs_e)
         kind = get(kinds, weights, nothing)
         kind in (:parameter, :generated_quantity) || error(
             "BRM prediction: grouped HSGP weights `$weights` have descriptor kind ",
@@ -105,10 +105,8 @@ function _grouped_hsgp_levels(plan, brmi, group::Symbol)
     isnothing(raw) && error(
         "BRM prediction: grouped HSGP grouping `$group` is neither a data column ",
         "nor a data-only assignment.")
-    collect(_sb_fit_levels(raw))
+    collect(_brm_fit_levels(raw))
 end
-
-_grouped_hsgp_matches(b, group::Symbol) = b.group === group
 
 # The weights' coordinates by Stan name: an `n_rows × n_basis` matrix of
 # positions into `unc_names` (`n_rows` the levels, or the inducing grid).

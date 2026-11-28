@@ -93,27 +93,27 @@ end
     end
 
     @testset "cubic marginal and tensor geometry" begin
-        margin = BayesianRegressionModels._sb_fit_cr_spline(df.x; k=5)
-        cardinal = BayesianRegressionModels._sb_cr_basis(
+        margin = BayesianRegressionModels._brm_fit_cr_spline(df.x; k=5)
+        cardinal = BayesianRegressionModels._brm_cr_basis(
             margin.knots, margin.F, margin.knots)
         @test cardinal ≈ Matrix{Float64}(I, 5, 5) atol=1e-12
 
-        _, penalty = BayesianRegressionModels._sb_cr_second_derivative_map(margin.knots)
+        _, penalty = BayesianRegressionModels._brm_cr_second_derivative_map(margin.knots)
         @test transpose(margin.range_projection) * penalty * margin.range_projection ≈
               Matrix{Float64}(I, 3, 3) atol=1e-10
-        Xnull, Zpen = BayesianRegressionModels._sb_apply_cr_spline(margin, df.x)
+        Xnull, Zpen = BayesianRegressionModels._brm_apply_cr_spline(margin, df.x)
         @test rank(hcat(Xnull, Zpen)) == 5
 
-        fit = BayesianRegressionModels._sb_fit_t2(df.x, df.z)
-        blocks = BayesianRegressionModels._sb_apply_t2(fit, df.x, df.z)
+        fit = BayesianRegressionModels._brm_fit_t2(df.x, df.z)
+        blocks = BayesianRegressionModels._brm_apply_t2(fit, df.x, df.z)
         @test size.(blocks) == ((T2_TERM_N, 3), (T2_TERM_N, 9),
                                (T2_TERM_N, 6), (T2_TERM_N, 6))
         @test maximum(abs, vec(sum(blocks[1]; dims=1))) < 1e-10
 
         affine = t2_term_df(; x_shift=11.0, x_scale=7.0,
                             z_shift=-3.0, z_scale=2.5)
-        affine_fit = BayesianRegressionModels._sb_fit_t2(affine.x, affine.z)
-        affine_blocks = BayesianRegressionModels._sb_apply_t2(
+        affine_fit = BayesianRegressionModels._brm_fit_t2(affine.x, affine.z)
+        affine_blocks = BayesianRegressionModels._brm_apply_t2(
             affine_fit, affine.x, affine.z)
         @test all(isapprox.(blocks, affine_blocks; atol=1e-10, rtol=1e-10))
     end

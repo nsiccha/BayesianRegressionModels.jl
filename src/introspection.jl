@@ -760,7 +760,6 @@ function _walk_pred_leaf(x::MultiMembershipTerm)
     nothing
 end
 _walk_pred_leaf(_) = nothing
-_walk_pred_label(x) = let leaf = _walk_pred_leaf(x); leaf === nothing ? nothing : name(leaf) end
 
 function _walk_predictors(summands)
     intercept = Ref(false)

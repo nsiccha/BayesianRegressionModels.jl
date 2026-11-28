@@ -1320,7 +1320,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         e -> getf(e.value) === gmrf && _brm_transport_gmrf_axes(e.value) == record.axes,
         "`gmrf$(record.axes)`")
     base = (; kind=:gmrf, predictor=record.predictor, term=entry.term)
-    target = _sb_lp_emitted_name(record.predictor, entry.link)
+    target = _brm_lp_emitted_name(record.predictor, entry.link)
     prepared = only(e.const_.prepared for e in values(d.plan.preproc)
         if e.kind === :gmrf && e.const_.prepared.state.target === target &&
             e.const_.prepared.source == record.axes)
@@ -1375,7 +1375,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         e -> getf(e.value) === gmrf && _brm_transport_gmrf_axes(e.value) == record.axes,
         "`gmrf$(record.axes)`")
     base = (; kind=:gmrf_footprint, predictor=record.predictor, term=entry.term)
-    target = _sb_lp_emitted_name(record.predictor, entry.link)
+    target = _brm_lp_emitted_name(record.predictor, entry.link)
     prepared = only(e.const_.prepared for e in values(d.plan.preproc)
         if e.kind === :gmrf && e.const_.prepared.state.target === target &&
             e.const_.prepared.source == record.axes)
@@ -2953,7 +2953,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         e -> getf(e.value) === gmrf && _brm_transport_gmrf_axes(e.value) == record.axes,
         "`gmrf$(record.axes)`")
     base = (; kind=:gmrf_multiresolution, predictor=record.predictor, term=entry.term)
-    target = _sb_lp_emitted_name(record.predictor, entry.link)
+    target = _brm_lp_emitted_name(record.predictor, entry.link)
     prepared = only(e.const_.prepared for e in values(d.plan.preproc)
         if e.kind === :gmrf && e.const_.prepared.state.target === target &&
             e.const_.prepared.source == record.axes)

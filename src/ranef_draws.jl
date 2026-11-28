@@ -218,7 +218,7 @@ end
 function _brm_ranef_strata(d, block::RanefBlock, caller)
     S, stratum = _ranef_stratum_index(d.plan, block, caller)
     # The emitter's own coding of the `by` column (`_sb_ensure_group_data!`).
-    strata = collect(_sb_fit_levels(column_data(d.plan.parent, block.by)))
+    strata = collect(_brm_fit_levels(column_data(d.plan.parent, block.by)))
     length(strata) == S || error(
         "$caller: `by` column `$(block.by)` of block `$(block.binding)` ",
         "has $(length(strata)) training levels but the block was emitted with ",
