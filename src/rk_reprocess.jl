@@ -123,7 +123,7 @@ end
 # Once per design. Neither this nor the helpers below specialize on the fit or
 # its model, whose types spell the model's columns, so a process compiles them
 # once for every model (snag `brm-methods-spec-39436695`).
-Base.@nospecializeinfer function _rk_frozen_reprocess(@nospecialize(rk), @nospecialize(new_data);
+Base.@nospecializeinfer function _rk_frozen_reprocess(@nospecialize(rk::RKBRMI), @nospecialize(new_data);
         @nospecialize(held_out), @nospecialize(resample_groups), @nospecialize(covariates),
         @nospecialize(car_units), prefix, @nospecialize(prior_responses=nothing))
     _rk_refuse_level_correlated_resample(parent(rk),
@@ -676,7 +676,7 @@ end
 # change; where the program reads it by name, `_rk_check_replay_priors` does.
 Base.@nospecializeinfer _rk_scalar_data(@nospecialize(brmi::BRMI)) = Dict{Symbol,Any}(name => deepcopy(value)
     for (name, value) in _rk_training_columns(brmi) if value isa Real)
-Base.@nospecializeinfer _rk_replay_scalars(@nospecialize(rk)) = merge(_rk_scalar_data(parent(rk)),
+Base.@nospecializeinfer _rk_replay_scalars(@nospecialize(rk::RKBRMI)) = merge(_rk_scalar_data(parent(rk)),
     _rk_prior_arrays(rk.plan, _rk_training_columns(parent(rk))))
 Base.@nospecializeinfer function _rk_omitted_scalars(scalars, @nospecialize(new_data))
     omitted = Dict{Symbol,Any}()

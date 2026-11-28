@@ -97,7 +97,9 @@ end
 Base.@nospecializeinfer _rk_fitted_scalars(@nospecialize(rk::RKBRMI)) = rk.fitted === nothing ?
     _rk_replay_scalars(rk) : deepcopy(rk.fitted.state.scalars)
 
-function _rk_fitted_column_types(rk::RKBRMI)
+# The export below compiles once for every model too: a state exported in the
+# process that opens it must not have compiled the open's per-model methods.
+Base.@nospecializeinfer function _rk_fitted_column_types(@nospecialize(rk::RKBRMI))
     columns = rk.fitted === nothing ? Dict{Symbol,Any}() : copy(rk.fitted.state.columns)
     for (name, value) in _rk_training_columns(parent(rk))
         columns[name] = value isa AbstractArray ? eltype(value) : typeof(value)
@@ -107,7 +109,7 @@ end
 
 # Select graph summaries without rerunning the planner's fit collection.
 # A data-free backend already binds those summaries from its fitted record.
-function _rk_fitted_value_names(rk::RKBRMI; prefix)
+Base.@nospecializeinfer function _rk_fitted_value_names(@nospecialize(rk::RKBRMI); prefix)
     _rk_design_checked(rk.plan) || error(
         "$prefix: a $(nameof(typeof(rk.plan))) program has no fitted-state export")
     for predictor in _rk_replay_predictors(rk.plan), term in predictor.terms
@@ -192,7 +194,7 @@ end
 
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).
-function _rk_recorded_fits(rk::RKBRMI)
+Base.@nospecializeinfer function _rk_recorded_fits(@nospecialize(rk::RKBRMI))
     record = Dict{Tuple{Symbol,Symbol},Any}()
     # Re-exporting a data-free replay preserves its original fitted geometry
     # and priors, without evaluating constants on missing training inputs.
@@ -206,14 +208,12 @@ function _rk_recorded_fits(rk::RKBRMI)
     end
     training = _rk_frozen_training(parent(rk))
     constants = _rk_fitted_constants(rk)
-    _brm_with_frozen_replay(_BRMFrozenReplay(training, Set{Symbol}(), nothing, record)) do
-        _brm_rk_plan(parent(rk); held_out=_rk_held_out_names(rk.plan),
-            fitted_constants=(name, _source) -> get(constants, name, nothing))
-    end
+    _brm_with_frozen_replay(_RKFrozenPlanning(parent(rk), _rk_held_out_names(rk.plan), nothing,
+        constants), _BRMFrozenReplay(training, Set{Symbol}(), nothing, record))
     record
 end
 
-function _rk_fitted_constants(rk::RKBRMI)
+Base.@nospecializeinfer function _rk_fitted_constants(@nospecialize(rk::RKBRMI))
     # A data-free replay's declaration holds its new rows. Its constants were
     # bound from the saved state, so evaluating that declaration would refit.
     rk.fitted === nothing || return deepcopy(rk.fitted.state.constants)

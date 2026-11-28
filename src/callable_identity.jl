@@ -84,5 +84,10 @@ _brm_stable_bindings(bindings::Vector{Pair{Symbol,Any}}) =
 # does not reproduce. What it computes is the bindings' part of an identity.
 _brm_stable_declaration(text::AbstractString) =
     replace(text, r"#[^\s()\[\],;.\"]*\d" => "#generated")
-_brm_declaration_text(x) =
-    _brm_stable_declaration(sprint(show, x; context=:brm_documentation => false))
+# `sprint(show, x; context)` written out: `sprint` compiles once per model's
+# type, this once for every model (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer function _brm_declaration_text(@nospecialize(x))
+    io = IOBuffer()
+    show(IOContext(io, :brm_documentation => false), x)
+    _brm_stable_declaration(String(take!(io)))
+end

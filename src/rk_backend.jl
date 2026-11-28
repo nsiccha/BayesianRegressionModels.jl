@@ -732,8 +732,10 @@ function Base.deepcopy_internal(rk::RKBRMI, stackdict::IdDict)
     stackdict[rk] = invoke(Base.deepcopy_internal, Tuple{Any,IdDict}, rk, stackdict)
 end
 
-Base.parent(x::RKBRMI) = x.parent
-brm_source(x::RKBRMI) = x.source
+# Plain `@nospecialize`: one compiled body for every model, while typed
+# callers still infer the field's type.
+Base.parent(@nospecialize(x::RKBRMI)) = x.parent
+brm_source(@nospecialize(x::RKBRMI)) = x.source
 structure_of(x::RKBRMI) = structure_of(parent(x))
 priors_of(x::RKBRMI) = priors_of(parent(x))
 

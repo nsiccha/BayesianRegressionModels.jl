@@ -602,7 +602,7 @@ end
 # change on the cached path: those a prior reads, and those the program binds no
 # input for (a literal, or an input of `constant(...)`). A later design holding
 # another value replays in full, and `reprocess` refuses it or plans it.
-Base.@nospecializeinfer function _rk_design_kept_scalars(@nospecialize(rk), @nospecialize(replay),
+Base.@nospecializeinfer function _rk_design_kept_scalars(@nospecialize(rk::RKBRMI), @nospecialize(replay::RKBRMI),
         @nospecialize(design), @nospecialize(columns))
     priors = _rk_prior_reads(_rk_retained_program(rk), _rk_response_names(replay.plan))
     kept = Pair{Symbol,Any}[]

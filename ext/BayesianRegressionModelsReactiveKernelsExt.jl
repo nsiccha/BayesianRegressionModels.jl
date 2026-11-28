@@ -504,7 +504,7 @@ Base.@nospecializeinfer BRM._rk_frozen_values(@nospecialize(backend::BRM.RKBRMI)
 # graph of `previous` (a data-free backend it replays) when its callables are
 # the same, as `reprocess` shares a fit's.
 Base.@nospecializeinfer function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram,
-        @nospecialize(plan), @nospecialize(frozen), @nospecialize(previous);
+        @nospecialize(plan), @nospecialize(frozen), @nospecialize(previous::Union{Nothing,BRM.RKBRMI});
         @nospecialize(declaration=emitted.main))
     revisions = _rk_child_revisions(emitted)
     if previous !== nothing && _rk_program(previous).child_revisions == revisions &&
