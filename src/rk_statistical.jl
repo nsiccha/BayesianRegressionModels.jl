@@ -539,10 +539,6 @@ end
 brm_ranef_column(draws, indices, margin) = draws[indices, margin]
 brm_dummy(values, level) = _rk_value_dummy(values, level)
 
-# A rectangular panel's ordinary Julia slice, preserving subject order.
-brm_panel_slice(column, timepoints, subject) =
-    column[((subject - 1) * timepoints + 1):(subject * timepoints)]
-
 # Per-subject cells concatenated in subject order with one allocation of their
 # total length. `reduce(vcat, cells; init=…)` would fold one pairwise `vcat`
 # per cell, reallocating the accumulator each time: quadratic in the number of
