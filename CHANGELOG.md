@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.433
+
+- The ReactiveKernels compat floor is 0.1.410. From it on, one RKBRMI value
+  and gradient of an `AR1Normal` plate cell cost memory and time in proportion
+  to the group's rows. The same holds for a `@scan` written in the cell that
+  reads `mu[p][t]`. ReactiveKernels up to 0.1.409 repeated each series' gathers
+  (`mu[p]`, `t[p]`, a shared argument filled to the series' length) at every
+  scan step, so the cost grew with the square of the rows. For example, one
+  value of `y[p] ~ AR1Normal(mu[p], sigma, phi; time = t[p])` with 2 series
+  allocated 12.6 / 49.9 / 195 MB at 250 / 500 / 1,000 rows per series. At
+  0.1.410 it allocates 72 / 141 / 276 KB, and one Enzyme gradient takes
+  111 / 217 / 424 KB and 72 / 150 / 270 µs. The fix leaves values and
+  gradients unchanged. `test/ar1_normal_cost.jl` checks that the bytes of one value
+  double with the rows, for `AR1Normal` with shared and row-varying arguments,
+  with and without `time`, and for the recurrence written in the cell.
+- The whole-model Laplace of such a cell is not changed by this. At
+  ReactiveKernels 0.1.407, every cell of a 4-series toy integrated all series'
+  states as one block, and memory per gradient grew about 7× per doubling of
+  the window: 0.45 / 3.1 / 23.6 GB at 2 / 4 / 8 weeks of hourly rows. Its
+  causes are reported to ReactiveKernels (snag `ar1normal-plate-a2960527`).
+
 ## 0.2.432
 
 - A keyed collection whose members return one value for some records and a
