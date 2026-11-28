@@ -109,7 +109,7 @@ const _RK_SOURCE_IMPORTS = (
         :brm_gp_covariance, :brm_gp_latent, :brm_fit_levels, :brm_joint_fit_levels,
         :brm_level_indices, :brm_dummy,
         :brm_t2_fit, :brm_tps_fit, :brm_tps_apply,
-        :brm_panel_slice, :brm_flatten_cells, :brm_invprobit, :brm_invcloglog,
+        :brm_flatten_cells, :brm_invprobit, :brm_invcloglog,
         :brm_ragged_rows, :brm_ragged_rows_ordered, :brm_ragged_rows_shared,
         :brm_walk_rows, :brm_rw2_transform, :brm_rw2_basis_path))
 

@@ -531,7 +531,5 @@ _rk_car_term_placeholders(plan) = Tuple(term.options.separation.terms
     for predictor in _rk_replay_predictors(plan) for term in predictor.terms
     if term.kind === :car && get(term.options, :separation, nothing) !== nothing &&
         term.options.separation.terms !== nothing)
-_rk_observed_names(plan::_RKKernelPlan) = (plan.kernel.data_columns[
-    findfirst(==(plan.kernel.obs_response), plan.kernel.slice_params)],)
 _rk_observed_names(plan::_RKHeldOutPlan) = Tuple(
     name for name in _rk_observed_names(plan.parent) if !(name in plan.held_out))

@@ -5180,107 +5180,54 @@ end
     @test !haskey(grouped.columns, :pred_subject_count)
 end
 
-@stestset "kernel(...) panel-mode structural extraction" begin
-    # Phase-1a: parse a ranef-free panel kernel cell into a `_RKKernelSpec`
-    # (params, per-subject data columns, subject count, cell assignments, the
-    # in-cell observation, collected result). See `11b8mr9`. `_brm_rk_plan` still
-    # fails closed on kernels (guard above); the extraction is tested directly.
-    kdf = (;
+@stestset "kernel(...) cells with counts, ragged panels and scalar inputs via _brm_rk_plan" begin
+    # A count family observed in the cell, per-subject vectors of unequal
+    # length, and cells over one scalar per subject each plan as an ordinary
+    # value plan and emit.
+    count_data = (;
         t=[[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]],
-        dose=[10.0, 20.0],
-        obs=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+        dose=[1.0, 2.0],
+        obs=[[0, 1, 3], [1, 2, 6]],
     )
-    brmi = @brm kdf begin
-        sigma ~ Exponential(1)
+    counts = BRM._brm_rk_plan(@brm count_data begin
         b0 ~ Normal(0, 1)
         pred ~ kernel(t, dose, obs) do ts, d, yy
-            mu = b0 .* d .* ts
-            yy ~ Normal(mu, sigma)
-            mu
-        end
-    end
-    ops = BRM._rk_kernel_ops(brmi)
-    @test length(ops) == 1
-    result, rhs = only(ops)
-    @test result === :pred
-    spec = BRM._rk_kernel_spec(brmi, result, rhs)
-    @test spec.result === :pred
-    @test spec.n_subjects == 2
-    @test spec.slice_params == [:ts, :d, :yy]
-    @test spec.data_columns == [:t, :dose, :obs]
-    @test [p.first for p in spec.assignments] == [:mu]
-    @test spec.obs_response === :yy
-    @test spec.collected === :mu
-    # per-slice kind (vector T-blocked vs scalar-per-subject) + T
-    @test spec.slice_kinds == [:vector, :scalar, :vector]  # t, dose, obs
-    @test spec.n_timepoints == 3
-
-    # The source states its axis, slices and collected arrays directly.
-    ast = BRM._rk_emit_kernel_ast(spec)
-    @test Meta.isexpr(ast, :block)
-    source = sprint(Base.show_unquoted, ast)
-    @test occursin("pred_subjects = 1:div(length(t), 3)", source)
-    @test occursin("@plate", source)
-    @test occursin("ts = brm_panel_slice(t, 3, brm_subject)", source)
-    @test occursin("d = dose[brm_subject]", source)
-    @test occursin("pred[brm_subject, 1:3] = mu", source)
-    @test occursin("vec(permutedims(pred_location))", source)
-    @test occursin("obs .~ Normal.(pred_location_flat, pred_scale_flat)", source)
-    @test !occursin("kernel_nsub_pred", source)
-    @test !occursin("kernel_T_pred", source)
-
-    # non-Gaussian in-cell family is a follow-up (fail closed)
-    poisson_brmi = @brm kdf begin
-        pred ~ kernel(t, dose, obs) do ts, d, yy
-            mu = d .* ts
+            mu = exp.(b0 .+ ts) .* d
             yy ~ Poisson(mu)
             mu
         end
-    end
-    presult, prhs = only(BRM._rk_kernel_ops(poisson_brmi))
-    pspec = BRM._rk_kernel_spec(poisson_brmi, presult, prhs)
-    @test_throws "only `Normal(location, scale)`" BRM._rk_emit_kernel_ast(pspec)
+    end)
+    @test counts isa BRM._RKValuePlan
+    @test only(counts.observations).distribution.callable === Poisson
+    @test BRM._rk_emit_ast(counts) isa BRM._RKEmittedProgram
 
-    # a linear-predictor (grouped) arg is out of panel mode
-    gbrmi = @brm df begin
-        sigma ~ Exponential(1)
-        log_slope ~ 1 + (1 | shared | g)
-        pred ~ kernel(x, log_slope) do xs, lslope
-            mu = exp(lslope) .* xs
-            yy = mu
-            mu
-        end
-        y ~ Normal(pred, sigma)
-    end
-    gresult, grhs = only(BRM._rk_kernel_ops(gbrmi))
-    @test_throws "per-subject data columns only" BRM._rk_kernel_spec(
-        gbrmi, gresult, grhs)
-
-    # varying per-subject vector length (ragged panel) fails closed until offsets
-    rdf = (; t=[[0.0, 1.0], [0.0, 1.0, 2.0]], obs=[[0.1, 0.2], [0.3, 0.4, 0.5]])
-    rbrmi = @brm rdf begin
+    ragged_data = (; t=[[0.0, 1.0], [0.0, 1.0, 2.0]], obs=[[0.1, 0.2], [0.3, 0.4, 0.5]])
+    ragged_cells = BRM._brm_rk_plan(@brm ragged_data begin
+        slope ~ Normal(0, 1)
         pred ~ kernel(t, obs) do ts, yy
-            mu = ts .* 2.0
+            mu = ts .* slope
             yy ~ Normal(mu, 1.0)
             mu
         end
-    end
-    rresult, rrhs = only(BRM._rk_kernel_ops(rbrmi))
-    @test_throws "varying timepoint counts" BRM._rk_kernel_spec(rbrmi, rresult, rrhs)
+    end)
+    @test ragged_cells isa BRM._RKValuePlan
+    @test ragged_cells.columns[:t] == ragged_data.t
+    @test isequal(ragged_cells.columns[:obs], ragged_data.obs)
+    @test BRM._rk_emit_ast(ragged_cells) isa BRM._RKEmittedProgram
 
-    # Scalar cells state the ordinary subject axis without a time axis.
-    scalar_brmi = @brm (; dose=[10.0, 20.0], obs=[0.1, 0.2]) begin
+    scalar_data = (; dose=[10.0, 20.0], obs=[0.1, 0.2])
+    scalar_cells = BRM._brm_rk_plan(@brm scalar_data begin
+        slope ~ Normal(0, 1)
         pred ~ kernel(dose, obs) do dd, yy
-            mu = dd .* 0.1
+            mu = dd .* slope
             yy ~ Normal(mu, 1.0)
             mu
         end
-    end
-    sresult, srhs = only(BRM._rk_kernel_ops(scalar_brmi))
-    scalar_spec = BRM._rk_kernel_spec(scalar_brmi, sresult, srhs)
-    scalar_source = sprint(Base.show_unquoted, BRM._rk_emit_kernel_ast(scalar_spec))
-    @test occursin("pred_subjects = 1:length(dose)", scalar_source)
-    @test occursin("pred[brm_subject] = mu", scalar_source)
+    end)
+    @test scalar_cells isa BRM._RKValuePlan
+    @test only(scalar_cells.observations).distribution.callable === Normal
+    @test length(scalar_cells.columns[:dose]) == 2
+    @test BRM._rk_emit_ast(scalar_cells) isa BRM._RKEmittedProgram
 end
 
 @stestset "mixture plan shapes" begin

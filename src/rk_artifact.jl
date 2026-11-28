@@ -30,7 +30,7 @@ rk_artifact_version() = 4
 # (`rk_translate_artifact`) consult. It currently equals the extension's
 # `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
 # can join the RK backend without silently becoming an artifact kind.
-const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan,_RKHeldOutPlan,_RKUnconditionedPlan}
+const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan,_RKUnconditionedPlan}
 
 """
     emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing, held_out=())
@@ -163,7 +163,7 @@ end
 """
     show_rk_plan(plan) -> String
 
-Compact multi-line dump of an RK structural or kernel plan (the Layer-2
+Compact multi-line dump of an RK plan (the Layer-2
 section body): one `key = value` line per plan component. Pure rendering;
 the worker splices it verbatim.
 """
@@ -196,19 +196,6 @@ function show_rk_plan(plan::_RKStructuralPlan)
     isempty(plan.vector_parameters) || push!(lines,
         "vectors     = [$(join((string(v.name) for v in plan.vector_parameters), ", "))]")
     return join(lines, "\n") * "\n"
-end
-
-function show_rk_plan(plan::_RKKernelPlan)
-    smps = ["($(p.name), $(p.family), $(_rk_show_args(p.args)))"
-        for p in plan.parameters]
-    as = ["($(a.name) = $(_rk_show_expr(a.expression)))" for a in plan.assignments]
-    cols = sort!(string.(collect(keys(plan.columns))))
-    return join([
-        "kernel      = $(plan.kernel.n_subjects)-subject plate",
-        "parameters  = [$(join(smps, ", "))]",
-        "assignments = [$(join(as, ", "))]",
-        "columns     = [$(join(cols, ", "))]",
-    ], "\n") * "\n"
 end
 
 function show_rk_plan(plan::_RKValuePlan)

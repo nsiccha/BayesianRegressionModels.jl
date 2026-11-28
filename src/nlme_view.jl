@@ -181,9 +181,8 @@ Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
     count(r -> r === :subject_scale || r === :subject_correlation, v.role),
     " Ω and ", count(==(:scalar), v.role), " scalar coordinates)")
 
-# The coordinate records this view reads. The old panel-only kernel plan has
-# no semantic inventory. Closure-style `kernel(...) do` cells instead use the
-# value plan, like `@plate for` cells.
+# The coordinate records this view reads. `kernel(...) do` and `@plate for`
+# cells are value plans.
 _brm_nlme_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
     _brm_nlme_component_blocks(plan, _rk_coordinate_records(plan))
 
@@ -284,9 +283,7 @@ end
 _brm_nlme_component_law(law, plan) = nothing
 _brm_nlme_records(plan) = _brm_nlme_error(
     "brm_nlme_view: an RK plan of kind `$(nameof(typeof(plan)))` has no " *
-    "semantic coordinate inventory, so its NLME partition cannot be read. " *
-    "The old panel-only `_RKKernelPlan` route is not covered; " *
-    "`kernel(...) do` and `@plate for` cells lower to value plans, which are.")
+    "semantic coordinate inventory, so its NLME partition cannot be read.")
 
 _brm_nlme_owned(name::Symbol, declaration::Symbol) = name === declaration ||
     startswith(String(name), string(declaration, "."))
