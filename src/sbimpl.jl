@@ -4080,6 +4080,30 @@ StanBlocks.@deffun begin
         return rv
     end
 
+    # Contract the spatial and Fourier bases without an observation-sized
+    # tensor-product basis. The raw weights are column-major: one spatial
+    # field for each Fourier column.
+    @stanonly brm_hsgp_space_periodic_rows(
+            PHI_space::matrix[n_locations, n_space_basis],
+            PHI_period::matrix[n_obs, n_period_basis],
+            at::int[n_obs], beta_raw::vector[n_space_basis * n_period_basis],
+            space_scale::vector[n_space_basis],
+            period_scale::vector[n_period_basis])::vector[n_obs] = begin
+        fields::matrix[n_locations, n_period_basis]
+        rv::vector[n_obs]
+        for j in 1:n_period_basis
+            weights = segment(beta_raw, (j - 1) * n_space_basis + 1, n_space_basis)
+            fields[:, j] = PHI_space * (space_scale .* weights)
+        end
+        for i in 1:n_obs
+            rv[i] = 0.
+            for j in 1:n_period_basis
+                rv[i] += fields[at[i], j] * PHI_period[i, j] * period_scale[j]
+            end
+        end
+        return rv
+    end
+
     # Per-group spectral weights for hyper-predictor models: row g is
     # `brm_hsgp_sqrt_spd` at group g's own (rho, sigma), a groups x basis
     # matrix that scales the level weights (`_sb_hsgp_by_hyper_model`). The
@@ -4219,6 +4243,23 @@ _sb_hsgp_periodic = StanBlocks.@slic begin
     beta_raw ~ std_normal(; n=n_basis)
     sqrt_spd = brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho_iso)
     return PHI * (sqrt_spd .* beta_raw)
+end
+
+# Separable spatial squared-exponential × periodic covariance. One spatial
+# length scale is shared across every harmonic field; the second controls the
+# periodic kernel. Each Fourier column owns spatial basis weights.
+_sb_hsgp_space_periodic = StanBlocks.@slic begin
+    n_space_basis = dims(omega2_space)[1]
+    n_period_basis = dims(harmonics)[1]
+    n_space_axes = dims(omega2_space)[2]
+    rho :: vector[2] ~ lognormal(0., 1.; lower=rho_lower)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_space_basis * n_period_basis)
+    rho_space = rep_vector(rho[1], n_space_axes)
+    space_scale = brm_hsgp_sqrt_spd(omega2_space, sigma, rho_space)
+    period_scale = brm_hsgp_periodic_sqrt_spd(harmonics, 1., rho[2])
+    return brm_hsgp_space_periodic_rows(
+        PHI_space, PHI_period, at, beta_raw, space_scale, period_scale)
 end
 
 # One-dimensional HSGP over a model-derived vector. Unlike `_sb_hsgp`, PHI is
@@ -7798,6 +7839,37 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :gp
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         replay_and_bind(axes, :primary => key)
+    elseif e.kind === :space_periodic_hsgp
+        c = e.const_
+        _sb_check_replay_settings(df, :hsgp, c.setting_fields)
+        D = length(e.raw_ref) - 1
+        spatial_axes = Tuple(collect(Float64, _sb_df_column(df, e.raw_ref[j]))
+            for j in 1:D)
+        n_locations = length(first(spatial_axes))
+        all(x -> length(x) == n_locations, spatial_axes) || error(
+            "sbimpl: reprocess: spatial HSGP axes must have equal lengths")
+        time = collect(Float64, _sb_df_column(df, last(e.raw_ref)))
+        at = _sb_df_column(df, c.at)
+        at isa AbstractVector{<:Integer} &&
+            all(i -> 1 <= i <= n_locations, at) &&
+            length(at) == length(time) || error(
+            "sbimpl: reprocess: `at=` must map each periodic row to a spatial row")
+        space = _brm_hsgp_basis_state(spatial_axes, c.K[1:end-1],
+            :exp_quad, true, nothing; fits=c.fits, orthogonal=c.orthogonal,
+            projection=freeze ? c.projection : nothing)
+        periodic = _brm_hsgp_basis_state((time,), (last(c.K),),
+            :periodic, true, c.period)
+        new_data[key] = space.PHI
+        new_data[c.keys.omega2_space] = space.omega2
+        new_data[c.keys.PHI_period] = periodic.PHI
+        new_data[c.keys.harmonics] = periodic.harmonics
+        new_data[c.keys.rho_lower] = Float64[space.rho_lower, periodic.rho_lower]
+        new_data[c.at] = collect(Int, at)
+        foreach(k -> push!(handled, k),
+            (c.keys.omega2_space, c.keys.PHI_period, c.keys.harmonics,
+             c.keys.rho_lower, c.at))
+        new_preproc[key] = PreprocEntry(:space_periodic_hsgp,
+            merge(c, (; projection=space.projection)), e.raw_ref, false)
     elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
         _sb_check_replay_settings(df, :hsgp, get(e.const_, :setting_fields, ()))
         replay_and_bind(_sb_hsgp_replay_input(df, e; allow_empty=true), :primary => key,
@@ -16863,6 +16935,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     end
     hyper_plans = _sb_hyper_plans_for(data, target, _sb_term_key(t))
     _check_term_kwargs(hsgp, kw)
+    haskey(kw, :periodic) &&
+        return _sb_hsgp_space_periodic_term!(
+            stmts, data, t, term_overrides, target; scope=term_scope)
     isempty(args) && error("sbimpl: `hsgp(x...)` expects at least one positional axis")
     names, backings, raw = _sb_hsgp_raw_axes(args)
     raw_flags = map(x -> !isnothing(x), raw)
@@ -17098,6 +17173,79 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                             omega2=omega2_name, rho_lower=rho_lower_name)
     push!(stmts, Expr(:call, :~, col_name, call))
     _sb_hsgp_gather!(stmts, col_name, at, multiply)
+end
+
+# A fixed spatial box and an observation-row periodic axis. The basis keys
+# remain separate so Stan receives O(locations × spatial modes + observations
+# × Fourier modes) data, not the full tensor basis on observations.
+function _sb_hsgp_space_periodic_term!(stmts, data, t, term_overrides, target;
+                                       scope::Symbol=:population)
+    kw = getkwargs(t)
+    args = getargs(t)
+    names, _, raw = _sb_hsgp_raw_axes(args)
+    length(names) >= 2 || error("sbimpl: `periodic=` needs spatial and periodic axes")
+    last(names) === kw.periodic || error(
+        "sbimpl: `periodic=` must name the last raw-data axis")
+    all(!isnothing, raw) || error(
+        "sbimpl: spatial × periodic HSGP axes must be raw data")
+    for key in (:by, :cor, :rows, :anchor, :extrapolate, :multiply)
+        haskey(kw, key) && error(
+            "sbimpl: spatial × periodic HSGP does not accept `$key=`")
+    end
+    _sb_gp_iso(kw, :hsgp) || error(
+        "sbimpl: spatial × periodic HSGP currently shares one spatial length scale; " *
+        "use `iso=true`")
+    isempty(_sb_hyper_plans_for(data, target, _sb_term_key(t))) || error(
+        "sbimpl: spatial × periodic HSGP does not accept hyper-predictors")
+    for key in (:length_scale, :sd)
+        isnothing(_sb_term_cfg(term_overrides, t, key)) || error(
+            "sbimpl: spatial × periodic HSGP does not yet accept an explicit `$key` prior")
+    end
+    K, _ = _sb_hsgp_options(kw, length(names))
+    n_space_axes = length(names) - 1
+    fits = _sb_hsgp_domain_fits(kw, n_space_axes; required=true)
+    orthogonal = _sb_hsgp_orthogonal_to(kw, n_space_axes)
+    orthogonal === :linear && error(
+        "sbimpl: spatial × periodic HSGP supports `orthogonal_to=:intercept`")
+    period = _sb_gp_period(kw, :hsgp, :periodic)
+    axes = Tuple(_sb_hsgp_axis_values(names[j], raw[j], nothing)
+        for j in 1:n_space_axes)
+    n_locations = length(first(axes))
+    all(x -> length(x) == n_locations, axes) || error(
+        "sbimpl: spatial HSGP axes must have equal lengths")
+    time = _sb_hsgp_axis_values(last(names), last(raw), nothing)
+    at = _sb_hsgp_at(kw, n_locations)
+    at === nothing && error("sbimpl: spatial × periodic HSGP needs `at=`")
+    data[at] = last(_sb_inner_data(:hsgp, kw.at))
+    length(data[at]) == length(time) || error(
+        "sbimpl: `at=` and the periodic axis must have equal row counts")
+    _brm_check_hsgp_domain(fits, axes; prefix="sbimpl")
+    space = _brm_hsgp_basis_state(axes, K[1:end-1], :exp_quad, true,
+        nothing; fits, orthogonal)
+    periodic = _brm_hsgp_basis_state((time,), (last(K),), :periodic,
+        true, period)
+    suffix, col_name = _sb_unique_structured_term_names(
+        stmts, :hsgp, join(string.(names), "_"), target;
+        data, term=t, scope)
+    keys = (; PHI_space=Symbol(:PHI_space_hsgp_, suffix),
+        omega2_space=Symbol(:omega2_space_hsgp_, suffix),
+        PHI_period=Symbol(:PHI_period_hsgp_, suffix),
+        harmonics=Symbol(:harmonics_hsgp_, suffix),
+        rho_lower=Symbol(:rho_lower_hsgp_, suffix))
+    data[keys.PHI_space] = space.PHI
+    data[keys.omega2_space] = space.omega2
+    data[keys.PHI_period] = periodic.PHI
+    data[keys.harmonics] = periodic.harmonics
+    data[keys.rho_lower] = Float64[space.rho_lower, periodic.rho_lower]
+    _sb_record_preproc!(data, keys.PHI_space, PreprocEntry(
+        :space_periodic_hsgp,
+        (; K, fits, orthogonal, projection=space.projection, period,
+         setting_fields=_brm_setting_fields(
+            kw, (:k, :domain, :period)), keys, at), names, false))
+    call = _sb_term_model_call(:_sb_hsgp_space_periodic, term_overrides, t;
+        data, stem=col_name, keys..., at)
+    push!(stmts, Expr(:call, :~, col_name, call))
+    col_name
 end
 
 # `hsgp(x; cov=:periodic, period=...)`: one raw axis, `2k` cosine/sine

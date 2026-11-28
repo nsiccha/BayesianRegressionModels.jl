@@ -184,6 +184,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
                            basis=_brm_hsgp_basis_state)
     kw = getkwargs(term)
     args = getargs(term)
+    haskey(kw, :periodic) &&
+        return _brm_prepare_space_periodic_term(term, target, context)
     latent_args = Tuple(arg for arg in args if arg isa NamedColumn &&
         !haskey(context.data, name(arg)) && parent(arg) isa ExprColumn)
     if !isempty(latent_args)

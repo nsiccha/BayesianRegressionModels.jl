@@ -5495,6 +5495,10 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         masked_axes::AbstractDict=Dict{Symbol,Any}())
     prefix = "RK backend"
     state = prepared.state
+    state.cov === :space_periodic &&
+        return _rk_plan_space_periodic_hsgp_term!(
+            prepared, target, data, columns, taken; derived,
+            hyper_plans, rho_stated, sigma_stated)
     # A model-derived axis (an assignment or predictor value) is read by
     # name from the emitted graph; preparation already requires its fixed
     # `domain=`, one isotropic exp-quad axis and no `by=`/partial centering.

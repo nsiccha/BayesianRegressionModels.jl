@@ -61,19 +61,27 @@ end
 
 function _check_term_kwargs(::typeof(hsgp), kw)
     allowed = (:cov, :iso, :k, :c, :by, :cor, :domain, :orthogonal_to, :period,
-               :centeredness, :extrapolate, :anchor, :rows, :at, :multiply)
+               :centeredness, :extrapolate, :anchor, :rows, :at, :multiply,
+               :periodic)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
         "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
         "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `cor`, `domain`, " *
         "`orthogonal_to`, `period`, `centeredness`, `extrapolate`, `anchor`, " *
-        "`rows`, `at`, and `multiply`")
+        "`rows`, `at`, `multiply`, and `periodic`")
     # `cor=` correlates the levels of `by` (src/level_correlation.jl).
     haskey(kw, :cor) && !haskey(kw, :by) && error(
         "hsgp: `cor=` correlates the levels of the `by=` grouping; give " *
         "`hsgp(x...; by=g, cor=Omega)` a `by=`")
     cov = _brm_gp_cov(kw, :hsgp)
-    _brm_gp_period(kw, :hsgp, cov; bound=false)
+    if haskey(kw, :periodic)
+        cov === :exp_quad || error(
+            "hsgp: `periodic=` combines spatial squared-exponential axes " *
+            "with one periodic axis; omit `cov=`")
+        _brm_gp_period(kw, :hsgp, :periodic; bound=false)
+    else
+        _brm_gp_period(kw, :hsgp, cov; bound=false)
+    end
     _brm_gp_iso(kw, :hsgp)
     nothing
 end
