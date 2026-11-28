@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.431
+
+- On SBBRMI, a `@plate for` cell's `Binomial(n[i], p)` whose `p` is the
+  logistic of a predictor `x` (an inline `logistic(x)`) lowers to Stan's
+  `binomial_logit(n[i], x)`, as the cell's Bernoulli and a model-scope binomial
+  already do (0.2.425). Its density and gradient are now exact at every finite
+  `x`; before, they were `-Inf` from `x = 37` and at `x = -745`. Its
+  predictive draw is StanBlocks' scalar `binomial_logit_rng`, so the StanBlocks
+  compat floor is now 0.2.71.
+
 ## 0.2.430
 
 - `hsgp(east, north, month; periodic=:month, period=12, k=(kx, ky, kh),
