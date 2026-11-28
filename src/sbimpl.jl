@@ -17892,7 +17892,84 @@ function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data; needs_cdf
         return _sb_lik_stan_exprs!(stmts, target, :neg_binomial_2_log,
                                    (eta, _sb_scalar_expr(phi, data)))
     end
+    # An omitted response is only drawn, never scored: it keeps the
+    # probability-scale law, whose draw StanBlocks can type without its data.
+    if !needs_cdf && isempty(kwargs) && !isnothing(get(data, target, nothing))
+        fused = _sb_logit_likelihood!(stmts, target, f, args, data)
+        fused === nothing || return fused
+    end
     _sb_lik_family!(stmts, target, f, args, kwargs, data)
+end
+
+# The logit of a probability the model writes as the logistic of `x`, as a Stan
+# expression, or `nothing` when `arg` is not provably one. Three spellings give
+# the same value: the `p` of a `logit(p) ~ ...` declaration (emitted as
+# `p = inv_logit(logit_p)`), an inline `logistic(x)` or `logistic.(x)`, and an
+# assignment `p = logistic(x)` (followed through further assignments). Reading
+# such a probability on the logit scale keeps a density finite wherever the
+# exact one is: on the probability scale, `1 - inv_logit(x)` rounds to zero
+# from x ≈ 37 and `inv_logit(x)` underflows from x ≈ -745.
+_sb_logit_scale(_arg, _data) = nothing
+function _sb_logit_scale(arg::NamedColumn, data)
+    _sb_declares_link(arg, LogExpFunctions.logit) &&
+        return _sb_lp_emitted_name(name(arg), LogExpFunctions.logit)
+    payload = parent(arg)
+    payload isa ExprColumn{typeof(assign)} || return nothing
+    _sb_logit_scale(last(getargs(payload, 2)), data)
+end
+function _sb_logit_scale(arg::ExprColumn, data)
+    f = getf(arg)
+    f = f isa _BRMBroadcastCall ? f.f : f
+    f === LogExpFunctions.logistic && isempty(getkwargs(arg)) &&
+        length(getargs(arg)) == 1 || return nothing
+    _sb_scalar_expr(only(getargs(arg)), data)
+end
+
+# `1 - p` for a probability `p` that is the logistic of `x`: `inv_logit(-x)`,
+# exact where the difference cancels. `_sb_stan_complement` reads `p` as
+# lowered (a model-scope argument already lowered, a `@plate` cell's law, an
+# omitted response's law; `_sb_julia_stan_call(::typeof(-), …)`),
+# `_sb_probability_complement` reads it as the model wrote it.
+_sb_stan_complement(p) =
+    something(_sb_julia_stan_call(-, (1, p)), Expr(:call, :-, 1, p))
+function _sb_probability_complement(p, data)
+    x = _sb_logit_scale(p, data)
+    x === nothing ? _sb_stan_complement(_sb_scalar_expr(p, data)) :
+        _sb_negated_inv_logit(x)
+end
+
+# A model-scope `1 - p` (or `1 .- p`) over such a probability, or `nothing`.
+_sb_logistic_complement(_f, _args, _data) = nothing
+_sb_logistic_complement(f::_BRMBroadcastCall, args, data) =
+    _sb_logistic_complement(f.f, args, data)
+function _sb_logistic_complement(::typeof(-), args, data)
+    length(args) == 2 && first(args) isa Real && isone(first(args)) ||
+        return nothing
+    x = _sb_logit_scale(last(args), data)
+    x === nothing ? nothing : _sb_negated_inv_logit(x)
+end
+
+# A Bernoulli or binomial observation whose success probability is the logistic
+# of `x` is scored by Stan's logit-native log-pmf of `x`, so it stays exact at
+# every finite `x` (`p` itself stays available to other readers); `nothing`
+# leaves every other observation to `_sb_lik_family!`. A mean-precision
+# beta-binomial keeps its family and reads the complement on the logit scale
+# (`_sb_lik_family!(::Type{<:BetaBinomial2})`). Callers keep the
+# probability-scale family where a CDF is needed: Stan's logit forms have none.
+_sb_logit_likelihood!(_stmts, _target, _family, _args, _data) = nothing
+function _sb_logit_likelihood!(stmts, target, ::Type{<:Bernoulli},
+                               args::Tuple{Any}, data)
+    x = _sb_logit_scale(only(args), data)
+    x === nothing && return nothing
+    _sb_coerce_bernoulli_response!(data, target, "Bernoulli")
+    _sb_lik_stan_exprs!(stmts, target, :bernoulli_logit, (x,))
+end
+function _sb_logit_likelihood!(stmts, target, ::Type{<:Binomial},
+                               args::Tuple{Any,Any}, data)
+    trials = _sb_scalar_expr(first(args), data)
+    x = _sb_logit_scale(last(args), data)
+    x === nothing && return nothing
+    _sb_lik_stan_exprs!(stmts, target, :binomial_logit, (trials, x))
 end
 
 _sb_weight_data_key(target::Symbol) = Symbol(:brm_weight_, target)
@@ -18526,11 +18603,14 @@ end
 # Mean/precision Beta-binomial convenience surface. Shape lowering stays in
 # the emitted expression so scalar, vector, and linked-predictor arguments all
 # share one method and StanBlocks can synthesize matching lpmfs/RNG paths.
+# A mean that is the logistic of `x` gives its second shape as
+# `inv_logit(-x) .* precision` (`_sb_probability_complement`).
 function _sb_lik_family!(stmts, target, ::Type{<:BetaBinomial2},
                          args::Tuple{Any,Any,Any}, data)
     trials, mean, precision = map(a -> _sb_scalar_expr(a, data), args)
     alpha = Expr(:call, Symbol(".*"), mean, precision)
-    beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+    beta = Expr(:call, Symbol(".*"),
+                _sb_probability_complement(args[2], data), precision)
     push!(stmts, Expr(:call, :~, target,
         Expr(:call, :beta_binomial, trials, alpha, beta)))
 end
@@ -18673,16 +18753,18 @@ _sb_stan_dist_args(::Type{<:Cauchy}, args::Tuple{Any}) = (args[1], 1.0)
 _sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
 
 # `BetaBinomial2(trials, mean, precision)` reparameterizes to native
-# `beta_binomial(trials, mean*precision, (1-mean)*precision)`. Mirrors the
-# likelihood emission exactly (same expressions, same order); untyped `args`
-# so both Tuple (likelihood-side) and Vector (prior-side) callers normalize.
+# `beta_binomial(trials, mean*precision, (1-mean)*precision)`, with
+# `inv_logit(-x)` for `1 - mean` when the lowered mean is `inv_logit(x)`
+# (`_sb_stan_complement`). Mirrors the likelihood emission exactly (same
+# expressions, same order); untyped `args` so both Tuple (likelihood-side) and
+# Vector (prior-side) callers normalize.
 function _sb_stan_dist_args(::Type{<:BetaBinomial2}, args)
     length(args) == 3 || error(
         "sbimpl: `BetaBinomial2` needs `(trials, mean, precision)`; got " *
         "$(length(args)) argument(s)")
     trials, mean, precision = args[1], args[2], args[3]
     alpha = Expr(:call, Symbol(".*"), mean, precision)
-    beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+    beta = Expr(:call, Symbol(".*"), _sb_stan_complement(mean), precision)
     (trials, alpha, beta)
 end
 
@@ -19693,9 +19775,13 @@ _sb_scalar_expr(x::NamedColumn, data) = begin
 end
 _record_scalar_data!(data, sym, d::DataColumn) = (data[sym] = parent(d); nothing)
 _record_scalar_data!(args...) = nothing
-_sb_scalar_expr(x::ExprColumn{<:_BRMBroadcastCall}, data) =
+function _sb_scalar_expr(x::ExprColumn{<:_BRMBroadcastCall}, data)
+    complement = isempty(getkwargs(x)) ?
+        _sb_logistic_complement(getf(x), getargs(x), data) : nothing
+    complement === nothing || return complement
     _sb_prior_call(getf(x), map(a -> _sb_scalar_expr(a, data), getargs(x)),
         map(a -> _sb_scalar_expr(a, data), getkwargs(x)))
+end
 function _sb_scalar_expr(x::ExprColumn{F}, data) where {F<:Union{_BRMMatrixProduct,_BRMRowScale}}
     matrix, vector = getargs(x)
     left = _sb_scalar_expr(matrix, data)
@@ -19734,6 +19820,11 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
         idxs = getargs(x)[2:end]
         return Expr(:ref, _sb_scalar_expr(obj, data),
                     (_sb_scalar_expr(a, data) for a in idxs)...)
+    end
+    # `1 - p` over a probability that is the logistic of `x` is `inv_logit(-x)`.
+    if isempty(getkwargs(x))
+        complement = _sb_logistic_complement(f, getargs(x), data)
+        complement === nothing || return complement
     end
     args = Any[_sb_scalar_expr(a, data) for a in getargs(x)]
     # A Julia callable Stan spells differently (`vcat` -> nested `append_row`,

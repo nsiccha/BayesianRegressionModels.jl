@@ -49,8 +49,11 @@ const counts = @brm begin
 end
 const count_data = (; n_k=[3, 5, 10, 0], n_m=[2, 4, 1, 6],
     k=[1, 2, 6, 0], m=[1, 3, 0, 2])
-const bb2_law = "n_k,(inv_logit(logit_q).*phi_q),((1-inv_logit(logit_q)).*phi_q))"
+const bb2_law = "n_k,(inv_logit(logit_q).*phi_q),(inv_logit((-logit_q)).*phi_q))"
+# The omitted response draws `binomial(n, inv_logit(x))`; its bound twin scores
+# the same law on the logit scale (snag sbbrmi-logit-lin-2c4202f8).
 const binomial_law = "n_m,inv_logit(logit_z))"
+const bound_binomial_law = "m~binomial_logit(n_m,logit_z);"
 
 @testset "omitted BetaBinomial2 and Binomial with data trials draw the prior predictive" begin
     sb = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
@@ -63,7 +66,7 @@ const binomial_law = "n_m,inv_logit(logit_z))"
     @test occursin("beta_binomial_int_rng(n_k_n," * bb2_law, code)
     @test occursin(bb2_law, flat(bound))
     @test occursin("binomial_int_rng(n_m_n," * binomial_law, code)
-    @test occursin(binomial_law, flat(bound))
+    @test occursin(bound_binomial_law, flat(bound))
     @test !occursin("logistic(", code)
     @test Set(sb.model.observations) == Set((:k, :m))
     for target in (:k, :m)

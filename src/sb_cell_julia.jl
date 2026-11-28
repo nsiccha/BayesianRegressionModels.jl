@@ -81,6 +81,32 @@ function _sb_julia_stan_call(callable, args)
     name, operands = _sb_julia_stan_builtin(callable, args)
     name === nothing ? nothing : Expr(:call, name, operands...)
 end
+# `1 - inv_logit(x)` is `inv_logit(-x)`: the difference rounds to zero from
+# x ≈ 37 and loses accuracy well before, the negated form is exact. A model-scope
+# probability the model gives by name (`logit(p) ~ ...`, `p = logistic(x)`) is
+# recognized before lowering, by `_sb_logistic_complement` (sbimpl.jl).
+_sb_negated_inv_logit(x) = Expr(:call, :inv_logit, Expr(:call, :-, x))
+_sb_is_inv_logit(x) = Meta.isexpr(x, :call, 2) && x.args[1] === :inv_logit
+_sb_julia_stan_call(::typeof(-), args) =
+    length(args) == 2 && first(args) isa Real && isone(first(args)) &&
+        _sb_is_inv_logit(last(args)) ?
+        _sb_negated_inv_logit(last(args).args[2]) : nothing
+# A cell's Bernoulli observation of `inv_logit(x)` is scored by Stan's
+# logit-native log-pmf of `x`, as a model-scope one is (`_sb_logit_likelihood!`).
+# Only the observation itself: a combinator's family (`censored`, `truncated`)
+# needs a CDF, which the logit forms do not have. A cell's binomial keeps
+# `binomial(n, inv_logit(x))` until StanBlocks draws a scalar `binomial_logit`
+# observation (Stan Math has no `binomial_logit_rng`; snag StanBlocks
+# `sbbrmi-on-a-brm-234397df`).
+function _sb_cell_logit_law(law)
+    Meta.isexpr(law, :call) || return law
+    family, args = first(law.args), law.args[2:end]
+    any(a -> Meta.isexpr(a, :parameters) || Meta.isexpr(a, :kw), args) && return law
+    family === :bernoulli && length(args) == 1 && _sb_is_inv_logit(only(args)) &&
+        return Expr(:call, :bernoulli_logit, only(args).args[2])
+    law
+end
+
 # Constructors whose Stan builtin depends on the result's rank.
 _sb_julia_stan_call(::typeof(fill), args) =
     length(args) == 2 ? Expr(:call, :rep_vector, args...) :
@@ -350,7 +376,7 @@ function _sb_cell_statement(x::Expr, scope)
         law = _brm_cell_typed_weight(head -> _sb_cell_family_binding(scope, head),
             law, "sbimpl"; normal=c -> c === Normal || c === StanBlocks.normal)
     end
-    Expr(:call, :~, x.args[2], _sb_cell_family(law, scope))
+    Expr(:call, :~, x.args[2], _sb_cell_logit_law(_sb_cell_family(law, scope)))
 end
 
 function _sb_cell_statements(statements, scope)

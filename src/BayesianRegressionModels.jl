@@ -336,13 +336,16 @@ export product_distribution, logpdf
 # pins that every one is exported: a new spelling is added here with it.
 export logit, logistic, logexpm1, log1pexp, log1mexp, logsumexp,
        normcdf, norminvcdf
-# Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
-# / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
-# (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
-# `loglogistic` / `log1mlogistic` on the Julia side), avoiding the `inv_logit`
-# round-trip and staying numerically stable for large |eta|. `BernoulliLogit`
-# is re-exported from Distributions; `BinomialLogit` is defined alongside the
-# other executable likelihood contracts in likelihood_distributions.jl.
+# Logit-form Bernoulli/Binomial: they take the logit itself and lower to a
+# logit-native log-pmf (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`;
+# LogExpFunctions' `loglogistic` / `log1mlogistic` on the Julia side). A
+# `Bernoulli(p)` / `Binomial(N, p)` whose `p` is the logistic of a predictor
+# lowers to the same forms: on SBBRMI for `logit(p) ~ ...`, `logistic(eta)` and
+# `p = logistic(eta)` (`_sb_logit_likelihood!`), on RKBRMI for the first two
+# (its response planner), so neither spelling loses accuracy at large |eta|.
+# `BernoulliLogit` is re-exported from
+# Distributions; `BinomialLogit` is defined alongside the other executable
+# likelihood contracts in likelihood_distributions.jl.
 export BernoulliLogit, BinomialLogit
 # SLIC custom-family bindings must be visible in a caller-supplied model module
 # (`brm_descriptor(...; mod=@__MODULE__)`), matching the existing exported

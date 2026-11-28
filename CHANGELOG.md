@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.425
+
+- SBBRMI reads a probability the model gives as the logistic of a predictor
+  `x` on the logit scale, so its densities and gradients stay exact at large
+  `|x|`. Such a probability is the `p` of `logit(p) ~ ...`, an inline
+  `logistic(x)` or `logistic.(x)`, or an assignment `p = logistic(x)`.
+  `Bernoulli(p)` and `Binomial(n, p)` lower to Stan's `bernoulli_logit(x)` and
+  `binomial_logit(n, x)`, a `BetaBinomial2(n, p, phi)` gives its second shape
+  as `inv_logit(-x) .* phi`, and a written `1 - p` (or `1 .- p`) lowers to
+  `inv_logit(-x)`. The beta-binomial shape and `1 - logistic(x)` take the same
+  form in `@plate for` cells and omitted responses, and a cell's
+  `Bernoulli(logistic(x))` lowers to `bernoulli_logit(x)`. Before,
+  these programs were `-Inf` or `NaN` from `x = 37`, where `1 - inv_logit(x)`
+  rounds to zero, and at `x = -745`. Bernoulli and binomial densities are now
+  exact at every finite `x`; beta-binomial and beta shapes are exact through
+  `|x| = 700` and still underflow from about `|x| = 745`. Laws that need a
+  CDF (mixture components), an omitted response's Bernoulli or binomial
+  (only drawn, never scored) and a cell's binomial keep the probability scale.
+
 ## 0.2.424
 
 - Keyed components can return scalar or per-subject vector values for a parent
