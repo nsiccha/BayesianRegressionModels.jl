@@ -342,7 +342,8 @@ Base.@nospecializeinfer function _brm_collection_public_records(@nospecialize(br
     Tuple(result)
 end
 
-function _brm_collection_replay_data(brmi, df; group_sources=nothing)
+Base.@nospecializeinfer function _brm_collection_replay_data(@nospecialize(brmi), @nospecialize(df);
+        @nospecialize(group_sources=nothing))
     axes = _brm_collection_axes(brmi)
     isempty(axes) && return df
     _, columns = _brm_collection_design(first(axes).builder, df; group_sources)

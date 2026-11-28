@@ -465,16 +465,24 @@ function _rk_translated_plan(plan::_RK_PLAN_TYPES)
 end
 
 # A backend's program, translated once and shared with its replays.
-_rk_program(backend::BRM.RKBRMI) =
-    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan;
-        documentation=BRM.brm_documentation(BRM.brm_source(backend)))), backend.program)
+# The accessors below run once per design, not per draw, and their values are
+# `Any`: none specializes on the backend, whose type spells the model's
+# columns, so a process compiles them once for every model (snag
+# `brm-methods-spec-39436695`).
+Base.@nospecializeinfer _rk_program(@nospecialize(backend::BRM.RKBRMI)) =
+    BRM._rk_once!(_rk_emit_program, backend, backend.program)
+Base.@nospecializeinfer _rk_emit_program(@nospecialize(backend::BRM.RKBRMI)) =
+    _RKProgram(BRM._rk_emit_ast(backend.plan;
+        documentation=BRM.brm_documentation(BRM.brm_source(backend))))
 # A backend's binding of that program to its own data, bound once. Every
 # query of the backend reads it.
-_rk_translated(backend::BRM.RKBRMI) =
-    BRM._rk_once!(() -> _rk_bind_program(_rk_program(backend), backend.plan;
-        frozen=_rk_frozen(backend)), backend.bound)
+Base.@nospecializeinfer _rk_translated(@nospecialize(backend::BRM.RKBRMI)) =
+    BRM._rk_once!(_rk_bind_backend, backend, backend.bound)
+Base.@nospecializeinfer _rk_bind_backend(@nospecialize(backend::BRM.RKBRMI)) =
+    _rk_bind_program(_rk_program(backend), backend.plan; frozen=_rk_frozen(backend))
 # The fitted values a data-free backend binds frozen.
-_rk_frozen(backend::BRM.RKBRMI) = backend.fitted === nothing ? nothing : backend.fitted.frozen
+Base.@nospecializeinfer _rk_frozen(@nospecialize(backend::BRM.RKBRMI)) =
+    backend.fitted === nothing ? nothing : backend.fitted.frozen
 
 # A state's frozen values less those fitted from `dropped` fit-role inputs (a
 # resampled grouping's), which the replay binds with its own data.
@@ -489,14 +497,15 @@ function BRM._rk_frozen_subset(state::BRM.BRMFittedState, dropped::Set{Symbol})
 end
 
 # The fitted values of `names` in a backend's binding, as RKPPL freezes them.
-BRM._rk_frozen_values(backend::BRM.RKBRMI, names) =
+Base.@nospecializeinfer BRM._rk_frozen_values(@nospecialize(backend::BRM.RKBRMI), names) =
     frozen_values(_rk_translated(backend), names)
 
 # A data-free plan's translated program, binding and graph: the program and
 # graph of `previous` (a data-free backend it replays) when its callables are
 # the same, as `reprocess` shares a fit's.
-function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram, plan, frozen, previous;
-        declaration=emitted.main)
+Base.@nospecializeinfer function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram,
+        @nospecialize(plan), @nospecialize(frozen), @nospecialize(previous);
+        @nospecialize(declaration=emitted.main))
     revisions = _rk_child_revisions(emitted)
     if previous !== nothing && _rk_program(previous).child_revisions == revisions &&
             BRM._rk_same_callables(BRM._rk_retained_program(previous), emitted)
@@ -508,7 +517,8 @@ function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram, plan, frozen, prev
     bound = _rk_bind_program(program, plan; frozen)
     BRM._RKOnce(program), BRM._RKOnce(bound), build_kernel(bound; cache=program.builds)
 end
-BRM._rk_retained_program(backend::BRM.RKBRMI) = _rk_program(backend).emitted
+Base.@nospecializeinfer BRM._rk_retained_program(@nospecialize(backend::BRM.RKBRMI)) =
+    _rk_program(backend).emitted
 
 function BRM.rkppl_model(backend::BRM.RKBRMI)
     program = _rk_program(backend)
@@ -630,7 +640,8 @@ function LogDensityProblems.logdensity_and_gradient(
     value, gradient
 end
 
-BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
+Base.@nospecializeinfer BRM.rk_bound_plan(@nospecialize(backend::BRM.RKBRMI)) =
+    _rk_translated(backend)
 
 function BRM._rk_generate_prior(rk, generator, rng, n)
     query = BRM._rk_once!(generator) do
@@ -692,9 +703,11 @@ function BRM._rk_generated_points(backend, physical)
     points
 end
 
-BRM.rk_bound_data(backend::BRM.RKBRMI) = _rk_bound_inputs(BRM.rk_bound_plan(backend))
+Base.@nospecializeinfer BRM.rk_bound_data(@nospecialize(backend::BRM.RKBRMI)) =
+    _rk_bound_inputs(BRM.rk_bound_plan(backend))
 
-BRM.rk_bound_data(backend::BRM.RKBRMI, source::ReactiveKernels.JAXSource) =
+Base.@nospecializeinfer BRM.rk_bound_data(@nospecialize(backend::BRM.RKBRMI),
+        source::ReactiveKernels.JAXSource) =
     BRM._rk_jax_bound_data(BRM.rk_bound_plan(backend), source)
 
 function BRM._rk_jax_bound_data(plan, source::ReactiveKernels.JAXSource)
@@ -726,7 +739,7 @@ end
 # A design binder's lowering for one kind of design: a replay's, which every
 # later design of that kind binds into (lowering reads only the data's names,
 # numbers and arrays per index, rkppl-use §1).
-BRM._rk_design_lowering(replay::BRM.RKBRMI) =
+Base.@nospecializeinfer BRM._rk_design_lowering(@nospecialize(replay::BRM.RKBRMI)) =
     first(_rk_lower_program(_rk_program(replay), replay.plan; frozen=_rk_frozen(replay)))
 # The definitions a kind of design binds frozen: those binding evaluates from
 # the `fixed` inputs (and values already frozen) alone, as the replay `replay`
@@ -734,7 +747,7 @@ BRM._rk_design_lowering(replay::BRM.RKBRMI) =
 # none. Binding reads each value off the replay's binding, without evaluating
 # it again. A value preparation folds instead is left to preparation: frozen,
 # a binding would list it among its inputs, which `reprocess` does not.
-function BRM._rk_design_frozen(replay::BRM.RKBRMI, fixed)
+Base.@nospecializeinfer function BRM._rk_design_frozen(@nospecialize(replay::BRM.RKBRMI), fixed)
     bound = BRM.rk_bound_plan(replay)
     held = hasproperty(bound, :frozen) ? keys(bound.frozen.values) : ()
     fitted = BRM._rk_fitted_definitions(BRM._rk_retained_program(replay), replay.plan,
@@ -771,8 +784,10 @@ function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
 end
 
 # Cross-backend coordinate transport (src/coordinate_transport.jl).
-BRM._rk_layout_coordinate_names(backend::BRM.RKBRMI) =
-    coordinate_names(backend.model.layout)
+# The assertion keeps callers' loops typed: RKPPL's `coordinate_names` returns
+# a `Vector{Symbol}`, which inference no longer sees through the backend.
+Base.@nospecializeinfer BRM._rk_layout_coordinate_names(@nospecialize(backend::BRM.RKBRMI)) =
+    coordinate_names(backend.model.layout)::Vector{Symbol}
 # The declarations the layout holds at zero length, which name no coordinate:
 # a single-level treatment-coded factor's coefficient block, for one. A
 # parameter is held under its entry's name, and named, in its coordinates and
@@ -799,12 +814,13 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
         "without an entry")
     transforms
 end
-BRM._rk_bound_coordinate_names(backend::BRM.RKBRMI) =
-    coordinate_names(assign_layout(_rk_translated(backend)))
+Base.@nospecializeinfer BRM._rk_bound_coordinate_names(@nospecialize(backend::BRM.RKBRMI)) =
+    coordinate_names(assign_layout(_rk_translated(backend)))::Vector{Symbol}
 BRM._rk_plan_coordinate_names(plan) = coordinate_names(assign_layout(plan))
 # Geometry arguments belong to this binding. A replay shares the executable
 # graph, but its bounds and totals may differ from the original layout's data.
-_rk_bound_layout(backend::BRM.RKBRMI) = assign_layout(_rk_translated(backend))
+Base.@nospecializeinfer _rk_bound_layout(@nospecialize(backend::BRM.RKBRMI)) =
+    assign_layout(_rk_translated(backend))
 # A forecast replay (`reprocess(...; resample_covariates)`) has coordinates of
 # its own, so it builds the kernel of its own binding.
 BRM._rk_rebuild_model(backend::BRM.RKBRMI) = build_kernel(_rk_translated(backend))

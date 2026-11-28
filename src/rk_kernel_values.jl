@@ -1071,7 +1071,7 @@ function _rk_kernel_scan_response(kernel, value, observed)
     column
 end
 
-function _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
+Base.@nospecializeinfer function _rk_kernel_observed_columns(@nospecialize(brmi), params, arguments, raw_body)
     observed = Set{Symbol}()
     for (_, node) in _brm_operation_entries(brmi)
         node isa NamedColumn && parent(node) isa ExprColumn{typeof(~)} || continue

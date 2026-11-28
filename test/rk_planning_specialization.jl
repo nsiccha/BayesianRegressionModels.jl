@@ -1,4 +1,5 @@
-# test/rk_planning_specialization.jl — RK planning compiles once per corpus.
+# test/rk_planning_specialization.jl — RK planning, and each fit's per-design
+# entry points, compile once per corpus.
 #
 # Run: julia --project=test test/rk_planning_specialization.jl
 #
@@ -15,6 +16,7 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Exponential, Normal
+using Statistics: mean
 using ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
@@ -156,5 +158,97 @@ const SOURCE_CLOSURE = r"^\"Tuple\{BayesianRegressionModels\.var\"#[0-9]+#[0-9]+
     @test member.artifact.plan isa BRM._RKValuePlan
     for line in structural
         occursin("BayesianRegressionModels", line) && println("RESIDUAL ", first(line, 160))
+    end
+end
+
+# A fit's per-design entry points run once per design, not per draw: its bound
+# data and plan, a data-free open from its exported state, the design binder
+# with its first and its cached kind of design, and `reprocess` (snag
+# `brm-methods-spec-39436695`: a simulator opening fits of models its process
+# had not compiled paid for each of them again, about 2.4 s of LLVM
+# optimization per model on its profile). After one model ran them, another
+# model's run must not compile a BRM method whose signature names that model's
+# columns or operations, which carry `_zqdesign<index>`. Only constructing the
+# model's own values may (`INHERENT_CONSTRUCTOR`), and so may the accessors
+# that read the caller's own design columns and the binder's constructors,
+# which take the fit and its named values (`DESIGN_VALUES`): about 25 ms of
+# compilation per model on strato2, against 2.1 s before.
+const DESIGN_VALUES = r"^\"Tuple\{(Type\{BayesianRegressionModels\.(RKDesignBinder|_RKFitCoordinateLevels)\}|typeof\(BayesianRegressionModels\.(_brm_df_column|_brm_df_has_column|_rk_design_input)\))"
+
+function define_design_member(index)
+    tag(base) = Symbol(base, :_zqdesign, index)
+    x, z, subject, y = tag(:x), tag(:z), tag(:subject), tag(:y)
+    sigma, xbar, mu = tag(:sigma), tag(:xbar), tag(:mu)
+    builder = Symbol(:design_member_, index)
+    Core.eval(@__MODULE__, quote
+        function $builder(d)
+            @brm d begin
+                $sigma ~ Exponential(1)
+                $xbar = constant(mean($x))
+                $mu ~ 1 + zscale($x) + (1 + $z | $subject)
+                effect($mu, Intercept) ~ Normal($xbar, 1)
+                $y ~ Normal($mu, $sigma)
+            end
+        end
+    end)
+    n = 24
+    xs = [sin(1.3i + index) for i in 1:n]
+    zs = [cos(0.7i - index) for i in 1:n]
+    ys = [0.4 * sin(0.9i) + 0.1index for i in 1:n]
+    train = NamedTuple{(x, z, subject, y)}((xs, zs,
+        repeat(["s$i" for i in 1:6], inner=4), ys))
+    design(m, k, shift) = NamedTuple{(x, z, subject)}((
+        [sin(0.5i + shift) for i in 1:m], [cos(0.3i + shift) for i in 1:m],
+        repeat(["n$i" for i in 1:k], inner=m ÷ k)))
+    (; builder=getfield(@__MODULE__, builder), train, subject,
+       d1=design(8, 2, 0.1), d2=design(12, 3, 0.2), marker="_zqdesign$index")
+end
+
+# The fit, its exported state and the open's template are made before the
+# measured run: constructing them is the construction guard's subject above.
+Base.@nospecializeinfer function design_fit(@nospecialize(m))
+    rk = RKBRMI(m.builder(m.train))
+    (; rk, state=brm_fitted_state(rk), template=m.builder(m.train))
+end
+
+Base.@nospecializeinfer function design_entry_points(@nospecialize(m), @nospecialize(rk),
+        state, @nospecialize(template))
+    rk_bound_data(rk)
+    rk_bound_plan(rk)
+    opened = RKBRMI(template, state)
+    rk_bound_data(opened)
+    binder = rk_design_binder(opened; resample_groups=[m.subject])
+    first_design = binder(m.d1)
+    cached_design = binder(m.d2)
+    replay = reprocess(opened, m.d1; resample_groups=[m.subject])
+    (; opened, binder, first_design, cached_design, replay=rk_bound_data(replay))
+end
+
+@testset "a new model reuses the per-design entry points' compilation" begin
+    warm = define_design_member(21)
+    warm_fit = Base.invokelatest(design_fit, warm)
+    warm_run = Base.invokelatest(design_entry_points, warm, warm_fit.rk, warm_fit.state,
+        warm_fit.template)
+    @test length(warm_run.binder.classes) == 1
+    for index in (22, 23)
+        m = define_design_member(index)
+        fit = Base.invokelatest(design_fit, m)
+        run, lines = compiled_during(() -> design_entry_points(m, fit.rk, fit.state, fit.template))
+        specialized = filter(line -> occursin(m.marker, line), lines)
+        # Positive control: the dump records compilation on this model's types
+        # (its own values are constructed during the open).
+        @test !isempty(specialized)
+        per_model = filter(line -> occursin("BayesianRegressionModels", line) &&
+            !occursin(INHERENT_CONSTRUCTOR, line) && !occursin(HARNESS, line) &&
+            !occursin(DESIGN_VALUES, line), specialized)
+        isempty(per_model) || foreach(line -> println("PER-MODEL ", first(line, 400)), per_model)
+        @test isempty(per_model)
+        # The reused compilation does the same work: one cached kind of design,
+        # the fit's coordinates on the data-free open, the design's inputs.
+        @test length(run.binder.classes) == 1
+        @test BRM._rk_layout_coordinate_names(run.opened) ==
+            BRM._rk_layout_coordinate_names(fit.rk)
+        @test Set(keys(run.first_design)) == Set(keys(run.cached_design))
+        @test haskey(run.replay, Symbol(:x_zqdesign, index))
     end
 end

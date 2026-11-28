@@ -71,7 +71,7 @@ Base.@nospecializeinfer function _brm_prior_address_present(@nospecialize(brmi::
     _brm_population_address_present(brmi, address[1], address[2])
 end
 
-_brm_address_targets(brmi::BRMI, predictor::Symbol) =
+Base.@nospecializeinfer _brm_address_targets(@nospecialize(brmi::BRMI), predictor::Symbol) =
     predictor === _EFFECT_COLON ?
         Symbol[p.name for p in linear_predictors(brmi)] : Symbol[predictor]
 
