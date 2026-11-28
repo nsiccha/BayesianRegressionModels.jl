@@ -311,6 +311,7 @@ rk_design_binder
 rk_model
 rk_new_population_effects
 rkppl_model
+rkppl_source
 stan_data
 stan_instantiate
 stan_model

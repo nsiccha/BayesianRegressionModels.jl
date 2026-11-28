@@ -105,6 +105,7 @@ include("rk_reprocess.jl")
 include("rk_generated_replay.jl")
 include("rk_design_binder.jl")
 include("rk_fitted_state.jl")
+include("rk_source_text.jl")
 include("cut.jl")
 include("rk_gmrf_predict.jl")
 
@@ -313,7 +314,7 @@ export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,
 export BRMFilterSMC, brm_filter_tune
 export BRMCutFamily, brm_cut_family, brm_cut_fit, brm_cut_point, brm_cut_propagate, rk_draw_values
 export brm_gmrf_predict
-export rkppl_model, rk_model
+export rkppl_model, rk_model, rkppl_source
 # Re-export every Distributions.jl family BRM lowers so
 # `using BayesianRegressionModels` is the only import a model file needs — no
 # `using Distributions` on top (todo `0n9bz7p`, decision `0w84aut`). These are

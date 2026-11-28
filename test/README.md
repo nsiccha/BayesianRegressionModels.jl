@@ -1,5 +1,19 @@
 # Running the tests
 
+`rk_source_text.jl` checks `rkppl_source(rk)`, the program an `RKBRMI` runs as
+source text. For a formula model with a smooth term and a value model with a
+two-axis field, the text of the definitions and of the main block parses back
+to the emitted program (a sum of three or more terms reads `a .+ b .+ c`,
+which parses nested to the left where the emitter holds one call); each
+definition sits under its docstring and is spelled `@rkppl` or
+`ReactiveKernels.@kernel`; an authored docstring stands above its statement;
+and the text has no `Core.@doc` call, no line marker and four columns per
+level. The printer's own cases (a `do` block, one nested in a call, a
+conditional value, an `if` with statement bodies, a `scan`, a multi-line
+docstring with quotes, `$` and backslashes) print in the typed form and parse
+back to themselves. Run
+`julia --startup-file=no --project=test test/rk_source_text.jl`.
+
 `wren_hsgp.jl` builds the full Wren reporting-rate declaration through RKBRMI
 on independently simulated beta-binomial counts. Its six HSGPs retain all
 1,696 basis weights across cell, cell-year and observation row axes, with a
