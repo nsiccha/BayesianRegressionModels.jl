@@ -87,9 +87,8 @@ Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI
     # The emitted declaration inventory also finds synthetic observations
     # (for example a modeled baseline). Endpoint absence alone must never
     # discard their densities or their inference coordinates.
-    sb = SBBRMI(brmi; _rk_cell_module(brmi)...)
-    _sb_observation_triage(sb).bound > 0 && return nothing
-    generated = generative_plan(sb)
+    generated = _brm_stan_unconditioned_generative(brmi; _rk_cell_module(brmi)...)
+    generated === nothing && return nothing
     _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data), nothing)
 end
 function Base.getproperty(plan::_RKHeldOutPlan, field::Symbol)
@@ -102,8 +101,7 @@ function _rk_prior_value_backend(rk::RKBRMI)
     # Forward sampling the individually bounded draws would change their
     # joint law. Read the declaration placement from the fitted program.
     model = rk.model_plan.generative.model
-    sampled = [o.name for o in StanBlocks.stan_descriptor(model).outputs
-        if o.kind === :parameter]
+    sampled = _brm_stan_sampled_parameters(model)
     isempty(sampled) || throw(ArgumentError(
         "RK prior draws require a fully generative prior. The model keeps sampled parameters: " *
         join(sampled, ", ") * "."))

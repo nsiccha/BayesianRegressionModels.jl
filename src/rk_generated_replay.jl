@@ -21,8 +21,7 @@ Base.@nospecializeinfer function _rk_omitted_response_columns(@nospecialize(brmi
     read = Set(dep for op in program.operations for dep in op.dependencies)
     if any(op -> op.role === :parameter && !(op.name in read) &&
             (!isempty(op.dependencies) || _sb_plan_observation_only(brmi, op.name)), program.operations)
-        inventory = _sb_observation_triage(SBBRMI(brmi; _rk_cell_module(brmi)...))
-        for key in inventory.unbound
+        for key in _brm_stan_unbound_observations(brmi; _rk_cell_module(brmi)...)
             get!(missing, key, _BRMAbsentResponse{Float64}(key))
         end
     end

@@ -76,11 +76,12 @@ function _rk_emit_density_source!(defs, bindings, taken, name, distribution)
         callable = distribution.callable
         # A Stan-only function keeps the constructor route when a callable
         # source provider (`_rk_callable_source!`) supplies its constructor.
-        if callable isa StanBlocks.ValueFamily ||
+        label = _brm_stan_value_family_label(callable)
+        if label !== nothing ||
                 (callable isa Function && isempty(methods(callable)) &&
                  _rk_callable_source!(Expr[], Pair{Symbol,Any}[], nameof(callable),
                                       callable) === nothing)
-            family = callable isa StanBlocks.ValueFamily ? callable.label : nameof(callable)
+            family = label !== nothing ? label : nameof(callable)
             error("RK source: `$name ~ $family(...)` needs a scalar " *
                 "`_rk_observation_source!` provider on the RK backend; " *
                 "this Stan-only family has no scalar Julia constructor")

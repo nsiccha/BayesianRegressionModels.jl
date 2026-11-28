@@ -38,8 +38,9 @@ function _brm_warn_legacy_ode(ex::Expr, scope, location=LineNumberNode(0, :none)
             Meta.isexpr(head, :., 2) && head.args[2] isa QuoteNode ? head.args[2].value : head
         if name in (:ode_rk45, :ode_rk45_tol, :ode_bdf, :ode_bdf_tol)
             callable = _sb_cell_binding(scope, head)
-            builtin = getfield(StanBlocks.stan.builtin, name)
-            legacy = callable === builtin || (callable === nothing && head === name) ||
+            builtin = _brm_stan_builtin(name)
+            legacy = (builtin !== nothing && callable === builtin) ||
+                (callable === nothing && head === name) ||
                 (callable isa _BRMCellODE && _brm_ode_stan_times(ex.args[2:end]))
             if legacy
                 solver = name in (:ode_rk45, :ode_rk45_tol) ? :ode_rk45 : :ode_bdf

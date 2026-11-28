@@ -32,7 +32,7 @@ function _brm_svi_gaussian_kernel(kernel::_RKPreparedKernelAssignment, predictor
         "UncertifiedPlateBody: only direct observation-only plates are certified")
     routes = Dict{Symbol,NamedTuple}()
     for o in kernel.observations
-        _brm_svi_gaussian_require((o.callable === Normal || o.callable === StanBlocks.normal) &&
+        _brm_svi_gaussian_require((o.callable === Normal || _brm_stan_family(o.callable) === :normal) &&
             length(o.arguments) == 2 && o.weight === nothing && o.modifier === nothing && isempty(o.bounds),
             "UnsupportedObservation: plate requires an unmodified Normal law")
         mean, scale = o.arguments
@@ -79,7 +79,7 @@ function _brm_svi_gaussian_observations(plan::_RKValuePlan, predictors, paramete
         _brm_svi_gaussian_require(!(o isa _RKScanObservation), "UnsupportedObservation: scan")
         d = o.distribution
         _brm_svi_gaussian_require(d isa _BRMPreparedExpr &&
-            (d.callable === Normal || d.callable === StanBlocks.normal) &&
+            (d.callable === Normal || _brm_stan_family(d.callable) === :normal) &&
             length(d.args) == 2 && isempty(d.kwargs) && o.modifier === nothing &&
             o.weight === nothing && o.missing_response === nothing,
             "UnsupportedObservation: requires an unmodified Normal law")

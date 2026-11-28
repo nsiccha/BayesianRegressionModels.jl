@@ -46,6 +46,9 @@ include("censored_delays.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")
 include("formula_markers.jl")
+# The Stan backend's vocabulary as neutral and RK code asks for it; the Stan
+# side answers in sb_vocabulary.jl (snag `stanblocks-and-b-0e9cf921`).
+include("stan_vocabulary.jl")
 include("ode.jl")
 include("gmrf_precision.jl")
 include("gmrf_interpolation.jl")
@@ -114,6 +117,7 @@ include("rk_gmrf_predict.jl")
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
+include("sb_vocabulary.jl")
 include("sbimpl.jl")
 include("sb_gmrf.jl")
 include("sb_gmrf_multiresolution.jl")
