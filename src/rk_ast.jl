@@ -375,26 +375,6 @@ function _rk_ast_horseshoe_block!(definitions, taken, local_scale, tau, ratio)
         Expr(:call, :*, raw, lambda, global_scale, ratio); doc)
 end
 
-# A monotonic effect, as StanBlocks' `_sb_mo`: the increment simplex with its
-# Dirichlet prior, returning the cumulative contrast at each row's level.
-function _rk_ast_monotonic_block!(definitions, taken, term)
-    column = only(term.columns)
-    block = _rk_block_body()
-    c = _rk_block_argument!(block, :c, column)
-    increments = _rk_block_local!(block, :simplex_incr)
-    push!(block.statements, Expr(:call, :~, increments,
-        Expr(:call, :Dirichlet, Expr(:vect, term.options.alpha...))))
-    contrast = _rk_ast_statistical_call!(definitions, taken,
-        :brm_monotonic_contrast, c, increments)
-    doc = @_rk_definition_doc """
-        A monotonic contrast of the ordinal codes `$c`.
-
-        Draws the increments `$increments ~ Dirichlet(alpha)` and returns
-        `cumsum(vcat(0.0, $increments))[$c]`, which rises from 0 at the lowest level to 1
-        at the highest."""
-    _rk_ast_block_call!(definitions, taken, "brm_monotonic", block, contrast; doc)
-end
-
 # A statistical block is one self-contained submodel, as in StanBlocks: it
 # allocates its parameters with their priors and returns its post-processed
 # value, so the caller writes one `lhs ~ block(...)` statement and the block's

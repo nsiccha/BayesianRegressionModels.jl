@@ -227,7 +227,7 @@ function _sb_replay_component!(new_data, new_preproc, handled, key, entry, sb, d
             fitted = get(sb.preproc, name, nothing)
             if fitted isa PreprocEntry && fitted.kind === :constant
                 scalars[name] = new_data[name]
-            elseif _sb_df_has_column(df, name)
+            elseif _brm_df_has_column(df, name)
                 delete!(scalars, name)
             end
         end

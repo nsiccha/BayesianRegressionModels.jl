@@ -15,7 +15,6 @@ _rk_extent_bindings(plan::_RKValuePlan) = _rk_extent_bindings(plan.regression)
 _rk_input_bindings(plan::_RKValuePlan) = _rk_input_bindings(plan.regression)
 _rk_generated_input_entries(plan::_RKValuePlan) = _rk_generated_input_entries(plan.regression)
 
-_rk_value_invlogit(x) = logistic(x)
 brm_invprobit(x) = 0.5erfc(-x / sqrt(2))
 brm_invcloglog(x) = -expm1(-exp(x))
 
@@ -169,45 +168,6 @@ function _rk_ast_varying_draws!(definitions, taken, K, eta, rows;
             "`$z .* $sd[1]`"), one row per level."""
     _rk_ast_block_call!(definitions, taken, scales === nothing ? base : base * "_r2d2",
         block, value; doc)
-end
-
-# `gr(g, by=s)`: per-stratum scales and correlation factors, one row of draws
-# per observation (StanBlocks' `ranef_correlated_by_draws`).
-function _rk_ast_stratified_draws!(definitions, taken, K, eta, group, stratum)
-    block = _rk_block_body()
-    g = _rk_block_argument!(block, :g, group)
-    s = _rk_block_argument!(block, :s, stratum)
-    sd, z, b = _rk_block_local!(block, :sd), _rk_block_local!(block, :z),
-        _rk_block_local!(block, :b)
-    i = _rk_block_local!(block, :i)
-    index = Expr(:call, :(:), 1, K)
-    push!(block.statements, Expr(:call, :.~, Expr(:ref, sd,
-        Expr(:call, :levels, s), index),
-        _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
-    L = nothing
-    if K > 1
-        L, k = _rk_block_local!(block, :L), _rk_block_local!(block, :k)
-        cell = Expr(:call, :~, Expr(:ref, L, k), Expr(:call, :LKJCholesky, K, eta))
-        push!(block.statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-            Expr(:for, Expr(:(=), k, Expr(:call, :levels, s)), Expr(:block, cell))))
-    end
-    push!(block.statements, Expr(:call, :.~, Expr(:ref, z,
-        Expr(:call, :levels, g), index), _rk_ast_dotted(:Normal, 0, 1)))
-    scale = Expr(:ref, sd, Expr(:ref, s, i), :(:))
-    raw = Expr(:ref, z, Expr(:ref, g, i), :(:))
-    value = K == 1 ? Expr(:call, :.*, scale, raw) :
-        Expr(:call, :*, Expr(:call, :.*, scale, Expr(:ref, L, Expr(:ref, s, i))), raw)
-    cell = Expr(:(=), Expr(:ref, b, i, index), value)
-    push!(block.statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-        Expr(:for, Expr(:(=), i, Expr(:call, :eachindex, g)), Expr(:block, cell))))
-    doc = @_rk_definition_doc """
-        Group-level draws of grouping `$g` whose scales$(K > 1 ? " and correlation" : "") differ by stratum `$s` (`gr(g, by = s)`).
-
-        Draws one scale per stratum and margin, `$sd[levels($s), 1:$K]` (half-normal)$(K > 1 ?
-            ", a Cholesky factor `$L[k] ~ LKJCholesky($K, eta)` per stratum" : ""), and standardized
-        draws `$z[levels($g), 1:$K] ~ Normal(0, 1)`. Returns one row per observation `$i`: its
-        level's draws scaled by its stratum's scales$(K > 1 ? " and factor" : "")."""
-    _rk_ast_block_call!(definitions, taken, "brm_stratified_draws", block, b; doc)
 end
 
 # One positive scale law per margin of a bucket. Stan's ordinary unnamed

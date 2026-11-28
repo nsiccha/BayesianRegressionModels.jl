@@ -1389,13 +1389,6 @@ function _brmd_family_caption(x::BRMDescriptionComponent)
         families=join(unique("`"*string(_brmd_callable_name(c.callable))*"`" for c in coordinates),", "))
 end
 
-function _brmd_prior_equation(p)
-    c=p.distribution
-    c isa BRMDescriptionComponent || return string(p.distribution)
-    support=isempty(p.support) ? "" : "\\quad " * join(
-        (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(p.support)),", ")
-    _brmd_distribution_math(c,c)*support
-end
 _brmd_path_markdown(id::Tuple)=join((part isa Tuple ? "("*_brmd_path_markdown(part)*")" : _brmd_path_markdown(part) for part in id)," / ")
 _brmd_path_markdown(part)="`"*replace(string(part),"|"=>"\\|")*"`"
 _brmd_prior_id_markdown(id)=_brmd_path_markdown(id)

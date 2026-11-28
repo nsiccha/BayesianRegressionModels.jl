@@ -6,7 +6,7 @@ function _gp_positive(value::Real, name)
     Float64(value)
 end
 
-# The location indices and the period and jitter guards are also spliced,
+# The location indices and the period and jitter guards are spliced,
 # as source, into the covariance graphs (`_GP_COVARIANCE_MODELS`), where they
 # read the graphs' `x` / `period` / `jitter` data, so RK sees and translates
 # them (jax_source's `prepare_data`) instead of an opaque call.
@@ -24,10 +24,6 @@ const _GP_JITTER_BODY = quote
         "GP jitter must be finite and nonnegative, got $jitter"))
     Float64(jitter)
 end
-@eval _gp_indices(x::AbstractVector) = $_GP_INDICES_BODY
-@eval _gp_period(period::Real) = $_GP_PERIOD_BODY
-@eval _gp_jitter(jitter::Real) = $_GP_JITTER_BODY
-
 
 """
     gp_exp_quad_cov(x, sigma, rho, jitter)

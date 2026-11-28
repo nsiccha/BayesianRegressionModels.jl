@@ -244,7 +244,7 @@ function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze,held_out)
         mod=sb.model.mod,total_groups=(),held_out=sb.held_out,_frozen_preproc=sb.preproc)
     frozen = merge(Dict(sb.preproc),training.preproc)
     # The replay's own `held_out` replaces the fit's.
-    rebound = _sb_rebind_brmi(sb.parent,new_df)
+    rebound = _brm_rebind_brmi(sb.parent,new_df)
     target = _sb_apply_held_out(
         SBBRMI(rebound;mod=sb.model.mod,total_groups=(),cv_groups=groups,
                held_out=(),resample_covariates=selected,_frozen_preproc=frozen),

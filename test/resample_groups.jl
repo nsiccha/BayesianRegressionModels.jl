@@ -271,7 +271,7 @@ end
 # so a prediction slice whose `hsgp(...)` axis is CONSTANT (a fixed future dose)
 # reaches HSGP emission with an all-equal axis. Frozen replay must apply the
 # fitted basis there — it must NOT re-fit and trip the degeneracy guard. A
-# lazy-fit regression in `_sb_hsgp_fit_for_emission` (eager `fresh = _sb_fit_hsgp`
+# lazy-fit regression in `_sb_hsgp_fit_for_emission` (eager `fresh = _brm_fit_hsgp`
 # ahead of the frozen-entry early return) made this crash `hsgp: degenerate
 # input`; plain frozen `reprocess` was always lazy and unaffected. Snag
 # `reprocess-freeze-c4ac8241` (a downstream PKPD consumer); the entangled kernel/ragged

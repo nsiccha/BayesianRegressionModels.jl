@@ -3544,7 +3544,6 @@ struct LikelihoodColumn{P,R} <: AbstractColumn
 end
 Base.parent(d::LikelihoodColumn) = getfield(d, :parent)
 rhs(d::LikelihoodColumn) = getfield(d, :rhs)
-maybedists(lhs::AbstractColumn, x::AbstractColumn) = LikelihoodColumn(lhs, x)
 
 """
     BRMI(; ops...)

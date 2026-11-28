@@ -23,6 +23,11 @@ _brm_prepares_term(term::ExprColumn{typeof(car)}) = true
 
 _brm_term_arg_name(value::NamedColumn) = name(value)
 _brm_term_arg_name(_value) = nothing
+# Canonical key for a term as a backend sees it. Must agree character for
+# character with `_term_address_key` in `macro.jl`, which builds the same key
+# from surface syntax: that agreement is the address resolution. Numeric and
+# keyword arguments are excluded on both sides, so `me(x, 0.5)` and `me(x)`
+# name one term.
 _brm_prepared_term_key(term::ExprColumn) = Symbol(nameof(getf(term)), "(",
     join((value for value in (_brm_term_arg_name(arg) for arg in getargs(term))
           if !isnothing(value)), ","), ")")

@@ -859,7 +859,7 @@ end
     @test getf(only(getargs(censored_rhs))) === Normal
 
     exponential_rhs = rhs_for(:y_exponential_censored)
-    @test BayesianRegressionModels._sb_normalize_bound(
+    @test BayesianRegressionModels._brm_normalize_response_bound(
         getkwargs(exponential_rhs).lower) === nothing
 
     interval_rhs = rhs_for(:y_interval)

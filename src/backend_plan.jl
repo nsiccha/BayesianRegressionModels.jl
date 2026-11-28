@@ -40,6 +40,8 @@ end
 function reprocess end
 
 _brm_df_has_column(df, key::Symbol) = hasproperty(df, key)
+# Fetch a raw column from a new df via the BRM `Data` wrapper (the same accessor
+# the `@brm` builder uses), unwrapped to a plain vector. Errors if absent.
 function _brm_df_column(df, key::Symbol)
     column = getproperty(Data(df), key)
     data = parent(column)
@@ -1578,67 +1580,6 @@ struct _BRMMultiMembershipPlan{L<:AbstractVector,I<:AbstractVector{Int},
     normalize::Bool
 end
 
-function _brm_replay_random_effect_plan(
-        training::_BRMRandomEffectPlan, context::_BRMBackendContext)
-    raw_groups = context.data[training.group]
-    lookup = Dict(level => index for (index, level) in pairs(training.levels))
-    unknown = unique(
-        [level for level in raw_groups if !haskey(lookup, level)])
-    isempty(unknown) || error(
-        "BRM replay: grouping factor `$(training.group)` contains unseen " *
-        "level(s) $(collect(unknown)); fitted levels are " *
-        "$(collect(training.levels))")
-    indices = Int[lookup[level] for level in raw_groups]
-    stratum_indices = Int[]
-    group_strata = Int[]
-    if !isnothing(training.by)
-        raw_strata = context.data[training.by]
-        length(raw_strata) == length(raw_groups) || error(
-            "BRM replay: grouping factor `$(training.group)` and stratum " *
-            "column `$(training.by)` have different row counts")
-        stratum_lookup = Dict(
-            level => index for (index, level) in pairs(training.strata))
-        unknown_strata = unique(
-            [level for level in raw_strata if !haskey(stratum_lookup, level)])
-        isempty(unknown_strata) || error(
-            "BRM replay: stratum `$(training.by)` contains unseen level(s) " *
-            "$(collect(unknown_strata)); fitted strata are " *
-            "$(collect(training.strata))")
-        stratum_indices = Int[stratum_lookup[level] for level in raw_strata]
-        observed_mapping = _brm_group_strata(
-            indices, stratum_indices, length(training.levels),
-            training.group, training.by)
-        for group_index in eachindex(observed_mapping)
-            observed_mapping[group_index] == 0 && continue
-            observed_mapping[group_index] == training.group_strata[group_index] ||
-                error("BRM replay: group `$(training.group)` level " *
-                      "$(training.levels[group_index]) changed stratum in " *
-                      "`$(training.by)`")
-        end
-        group_strata = training.group_strata
-    end
-    n = length(indices)
-    cache = Dict{Symbol,Vector{Float64}}()
-    columns = map(training.columns) do column
-        values = _brm_replay_population_column(column, context.data, cache)
-        isnothing(values) && (values = ones(Float64, n))
-        length(values) == n || error(
-            "BRM replay: random-effect column `$(column.label)` and grouping " *
-            "factor `$(training.group)` have different row counts")
-        _BRMPopulationColumn(
-            column.label, column.effect_addresses, column.effect_block,
-            column.source, values, column.preprocess)
-    end
-    matrix = hcat((column.values for column in columns)...)
-    _BRMRandomEffectPlan(
-        training.predictor, training.id, training.group, training.by,
-        training.levels, training.strata, indices, stratum_indices,
-        group_strata, Tuple(columns), matrix, training.intercept_only,
-        training.zero_correlation, training.centered, training.sd_prior,
-        training.sd_family,
-        training.sd_rate, training.lkj_eta)
-end
-
 # A grouping column's values. An assignment that reads a model value is no
 # data column, so it cannot group.
 function _brm_group_values(context, group::Symbol)
@@ -1648,39 +1589,6 @@ function _brm_group_values(context, group::Symbol)
         "predictor or a modelled value")
     context.data[group]
 end
-
-function _brm_replay_random_effect_plan(
-        training::_BRMMultiMembershipPlan, context::_BRMBackendContext)
-    raw_groups = Tuple(context.data[group] for group in training.groups)
-    raw_weights = isnothing(training.weight_sources) ? nothing :
-        Tuple(context.data[weight] for weight in training.weight_sources)
-    prepared = _brm_prepare_mm(
-        raw_groups, raw_weights, training.normalize;
-        levels=training.levels, group_names=training.groups,
-        weight_names=training.weight_sources, prefix="BRM replay")
-    cache = Dict{Symbol,Vector{Float64}}()
-    columns = map(training.columns) do column
-        values = _brm_replay_population_column(column, context.data, cache)
-        isnothing(values) && (values = ones(Float64, prepared.n_obs))
-        length(values) == prepared.n_obs || error(
-            "BRM replay: random-effect column `$(column.label)` and " *
-            "multi-membership rows have different row counts")
-        _BRMPopulationColumn(
-            column.label, column.effect_addresses, column.effect_block,
-            column.source, values, column.preprocess)
-    end
-    matrix = hcat((column.values for column in columns)...)
-    _BRMMultiMembershipPlan(
-        training.predictor, nothing, training.group, nothing,
-        training.levels, Any[], prepared.group_idx, Int[], Int[],
-        Tuple(columns), matrix, training.intercept_only, false, false,
-        training.sd_prior, training.sd_family, training.sd_rate, training.lkj_eta,
-        training.groups, training.weight_sources, prepared.weights,
-        prepared.n_obs, prepared.n_memberships, training.normalize)
-end
-
-_brm_replay_random_effect_plans(training::Tuple, context::_BRMBackendContext) =
-    Tuple(_brm_replay_random_effect_plan(block, context) for block in training)
 
 _brm_additive_terms(@nospecialize(rhs)) = begin
     terms = Any[]
@@ -2040,6 +1948,9 @@ function _brm_population_column(term::NamedColumn)
        values=collect(Float64, raw), preprocess=nothing)
 end
 
+# Fit/apply split for the vector-wise standardisers. `_brm_fit_*` computes the
+# data-derived constant; `_brm_apply_*` applies a (possibly frozen) constant to
+# a vector, which a replay reuses for prediction.
 _brm_fit_zscale(v::AbstractVector{<:Real}) = let
     fit = _brm_fit_zscale_numeric(v, :predictor,
         message -> ArgumentError("BRM preparation: $message"))
@@ -2133,6 +2044,9 @@ end
 
 _brm_wrapper_prefix(::Val{prefix}) where {prefix} = prefix
 _brm_wrapper_prefix(::Val{:*}) = :product
+# Stable, human-readable column name for a wrapped predictor. When the
+# inner is a single NamedColumn we tag with its name; otherwise we hash
+# the expr structure so multiple `protect(...)` summands don't collide.
 _brm_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
     Symbol(_brm_wrapper_prefix(Val(prefix)), :_, name(inner))
 _brm_wrapper_col_name(prefix::Symbol, inner) =
@@ -2451,9 +2365,16 @@ _brm_fit_not_exported(tag, name) = error(
     "yet, or the state was exported from another model; replay it with " *
     "`reprocess(rk, new_data)` on the training fit instead")
 
+# Fit/apply split for categorical level coding (factor / mo). `_brm_fit_levels`
+# returns the ordered level set (the frozen constant); `_brm_apply_levels` maps a
+# raw column to 1-based codes against a (possibly frozen) level set, erroring on
+# an unseen level. On the same training column these reproduce
+# `_brm_level_index`'s codes exactly: for a CategoricalVector the level position
+# is `CA.levelcode`; for a plain vector `sort(unique)` gives the same ordering.
 _brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
 _brm_apply_levels(levels, raw::AbstractVector) =
     _brm_apply_fitted_levels(levels, raw)
+# Categorical -> (n_levels::Int, per-row level index::Vector{Int}).
 _brm_level_index(raw::CA.CategoricalVector) =
     length(CA.levels(raw)), Int.(CA.levelcode.(raw))
 _brm_level_index(raw::AbstractVector) = begin
@@ -3154,6 +3075,21 @@ struct _BRMPopulationPredictor{F,D<:_BRMPopulationDesign}
     design::D
 end
 
+# The name a linear predictor's population design is EMITTED under. A bare
+# `loc ~ 1 + x` emits under `loc`; an LHS link transformation `log(Vc) ~ 1 + x`
+# emits the LINKED scale under `log_Vc` and then binds `Vc = exp(log_Vc)`. So
+# every emitted artefact of the design carries the LINKED spelling
+# (`X_log_Vc`, `pop_log_Vc`, `pop_log_Vc_beta_pop`, `Z_log_Vc_<id>_<g>`) while
+# the PUBLIC address stays the bare `Vc` that `linear_predictors` reports and
+# `popcoefnames` / `effect(...)` / `ranefcoefnames` take.
+#
+# Mapping the emitted name back to the public one is not derivable by string
+# surgery (`pop_log_Vc` is equally `pop_` + an inert LP literally named
+# `log_Vc`), so it is derived FORWARDS from the formula through this function.
+# `identity` is `linear_predictors`' marker for an UNWRAPPED LHS (`loc ~ 1 + x`),
+# which emits under its own name. A literal `identity(loc) ~ 1 + x` reaches the
+# link path instead and takes the same branch — harmless, because Stan has no
+# `identity` function, so that spelling has never transpiled either way.
 _brm_lp_emitted_name(name::Symbol, link_lhs_fn) =
     link_lhs_fn === identity ? name : Symbol(nameof(link_lhs_fn), :_, name)
 
@@ -3850,24 +3786,6 @@ Base.@nospecializeinfer function _brm_population_effect_operation_keys(@nospecia
         length(address) == 2 || continue
         first(address) in _NON_EFFECT_CLASSES && continue
         push!(out, key)
-    end
-    out
-end
-
-Base.@nospecializeinfer function _brm_ranef_effect_operation_keys(@nospecialize(brmi::BRMI))
-    out = Set{Symbol}()
-    for (key, op_nc) in _brm_operation_entries(brmi)
-        op = _named_op(op_nc)
-        isnothing(op) && continue
-        getf(op) === (~) || continue
-        lhs, rhs = getargs(op, 2)
-        lhs_e = _as_expr_column(lhs)
-        rhs_e = _as_expr_column(rhs)
-        (isnothing(lhs_e) || isnothing(rhs_e) || getf(lhs_e) !== effect) &&
-            continue
-        address = getargs(lhs_e)
-        isempty(address) && continue
-        first(address) in (:sd, :cor) && push!(out, key)
     end
     out
 end

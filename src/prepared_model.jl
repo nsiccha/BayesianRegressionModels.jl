@@ -269,9 +269,6 @@ function _brm_validate_logit_expr!(expr::_BRMPreparedExpr, response, links, pref
     nothing
 end
 
-_brm_prepared_operation(model::_BRMPreparedModel, key::Symbol) =
-    only(operation for operation in model.program.operations if operation.name === key)
-
 _brm_prepared_nodes(model::_BRMPreparedModel) =
     (model.parameters..., model.predictors..., model.assignments..., model.observations...)
 

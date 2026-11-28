@@ -8,12 +8,6 @@ import StanBlocks: NestedRaggedVector, RaggedVector
 # name.
 # ==============================================================================
 
-_sb_interval_literal(x::Real) = _brm_interval_literal(x)
-_sb_interval_literal(x::NamedColumn) = _brm_interval_literal(x)
-_sb_interval_literal(x::ExprColumn) = _brm_interval_literal(x)
-_sb_interval_literal(x) = _brm_interval_literal(x)
-_sb_circular_interval(kwargs) = _brm_circular_interval(kwargs)
-
 popefs = StanBlocks.@slic begin
     n_covariates = dims(X)[2]
     beta_pop ~ std_normal(; n=n_covariates)
@@ -133,22 +127,6 @@ function _sb_class_population_call(X_name::Symbol, n_classes::Symbol, overrides,
     end
     :(_popefs_classes_normal(; X=$X_name, n_classes=$n_classes,
         beta_loc=$(Expr(:vect, loc...)), beta_scale=$(Expr(:vect, scale...))))
-end
-
-function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
-                                   target::Symbol, stmts)
-    body = deepcopy(base.model)
-    body.head === :block || error("sbimpl: generic prior base is not a block")
-    at = findfirst(body.args) do node
-        node isa Expr && node.head === :(::) && !isempty(node.args) &&
-            node.args[1] === target
-    end
-    isnothing(at) && error(
-        "sbimpl: generic prior base has no typed `$target` declaration")
-    for (offset, stmt) in enumerate(stmts)
-        insert!(body.args, at + offset, stmt)
-    end
-    StanBlocks.SlicModel(body, deepcopy(base.data), base.mod, base.observations)
 end
 
 const _SB_VECTOR_PRIOR_CACHE = Dict{Tuple{String,Tuple},StanBlocks.ValueFamily}()
@@ -3595,29 +3573,6 @@ _sb_t2_generic = StanBlocks.@slic begin
     return Xfixed * b_fixed + Zrr * b_rr + Zrn * b_rn + Znr * b_nr
 end
 
-# Fit/apply split for Wood's rank-k thin-plate regression spline (d=1, m=2).
-# The radial kernel is eta(r)=r^3/12 (Wood 2003, eq. 7). We keep the k largest-
-# magnitude eigenvectors of the full kernel matrix, impose the T' * delta = 0
-# side constraint, and diagonalize the resulting range-space penalty. Applying
-# the fitted object to new x values needs only the frozen training centers,
-# shift, and penalty-whitened range projection.
-# Common fitted-basis preparation lives in preparation_basis.jl. Keep the
-# established StanBlocks helper names as compatibility delegates.
-_sb_tps_kernel(x::AbstractVector{<:Real}, centers::AbstractVector{<:Real}) = _brm_tps_kernel(x, centers)
-_sb_fit_spline(x::AbstractVector{<:Real}; k::Int=10) = _brm_fit_spline(x; k)
-_sb_apply_spline(fit, x::AbstractVector{<:Real}) = _brm_apply_spline(fit, x)
-_sb_spline_basis_tps(x::AbstractVector{<:Real}; k::Int=10) = _brm_spline_basis_tps(x; k)
-_sb_type7_knots(x::AbstractVector{<:Real}, k::Int) = _brm_type7_knots(x, k)
-_sb_cr_second_derivative_map(knots::AbstractVector{<:Real}) = _brm_cr_second_derivative_map(knots)
-_sb_cr_basis(knots, F, x::AbstractVector{<:Real}) = _brm_cr_basis(knots, F, x)
-_sb_fit_cr_spline(x::AbstractVector{<:Real}; k::Int=5) = _brm_fit_cr_spline(x; k)
-_sb_apply_cr_spline(fit, x::AbstractVector{<:Real}) = _brm_apply_cr_spline(fit, x)
-_sb_row_tensor(A::AbstractMatrix, B::AbstractMatrix) = _brm_row_tensor(A, B)
-_sb_t2_raw_blocks(args...) = _brm_t2_raw_blocks(args...)
-_sb_block_center(args...) = _brm_block_center(args...)
-_sb_center_block(args...) = _brm_center_block(args...)
-_sb_fit_t2(x::AbstractVector{<:Real}, z::AbstractVector{<:Real}; k::Tuple{Int,Int}=(5, 5)) = _brm_fit_t2(x, z; k)
-_sb_apply_t2(fit, x::AbstractVector{<:Real}, z::AbstractVector{<:Real}) = _brm_apply_t2(fit, x, z)
 # brms-style `me(x_obs, sd_x)` measurement-error predictor. The submodel
 # allocates a length-N latent `x_true` vector with prior `std_normal` and
 # emits the observation likelihood `x_obs ~ normal(x_true, sd_x)` directly.
@@ -4174,7 +4129,7 @@ end
 # anisotropic variants differ only in whether one or d log length scales are
 # sampled. As with exact GP, the returned draw is a direct predictor summand.
 #
-# `rho_lower` is the approximation's validity floor (`_sb_hsgp_rho_lower`),
+# `rho_lower` is the approximation's validity floor (`_brm_hsgp_rho_lower`),
 # supplied as data by the emitter -- scalar here, one entry per axis in the
 # `_aniso` spellings. It is the DEFAULT bound only: `length_scale(lp, hsgp(x))`
 # replaces this whole statement through `Base.merge`, so an explicit
@@ -4235,7 +4190,7 @@ end
 # and no domain, so nothing here is data-derived except the axis itself. The
 # parameter names deliberately match `_sb_hsgp` (`rho_iso`, `sigma`,
 # `beta_raw`) so the term-prior addresses and descriptor roles are shared.
-# `rho_lower` is the periodic validity floor (`_sb_hsgp_periodic_rho_lower`).
+# `rho_lower` is the periodic validity floor (`_brm_hsgp_periodic_rho_lower`).
 _sb_hsgp_periodic = StanBlocks.@slic begin
     n_basis = dims(harmonics)[1]
     rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
@@ -4418,22 +4373,6 @@ _sb_hsgp_by_multigroup_inducing_lambda =
 _sb_hsgp_by_aniso_multigroup_inducing_lambda =
     _sb_multigroup_own_lambda(_sb_hsgp_by_aniso_multigroup_inducing)
 
-# Categorical -> (n_levels::Int, per-row level index::Vector{Int}), the shared
-# `_brm_level_index`, so the integer indices the walker stashes in `data`
-# agree with the preparation layer's.
-_sb_level_index(raw::AbstractVector) = _brm_level_index(raw)
-
-# Fit/apply split for categorical level coding (factor / mo). `_sb_fit_levels`
-# returns the ordered level set (the frozen constant); `_sb_apply_levels` maps a
-# raw column to 1-based codes against a (possibly frozen) level set, erroring on
-# an unseen level (the dimension-coupled guard — brm-use §4 constraint 8). On
-# the SAME training column these reproduce `_sb_level_index`'s codes exactly:
-# for a CategoricalVector the level position == `CA.levelcode`; for a plain
-# vector `sort(unique)` gives the same ordering. `_sb_level_index` (the
-# construct-time entry) is unchanged.
-_sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
-_sb_apply_levels(levels, raw::AbstractVector) = _brm_apply_levels(levels, raw)
-
 # ---- releveled `factor(x; ref=...)` terms -----------------------------------
 #
 # A releveled factor lowers to its own block (`x__ref_k`, or `x__ref_<level>`
@@ -4506,9 +4445,9 @@ _sb_factor_replay_ref(_raw, block::Symbol) = block
 # the coding the record's levels use.
 _sb_factor_block(raw_ref::Symbol) = raw_ref
 _sb_factor_block(raw_ref::_SBFactorSource) = raw_ref.block
-_sb_factor_replay_values(raw_ref::Symbol, df) = _sb_df_column(df, raw_ref)
+_sb_factor_replay_values(raw_ref::Symbol, df) = _brm_df_column(df, raw_ref)
 _sb_factor_replay_values(raw_ref::_SBFactorSource, df) =
-    _sb_factor_replay_values(raw_ref, raw_ref.ref, _sb_df_column(df, raw_ref.source))
+    _sb_factor_replay_values(raw_ref, raw_ref.ref, _brm_df_column(df, raw_ref.source))
 function _sb_factor_replay_values(raw_ref::_SBFactorSource, ref::Int, raw)
     values = _sb_integer_factor_values(raw)
     values isa AbstractVector{<:Integer} || error(
@@ -4522,13 +4461,13 @@ _sb_factor_replay_values(_raw_ref::_SBFactorSource, ::String, raw) =
 # A fresh replay (`freeze_constants=false`) re-derives the level set in the
 # coding the record's levels use: sorted codes, or sorted strings with the
 # reference first.
-_sb_factor_refit_levels(_raw_ref::Symbol, values) = _sb_fit_levels(values)
+_sb_factor_refit_levels(_raw_ref::Symbol, values) = _brm_fit_levels(values)
 _sb_factor_refit_levels(raw_ref::_SBFactorSource, values) =
     _sb_factor_refit_levels(raw_ref, raw_ref.ref, values)
 _sb_factor_refit_levels(_raw_ref::_SBFactorSource, ::Int, values) =
-    _sb_fit_levels(values)
+    _brm_fit_levels(values)
 _sb_factor_refit_levels(raw_ref::_SBFactorSource, ref::String, values) =
-    _sb_string_factor_levels(_sb_fit_levels(values), ref, raw_ref.source)
+    _sb_string_factor_levels(_brm_fit_levels(values), ref, raw_ref.source)
 
 # A frozen re-emission lowers every `factor(x; ref=...)` term over the level set
 # the fit coded `x` with, read off its categorical records: lowering checks the
@@ -4600,11 +4539,10 @@ _sb_fitted_values(raw) = _brm_factor_values(raw)
 
 # Random-effect group coding has the same frozen-level geometry as `factor`,
 # but deserves its own diagnostic: the missing coordinate is a fitted group
-# effect, not a treatment contrast.  Keep this separate from `_sb_apply_levels`
+# effect, not a treatment contrast.  Keep this separate from `_brm_apply_levels`
 # so an unseen group cannot be misreported as a factor-level problem.
-const _sb_group_values = _brm_group_values
 function _sb_apply_group_levels(levels, raw::AbstractVector, group::Symbol)
-    values = _sb_group_values(raw)
+    values = _brm_group_values(raw)
     lm = Dict(l => i for (i, l) in enumerate(levels))
     idx = Vector{Int}(undef, length(values))
     for (row, level) in enumerate(values)
@@ -4625,7 +4563,7 @@ function _sb_hsgp_replay_input(df, e; allow_empty::Bool)
     source = get(e.const_, :rows_source, nothing)
     names = e.raw_ref isa Symbol ? (e.raw_ref,) : Tuple(e.raw_ref)
     mask = isnothing(source) ? nothing : _brm_hsgp_row_mask(
-        _sb_df_column(df, source), length(_sb_df_column(df, first(names))), source)
+        _brm_df_column(df, source), length(_brm_df_column(df, first(names))), source)
     (; axes=_sb_gp_axes_from_df(df, e.raw_ref, :hsgp; allow_empty, mask), mask)
 end
 
@@ -4650,22 +4588,6 @@ function _sb_gp_axes(label::Symbol, args::Tuple)
     Tuple(names), Tuple(axes)
 end
 
-_sb_gp_matrix(axes::Tuple) = _brm_gp_matrix(axes)
-
-_sb_axis_option(label::Symbol, key::Symbol, value, n_axes::Int, pred, expectation::String) = _brm_axis_option(label, key, value, n_axes, pred, expectation)
-_sb_hsgp_options(kw, n_axes::Int) = _brm_hsgp_options(kw, n_axes)
-_sb_hsgp_domain_fits(kw, n_axes::Int; required::Bool=false) = _brm_hsgp_domain_fits(kw, n_axes; required)
-_sb_hsgp_orthogonal_to(kw, n_axes::Int) = _brm_hsgp_orthogonal_to(kw, n_axes)
-_sb_gp_iso(kw, label::Symbol) = _brm_gp_iso(kw, label)
-const _SB_GP_COVARIANCES = _BRM_GP_COVARIANCES
-_sb_gp_cov(kw, label::Symbol) = _brm_gp_cov(kw, label)
-
-# `period` is the periodic kernel's formula constant: required with
-# `cov=:periodic`, meaningless (and refused) otherwise.
-_sb_gp_period(kw, label::Symbol, cov::Symbol) = _brm_gp_period(kw, label, cov)
-
-_sb_t2_options(args...) = _brm_t2_options(args...)
-
 function _sb_prepare_mm(raw_groups::Tuple, raw_weights, normalize::Bool;
                         levels=nothing,
                         group_names=ntuple(i -> Symbol(:group_, i), length(raw_groups)),
@@ -4674,22 +4596,6 @@ function _sb_prepare_mm(raw_groups::Tuple, raw_weights, normalize::Bool;
         raw_groups, raw_weights, normalize;
         levels, group_names, weight_names, prefix="sbimpl")
 end
-
-# HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
-# the tuple methods form its tensor product for variadic `hsgp(x...)`.
-# Common HSGP preparation lives in preparation_hsgp.jl. Keep the established
-# StanBlocks helper names as compatibility delegates.
-_sb_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real) = _brm_fit_hsgp(raw, K, c)
-_sb_fit_hsgp(axes::Tuple, K::Tuple, c::Tuple) = _brm_fit_hsgp(axes, K, c)
-_sb_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = _brm_apply_hsgp(c, raw, K)
-_sb_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple) = _brm_apply_hsgp(fits, axes, K)
-const _SB_HSGP_WEIGHT_THRESHOLD = _BRM_HSGP_WEIGHT_THRESHOLD
-_sb_hsgp_rho_lower(fit::Tuple, K::Integer) = _brm_hsgp_rho_lower(fit, K)
-_sb_hsgp_rho_lowers(fits::Tuple, K::Tuple) = _brm_hsgp_rho_lowers(fits, K)
-_sb_hsgp_rho_lower_data(fits::Tuple, K::Tuple, iso::Bool) = _brm_hsgp_rho_lower_data(fits, K, iso)
-_sb_apply_hsgp_periodic(period::Real, raw::AbstractVector{<:Real}, K::Integer) = _brm_apply_hsgp_periodic(period, raw, K)
-_sb_hsgp_periodic_harmonics(K::Integer) = _brm_hsgp_periodic_harmonics(K)
-_sb_hsgp_periodic_rho_lower(K::Integer) = _brm_hsgp_periodic_rho_lower(K)
 
 function _sb_hsgp_periodic_frozen_check(data, key, names, K::Integer,
                                         period::Real, options)
@@ -4799,7 +4705,7 @@ function _sb_record_group_index!(data, idx_key::Symbol, n_groups_key::Symbol,
     # A separate block can read the very same index. Its values have just
     # been checked, and replay still needs the joined block's other columns.
     isnothing(_sb_joint_group_record(data, idx_key)) || return
-    levels = _sb_fit_levels(raw)
+    levels = _brm_fit_levels(raw)
     _sb_record_preproc!(data, idx_key, PreprocEntry(
         :group_index, (; levels, n_groups_key), group, true))
 end
@@ -4811,8 +4717,8 @@ function _sb_record_group_index!(data, keys::NamedTuple, group::Symbol, by::Symb
                                  raw::AbstractVector, by_raw::AbstractVector,
                                  stratum_idx::AbstractVector{Int})
     _sb_record_preproc!(data, keys.idx_name, PreprocEntry(:group_index,
-        (; levels=_sb_fit_levels(raw), n_groups_key=keys.n_name, by,
-           strata=_sb_fit_levels(by_raw), stratum_idx=collect(stratum_idx),
+        (; levels=_brm_fit_levels(raw), n_groups_key=keys.n_name, by,
+           strata=_brm_fit_levels(by_raw), stratum_idx=collect(stratum_idx),
            stratum_idx_key=keys.s_idx_name, n_strata_key=keys.n_strata_name),
         group, true))
 end
@@ -4829,21 +4735,17 @@ _sb_record_static!(data, key::Symbol) =
 # from `df` instead of the BRMI's training-bound DataColumns. Used by `reprocess`
 # for zscale/center/standardize inners and the protect/implicit-fn fallback.
 _sb_rematerialize_vec(x::Number, _df) = x
-_sb_rematerialize_vec(x::NamedColumn, df) = _sb_df_column(df, name(x))
+_sb_rematerialize_vec(x::NamedColumn, df) = _brm_df_column(df, name(x))
 _sb_rematerialize_vec(x::Union{ExprColumn,_BRMIndexedSource}, df) =
     _brm_replay_expression(x, key -> _brm_df_column(df, key))
 _sb_rematerialize_vec(x, _df) = error(
     "sbimpl: reprocess: cannot re-materialise $(typeof(x)) against the new DataFrame")
 
-# Fetch a raw column from a new df via the BRM `Data` wrapper (the same accessor
-# the `@brm` builder uses), unwrapped to a plain vector. Errors if absent.
-const _sb_df_column = _brm_df_column
-
 function _sb_gp_axes_from_df(df, raw_ref, label::Symbol; allow_empty::Bool=false,
                              mask=nothing)
     names = raw_ref isa Symbol ? (raw_ref,) : Tuple(raw_ref)
     axes = ntuple(length(names)) do j
-        v = _brm_axis_values(_sb_df_column(df, names[j]), mask,
+        v = _brm_axis_values(_brm_df_column(df, names[j]), mask,
                              "sbimpl: reprocess: `$label($(names[j]))`")
         isempty(v) && !allow_empty && error(
             "sbimpl: reprocess: `$label($(names[j]))` cannot use an empty axis")
@@ -5103,10 +5005,8 @@ priors_of(sb::SBBRMI)    = priors_of(parent(sb))
 # time -- it is NOT a population formula. `linear_predictors` reports it all the
 # same (its LHS is a non-data `NamedColumn`). `popcoefnames` answers `nothing`
 # for it; the categorical, level, cell-mean and interaction walkers below have
-# no such answer, so they recognise the shape here before walking its RHS.
-function _sb_is_prior_declaration(brmi::BRMI, lp::Symbol)
-    _brm_is_prior_declaration(brmi, lp)
-end
+# no such answer, so they recognise the shape (`_brm_is_prior_declaration`)
+# before walking its RHS.
 
 # Names of the predictors an `effect(...)` address may legitimately reach.
 _sb_effect_available_predictors(lp_names, labels_of) =
@@ -5161,7 +5061,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing,
     # rather than made fatal for the whole model.
     resolved_cat = Dict{Symbol,Dict{Symbol,Symbol}}()
     cat_map_of(lp::Symbol) = get!(resolved_cat, lp) do
-        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Symbol}()
+        _brm_is_prior_declaration(brmi, lp) && return Dict{Symbol,Symbol}()
         try
             _sb_cat_address_map(brmi, lp)
         catch
@@ -5175,7 +5075,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing,
     # never-fatal discipline as the block map above.
     resolved_levels = Dict{Symbol,Dict{Symbol,Tuple{Symbol,Int}}}()
     level_map_of(lp::Symbol) = get!(resolved_levels, lp) do
-        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Tuple{Symbol,Int}}()
+        _brm_is_prior_declaration(brmi, lp) && return Dict{Symbol,Tuple{Symbol,Int}}()
         try
             _sb_cat_level_address_map(brmi, lp; frozen_preproc)
         catch
@@ -5184,7 +5084,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing,
     end
     resolved_cells = Dict{Symbol,Dict{Symbol,Int}}()
     cellmeans_of(lp::Symbol) = get!(resolved_cells, lp) do
-        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Int}()
+        _brm_is_prior_declaration(brmi, lp) && return Dict{Symbol,Int}()
         try
             _sb_cat_cellmeans_blocks(brmi, lp; frozen_preproc)
         catch
@@ -5208,7 +5108,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing,
     # reach it.
     resolved_interactions = Dict{Symbol,Dict{Symbol,Vector{Symbol}}}()
     interaction_map_of(lp::Symbol) = get!(resolved_interactions, lp) do
-        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Symbol}}()
+        _brm_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Symbol}}()
         try
             # Bare string and matrix terms address their design columns as a block.
             merge(_sb_interaction_address_map(brmi, lp; frozen_preproc),
@@ -6129,9 +6029,6 @@ end
 _as_data_column(x::DataColumn) = x
 _as_data_column(_) = nothing
 
-_as_missing_column(x::MissingColumn) = x
-_as_missing_column(_) = nothing
-
 _as_symbol(s::Symbol) = s
 _as_symbol(_) = nothing
 
@@ -6143,9 +6040,6 @@ _as_real_vec(_) = nothing
 
 _as_integer(x::Integer) = x
 _as_integer(_) = nothing
-
-_as_real(x::Real) = x
-_as_real(_) = nothing
 
 _as_error_exception(e::ErrorException) = e
 _as_error_exception(_) = nothing
@@ -6888,10 +6782,6 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
                    copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
 
-# Shared redirect: holding out every observation leaves nothing to fit, and
-# held-out likelihoods are not the prior mechanism.
-_sb_held_out_all_redirect() = _brm_held_out_all_redirect()
-
 # Resolve public response names through the emitted declaration inventory. This
 # is what makes a nested `qy ~ normal(...)` inside `kernel(..., qt_y, ...)`
 # addressable as `held_out=:qt_y`: the declaration records `target=:qy` and
@@ -7079,9 +6969,6 @@ end
 
 # ---- reprocess / restan_data (decision nr3v8n A) ----------------------------
 
-const _sb_df_has_column = _brm_df_has_column
-const _sb_rebind_brmi = _brm_rebind_brmi
-
 function _sb_resample_group_set(groups)
     groups === nothing && return Set{Symbol}()
     values = groups isa Symbol ? (groups,) : groups
@@ -7199,11 +7086,11 @@ _sb_cdar_by_columns(preproc) =
 # A resampled group's `:group_index` record over the levels `df` names; the
 # replay codes its rows into them, and its effects are drawn for each.
 function _sb_resampled_group_index(e::PreprocEntry, df)
-    raw = _sb_df_column(df, e.raw_ref)
+    raw = _brm_df_column(df, e.raw_ref)
     raw isa AbstractVector || error(
         "sbimpl: reprocess: random-effects grouping column `$(e.raw_ref)` " *
         "must be a vector, got $(typeof(raw))")
-    PreprocEntry(:group_index, (; levels=_sb_fit_levels(raw),
+    PreprocEntry(:group_index, (; levels=_brm_fit_levels(raw),
                  n_groups_key=e.const_.n_groups_key), e.raw_ref, true)
 end
 
@@ -7349,7 +7236,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_o
     # to forecast with). The final `reprocess` binds `new_df`, the replay's own
     # `held_out` and the forecast marks.
     cv_template = SBBRMI(
-        freeze ? sb.parent : _sb_rebind_brmi(sb.parent, new_df);
+        freeze ? sb.parent : _brm_rebind_brmi(sb.parent, new_df);
         mod=sb.model.mod, cv_groups=groups,
         held_out=(), total_groups=(), s2z_groups=(),
         _frozen_preproc=freeze ? sb.preproc : nothing)
@@ -7367,9 +7254,9 @@ end
 function _sb_reprocess_masked_axes(sb::SBBRMI, df)
     out = Dict{Symbol,BitVector}()
     for (axis, (_, masks)) in _brm_masked_axis_refs(sb.parent)
-        _sb_df_has_column(df, axis) || continue
-        out[axis] = _brm_masked_axis_union(length(_sb_df_column(df, axis)),
-            [(name(m), _sb_df_column(df, name(m))) for m in masks])
+        _brm_df_has_column(df, axis) || continue
+        out[axis] = _brm_masked_axis_union(length(_brm_df_column(df, axis)),
+            [(name(m), _brm_df_column(df, name(m))) for m in masks])
     end
     out
 end
@@ -7380,11 +7267,11 @@ end
 # the stratum keys and returns the record's stratum fields.
 function _sb_reprocess_strata!(new_data, handled, e::PreprocEntry, idx, df, freeze::Bool)
     (; by, stratum_idx_key, n_strata_key) = e.const_
-    by_raw = _sb_df_column(df, by)
+    by_raw = _brm_df_column(df, by)
     by_raw isa AbstractVector || error(
         "sbimpl: reprocess: stratum column `$by` of `gr($(e.raw_ref), by=$by)` " *
         "must be a vector, got $(typeof(by_raw))")
-    strata = freeze ? e.const_.strata : _sb_fit_levels(by_raw)
+    strata = freeze ? e.const_.strata : _brm_fit_levels(by_raw)
     by_idx = _sb_apply_group_levels(strata, by_raw, by)
     stratum_idx = if freeze
         fitted = e.const_.stratum_idx
@@ -7411,7 +7298,7 @@ _sb_reads_level_codes(e::PreprocEntry) =
     e.kind === :hsgp && e.const_ isa NamedTuple && haskey(e.const_, :level_index)
 
 function _sb_reprocess_column_length(df, column, what)
-    col = _sb_df_column(df, column)
+    col = _brm_df_column(df, column)
     col isa AbstractVector || error(
         "sbimpl: reprocess: $what `$column` must be a vector, got $(typeof(col))")
     length(col)
@@ -7509,13 +7396,13 @@ function _sb_cdar_redraw_factors(e::PreprocEntry, df, fitted, redrawn)
             "fit did not see ($(join(unseen, ", "))), whose correlation to the fitted ",
             "levels needs `cor` over all of them, but the term's `cor=` is not a data ",
             "field the replay can supply. Write `cor=` as a data field.")
-        _sb_df_has_column(df, key) || error(
+        _brm_df_has_column(df, key) || error(
             "sbimpl: reprocess: `resample_groups=[:$group_col]` draws `cdar` levels the ",
             "fit did not see ($(join(unseen, ", "))); their correlation to the fitted ",
             "levels needs the replay data to carry `$key` over the sorted union of the ",
             "fitted and the replay's `$group_col` levels.")
         all_levels = _brm_cdar_levels(vcat(fitted, redrawn))
-        Cu = _brm_cdar_cor_matrix(_sb_df_column(df, key))
+        Cu = _brm_cdar_cor_matrix(_brm_df_column(df, key))
         size(Cu) == (length(all_levels), length(all_levels)) || error(
             "sbimpl: reprocess: `$key` is $(size(Cu)), but a replay that draws `cdar` ",
             "levels the fit did not see reads it over the sorted union of the fitted and ",
@@ -7596,7 +7483,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :missing_response
         fitted = e.const_
         fitted_totals = get(fitted, :totals, nothing)
-        plan = _brm_missing_response_plan(e.raw_ref, _sb_df_column(df, e.raw_ref);
+        plan = _brm_missing_response_plan(e.raw_ref, _brm_df_column(df, e.raw_ref);
                                           prefix="sbimpl: reprocess",
                                           totals=_sb_mi_replay_totals(fitted_totals, df))
         if haskey(fitted, :lower_bound)
@@ -7653,17 +7540,17 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         replay_and_bind((new_data[left_key], new_data[right_key]), :primary => key;
                         prefix="sbimpl: reprocess: interaction `$key`")
     elseif e.kind === :matrix_predictor
-        raw = _brm_check_matrix_width(_sb_df_column(df, e.raw_ref), e.raw_ref, e.const_)
+        raw = _brm_check_matrix_width(_brm_df_column(df, e.raw_ref), e.raw_ref, e.const_)
         new_data[key] = raw isa Matrix{Float64} ? raw : Matrix{Float64}(raw)
         new_preproc[key] = e
     elseif e.kind === :population_factor_dummy
-        raw = _sb_df_column(df, e.raw_ref)
+        raw = _brm_df_column(df, e.raw_ref)
         raw isa AbstractVector || error(
             "sbimpl: reprocess: categorical population predictor " *
             "`$(e.raw_ref)` must be a vector, got $(typeof(raw))")
         replay_and_bind(raw, :primary => key)
     elseif e.kind === :group_index
-        raw = _sb_df_column(df, e.raw_ref)
+        raw = _brm_df_column(df, e.raw_ref)
         raw isa AbstractVector || error(
             "sbimpl: reprocess: random-effects grouping column `$(e.raw_ref)` " *
             "must be a vector, got $(typeof(raw))")
@@ -7672,9 +7559,9 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         joint = haskey(e.const_, :columns) ?
             (; columns=e.const_.columns, id=e.const_.id) : (;)
         redraw = get(e.const_, :redraw, nothing)
-        refit_joint() = _brm_joint_levels([c => _sb_df_column(df, c) for c in joint.columns];
+        refit_joint() = _brm_joint_levels([c => _brm_df_column(df, c) for c in joint.columns];
                                           id=joint.id, prefix="sbimpl: reprocess")
-        levels = freeze ? e.const_.levels : isempty(joint) ? _sb_fit_levels(raw) :
+        levels = freeze ? e.const_.levels : isempty(joint) ? _brm_fit_levels(raw) :
             isnothing(redraw) ? refit_joint() : _sb_joint_redraw_levels(redraw, joint.id, df)
         idx = _sb_apply_group_levels(levels, raw, e.raw_ref)
         new_data[key] = idx
@@ -7706,7 +7593,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "has $(length(levels)) levels, but the fitted design has " *
             "$(e.const_.n_levels). Preserve the fitted level count or rebuild " *
             "the model.")
-        idx = _sb_apply_levels(levels, raw)
+        idx = _brm_apply_levels(levels, raw)
         new_data[key] = Float64[i == e.const_.level ? 1.0 : 0.0 for i in idx]
         new_preproc[key] = PreprocEntry(
             :ranef_factor_dummy,
@@ -7718,7 +7605,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "sbimpl: reprocess: joint-response provenance for `$key` changed " *
             "outcome order")
         columns = map(names) do outcome
-            NamedColumn(outcome, DataColumn(_sb_df_column(df, outcome)))
+            NamedColumn(outcome, DataColumn(_brm_df_column(df, outcome)))
         end
         impute = e.kind === :joint_missing_response
         joint = JointResponseColumn(columns, impute)
@@ -7739,7 +7626,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_preproc[key] = PreprocEntry(e.kind, updated, e.raw_ref, true)
         end
         for source in e.const_.mean_sources
-            source_values = _sb_df_column(df, source)
+            source_values = _brm_df_column(df, source)
             source_values isa AbstractVector || error(
                 "sbimpl: reprocess: joint-response mean source `$source` must " *
                 "be a vector, got $(typeof(source_values))")
@@ -7764,7 +7651,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             # plate's per-subject columns gives it; a forecast frame has no
             # response column. A record without `columns` names one column.
             columns = get(e.const_, :columns, (e.raw_ref,))
-            found = findfirst(c -> _sb_df_has_column(df, c), columns)
+            found = findfirst(c -> _brm_df_has_column(df, c), columns)
             isnothing(found) && error(
                 "sbimpl: reprocess: kernel(...) counts its subjects from a per-subject ",
                 "column, but the new data carries none of `", join(columns, "`, `"),
@@ -7782,7 +7669,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         if e.const_.is_lp
             new_data[key] = rows
         else
-            flat = _sb_df_column(df, arg_name)
+            flat = _brm_df_column(df, arg_name)
             flat isa AbstractVector || error(
                 "sbimpl: reprocess: kernel ragged source `$arg_name` must be a " *
                 "vector, got $(typeof(flat))")
@@ -7793,16 +7680,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             into = get(e.const_, :into, nothing)
             isnothing(into) || (flat = _brm_kernel_rebase_index(
                 arg_name, flat, event_group, event_groups,
-                into, _sb_df_column(df, into); prefix="sbimpl: reprocess"))
+                into, _brm_df_column(df, into); prefix="sbimpl: reprocess"))
             new_data[key] = _brm_gather_cells(flat, rows)
         end
         new_preproc[key] = e
     elseif e.kind === :multi_membership
         group_names = e.raw_ref.groups
         weight_names = e.raw_ref.weights
-        raw_groups = Tuple(_sb_df_column(df, n) for n in group_names)
+        raw_groups = Tuple(_brm_df_column(df, n) for n in group_names)
         raw_weights = isnothing(weight_names) ? nothing :
-                      Tuple(_sb_df_column(df, n) for n in weight_names)
+                      Tuple(_brm_df_column(df, n) for n in weight_names)
         levels = freeze ? e.const_.levels : nothing
         prepared = _sb_prepare_mm(raw_groups, raw_weights, e.const_.normalize;
                                   levels, group_names, weight_names)
@@ -7818,7 +7705,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         const_ = merge(e.const_, (; levels=prepared.levels))
         new_preproc[key] = PreprocEntry(:multi_membership, const_, e.raw_ref, true)
     elseif e.kind === :spline
-        replay_and_bind(_sb_df_column(df, e.raw_ref), :primary => key,
+        replay_and_bind(_brm_df_column(df, e.raw_ref), :primary => key,
                         :penalty => e.const_.zpen_key)
     elseif e.kind === :tensor_spline
         _sb_check_replay_settings(df, :t2, get(e.const_, :setting_fields, ()))
@@ -7832,13 +7719,13 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         c = e.const_
         _sb_check_replay_settings(df, :hsgp, c.setting_fields)
         D = length(e.raw_ref) - 1
-        spatial_axes = Tuple(collect(Float64, _sb_df_column(df, e.raw_ref[j]))
+        spatial_axes = Tuple(collect(Float64, _brm_df_column(df, e.raw_ref[j]))
             for j in 1:D)
         n_locations = length(first(spatial_axes))
         all(x -> length(x) == n_locations, spatial_axes) || error(
             "sbimpl: reprocess: spatial HSGP axes must have equal lengths")
-        time = collect(Float64, _sb_df_column(df, last(e.raw_ref)))
-        at = _sb_df_column(df, c.at)
+        time = collect(Float64, _brm_df_column(df, last(e.raw_ref)))
+        at = _brm_df_column(df, c.at)
         at isa AbstractVector{<:Integer} &&
             all(i -> 1 <= i <= n_locations, at) &&
             length(at) == length(time) || error(
@@ -7878,16 +7765,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                         :omega2 => e.const_.omega2_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :categorical_outcome
-        v = _sb_df_column(df, e.raw_ref)
+        v = _brm_df_column(df, e.raw_ref)
         fitted_levels = e.const_.levels
         expected_n_levels = e.const_.n_levels
-        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        levels = freeze ? fitted_levels : _brm_fit_levels(v)
         length(levels) == expected_n_levels || error(
             "sbimpl: reprocess: categorical outcome `$key` has $(length(levels)) levels, " *
             "but the fitted `CategoricalLogit` has $expected_n_levels. " *
             "Preserve the fitted level set/order or rebuild the model with one " *
             "linear predictor per non-reference class.")
-        new_data[key] = _sb_apply_levels(levels, v)
+        new_data[key] = _brm_apply_levels(levels, v)
         # A class block's class count is Stan data too.
         count = get(e.const_, :count, nothing)
         isnothing(count) || (new_data[count] = expected_n_levels - 1)
@@ -7896,35 +7783,35 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                 (; levels, n_levels=expected_n_levels, count),
             e.raw_ref, true)
     elseif e.kind === :ordinal_outcome
-        v = _sb_df_column(df, e.raw_ref)
+        v = _brm_df_column(df, e.raw_ref)
         fitted_levels = e.const_.levels
         expected_n_levels = e.const_.n_levels
-        levels = freeze ? fitted_levels : _sb_fit_levels(v)
+        levels = freeze ? fitted_levels : _brm_fit_levels(v)
         length(levels) == expected_n_levels || error(
             "sbimpl: reprocess: ordinal outcome `$key` has $(length(levels)) levels, " *
             "but the fitted `Ordinal` model has $expected_n_levels. Preserve the " *
             "fitted ordered level set or rebuild the model.")
-        new_data[key] = _sb_apply_levels(levels, v)
+        new_data[key] = _brm_apply_levels(levels, v)
         new_preproc[key] = PreprocEntry(
             :ordinal_outcome, (; levels, n_levels=expected_n_levels),
             e.raw_ref, true)
     elseif e.kind === :coarsened_upper
         # The upper labels of `coarsened` evidence, coded against the levels of
         # its response column (`e.const_.lower`), never against their own.
-        lower = _sb_df_column(df, e.const_.lower)
-        levels = freeze ? e.const_.levels : _sb_fit_levels(lower)
+        lower = _brm_df_column(df, e.const_.lower)
+        levels = freeze ? e.const_.levels : _brm_fit_levels(lower)
         length(levels) == e.const_.n_levels || error(
             "sbimpl: reprocess: coarsened ordinal outcome `$(e.const_.lower)` has " *
             "$(length(levels)) levels, but the fitted `Ordinal` model has " *
             "$(e.const_.n_levels). Preserve the fitted ordered level set or rebuild the model.")
         _, hi = _brm_coarsened_codes(e.const_.lower, levels, lower,
-            _sb_df_column(df, e.raw_ref); prefix="sbimpl: reprocess")
+            _brm_df_column(df, e.raw_ref); prefix="sbimpl: reprocess")
         new_data[key] = hi
         new_preproc[key] = PreprocEntry(:coarsened_upper,
             (; levels, n_levels=e.const_.n_levels, lower=e.const_.lower),
             e.raw_ref, true)
     elseif e.kind === :ordinal_threshold_predictor
-        v = _sb_df_column(df, e.raw_ref)
+        v = _brm_df_column(df, e.raw_ref)
         v isa AbstractVector{<:Real} || error(
             "sbimpl: reprocess: ordinal threshold predictor `$key` must be numeric, " *
             "got $(typeof(v))")
@@ -7934,10 +7821,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[key] = collect(Float64, v)
         new_preproc[key] = e
     elseif e.kind === :observation_weight
-        raw = _sb_df_column(df, e.raw_ref)
+        raw = _brm_df_column(df, e.raw_ref)
         # An omitted response has no values to match the weights against.
-        response = _sb_df_has_column(df, e.const_.response) ?
-            _sb_df_column(df, e.const_.response) : nothing
+        response = _brm_df_has_column(df, e.const_.response) ?
+            _brm_df_column(df, e.const_.response) : nothing
         isnothing(response) || response isa AbstractVector || error(
             "sbimpl: reprocess: weighted response `$(e.const_.response)` must " *
             "be a vector, got $(typeof(response))")
@@ -7948,8 +7835,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :interval_censored_predictor
         x_name, upper_name = e.raw_ref
         plan = _sb_interval_censored_predictor_plan(
-            x_name, _sb_df_column(df, x_name),
-            upper_name, _sb_df_column(df, upper_name), e.const_.lower)
+            x_name, _brm_df_column(df, x_name),
+            upper_name, _brm_df_column(df, upper_name), e.const_.lower)
         new_data[key] = plan.x_exact
         new_data[e.const_.lower_key] = plan.x_lower
         new_data[e.const_.upper_key] = plan.x_upper
@@ -7963,7 +7850,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :factor || e.kind === :mo
         v = _sb_factor_replay_values(e.raw_ref, df)
         levels = freeze ? e.const_ : _sb_factor_refit_levels(e.raw_ref, v)
-        new_data[key] = _sb_apply_levels(levels, v)   # errors loudly on an unseen level
+        new_data[key] = _brm_apply_levels(levels, v)   # errors loudly on an unseen level
         new_preproc[key] = PreprocEntry(e.kind, levels, e.raw_ref, true)
         if e.kind === :factor
             # The `<x>_n_levels` count key co-emitted by `_sb_emit_cat!`: frozen
@@ -7999,7 +7886,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :rw
         # `rw(time)`: a forecast appends steps past the fitted grid; each row
         # reads its own point.
-        raw = _sb_df_column(df, e.raw_ref)
+        raw = _brm_df_column(df, e.raw_ref)
         raw isa AbstractVector || error("sbimpl: reprocess: `rw` time column must be a vector")
         all(isfinite, raw) || error("sbimpl: reprocess: `rw` time axis must be finite")
         steps, n_new = _sb_walk_replay_grid(e.const_.steps, collect(Float64, raw), :rw, freeze)
@@ -8021,15 +7908,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # and from the new `nodes=` column when the term declares one.
         area_col, from_col, to_col = e.raw_ref[1], e.raw_ref[2], e.raw_ref[3]
         nodes_col = length(e.raw_ref) > 3 ? e.raw_ref[4] : nothing
-        area_raw = _sb_df_column(df, area_col)
+        area_raw = _brm_df_column(df, area_col)
         area_raw isa AbstractVector || error("sbimpl: reprocess: `car` area column must be a vector")
         k = e.const_.keys
         labels = _brm_car_labels(area_raw, "area")
         graph = freeze ? e.const_.graph : _sb_car_graph_record(_brm_car_graph(labels,
-            _brm_car_labels(_sb_df_column(df, from_col), "edge"),
-            _brm_car_labels(_sb_df_column(df, to_col), "edge"),
+            _brm_car_labels(_brm_df_column(df, from_col), "edge"),
+            _brm_car_labels(_brm_df_column(df, to_col), "edge"),
             nodes_col === nothing ? nothing :
-                _brm_car_labels(_sb_df_column(df, nodes_col), "node")))
+                _brm_car_labels(_brm_df_column(df, nodes_col), "node")))
         row_idx = _brm_car_row_idx(graph.nodes, labels; prefix="sbimpl: reprocess")
         _sb_car_data!(new_data, k, merge(graph, (; row_idx)))
         foreach(other -> push!(handled, other), Base.values(k))
@@ -8044,8 +7931,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # resample replay (`resample_groups` naming the `by` column) redraws every
         # level its rows name, fitted or not (`_sb_cdar_redraw!`).
         step_col, group_col = e.raw_ref
-        step_raw = _sb_df_column(df, step_col)
-        group_raw = _sb_df_column(df, group_col)
+        step_raw = _brm_df_column(df, step_col)
+        group_raw = _brm_df_column(df, group_col)
         (step_raw isa AbstractVector && group_raw isa AbstractVector) || error(
             "sbimpl: reprocess: `cdar` step and group columns must be vectors")
         all(isfinite, step_raw) || error("sbimpl: reprocess: `cdar` step axis must be finite")
@@ -8084,9 +7971,9 @@ end
 struct _SBTotalReplayData{D}
     df::D
 end
-Base.getindex(d::_SBTotalReplayData, key::Symbol) = _sb_df_column(d.df, key)
+Base.getindex(d::_SBTotalReplayData, key::Symbol) = _brm_df_column(d.df, key)
 Base.get(d::_SBTotalReplayData, key::Symbol, default) =
-    _sb_df_has_column(d.df, key) ? _sb_df_column(d.df, key) : default
+    _brm_df_has_column(d.df, key) ? _brm_df_column(d.df, key) : default
 
 # A replay keeps the fitted totals, which already contain each group's
 # group-level predictor values (`W`). Every replay row must therefore carry its
@@ -8095,7 +7982,7 @@ function _sb_total_check_group_design(e::PreprocEntry, df)
     record = e.const_
     isempty(record.columns) && return nothing
     group = record.group
-    raw = _sb_df_column(df, group)
+    raw = _brm_df_column(df, group)
     raw isa AbstractVector || error(
         "sbimpl: reprocess: random-effects grouping column `$group` must be a " *
         "vector, got $(typeof(raw))")
@@ -8155,7 +8042,7 @@ function _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key::Symbo
             fitted = get(sb.preproc, k, nothing)
             if fitted isa PreprocEntry && fitted.kind === :constant
                 scalars[k] = new_data[k]
-            elseif _sb_df_has_column(df, k)
+            elseif _brm_df_has_column(df, k)
                 delete!(scalars, k)
             end
         end
@@ -8360,7 +8247,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         # A covariate selected for `resample_covariates` is re-drawn there.
         absent = sort!([c for k in _sb_absent_responses(sb, new_df)
                         for c in _sb_response_columns(sb, k)
-                        if !_sb_df_has_column(new_df, c) && !(c in covariates)])
+                        if !_brm_df_has_column(new_df, c) && !(c in covariates)])
         how = isempty(covariates) ?
             "`resample_groups` with `freeze_constants=false` rebuilds" :
             "`resample_covariates` re-emits"
@@ -8423,7 +8310,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         # which a values-free mark cannot stand in for.
         if e.kind in (:joint_response, :joint_missing_response)
             outcomes = Tuple(e.raw_ref)
-            lacking = [c for c in outcomes if !_sb_df_has_column(new_df, c)]
+            lacking = [c for c in outcomes if !_brm_df_has_column(new_df, c)]
             isempty(lacking) || error(
                 "sbimpl: reprocess: the new data lacks column(s) `", join(lacking, "`, `"),
                 "` of the joint response `", join(outcomes, "`, `"), "`. A forecast of a ",
@@ -8433,7 +8320,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         # its fitted record (including ordinal levels), so a later replay can
         # restore response values using the same preprocessing contract.
         columns = _sb_response_columns(sb, key)
-        if !isnothing(columns) && any(c -> !_sb_df_has_column(new_df, c), columns) &&
+        if !isnothing(columns) && any(c -> !_brm_df_has_column(new_df, c), columns) &&
            is_absent_response(key)
             new_data[key] = StanBlocks.stan.maybecv(key)
             new_preproc[key] = e
@@ -8479,7 +8366,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         v = _sb_unmarked_value(sb, k, stored)
         k in handled && continue
         k in interaction_keys && continue
-        has_column = _sb_df_has_column(new_df, k)
+        has_column = _brm_df_has_column(new_df, k)
         # The raw column of a gathered response predicted given the fit, or
         # of a series that continues from its observed entries: the program
         # reads only the gathered key step 1 marked or gathered.
@@ -8490,7 +8377,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
             # a response the new data lacks: replay the frame's own values, or
             # predict it given the fit. A scalar response keeps the scalar rule.
             if has_column
-                new_data[k] = _sb_df_column(new_df, k)
+                new_data[k] = _brm_df_column(new_df, k)
             else
                 new_data[k] = StanBlocks.stan.maybecv(k)
                 push!(forecast, k)
@@ -8499,8 +8386,8 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
             if has_column
                 # pass-through (plain / me obs / ar time)
                 new_data[k] = haskey(masked, k) ? _brm_axis_values(
-                    _sb_df_column(new_df, k), masked[k], "sbimpl: reprocess: data column `$k`") :
-                    _sb_df_column(new_df, k)
+                    _brm_df_column(new_df, k), masked[k], "sbimpl: reprocess: data column `$k`") :
+                    _brm_df_column(new_df, k)
             else
                 _brm_raise_replay_failure(new_df, k)
                 error(
@@ -8524,14 +8411,14 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
             # A scalar keeps its fitted value (a structural scalar, a formula
             # literal such as me `sd_<x>`, or a scalar field of the data);
             # fresh-fit replay takes a scalar field the new data supplies.
-            new_data[k] = !freeze_constants && has_column ? _sb_df_column(new_df, k) : v
+            new_data[k] = !freeze_constants && has_column ? _brm_df_column(new_df, k) : v
         else
             if has_column
                 # Externally derived non-vector data (StanBlocks' ragged
                 # `NamedTuple` carrier is the important case). Give the SLIC
                 # retrace the replay design's raw column; it re-makes the
                 # structured carrier, exactly as at the original emission.
-                new_data[k] = _sb_df_column(new_df, k)
+                new_data[k] = _brm_df_column(new_df, k)
             else
                 error(
                     "sbimpl: reprocess: data key `$k` (::$(typeof(v))) is a derived ",
@@ -8589,7 +8476,7 @@ function _sb_absent_responses(sb::SBBRMI, df)
         isnothing(columns) && continue
         haskey(sb.preproc, key) ||
             !(_sb_unmarked_value(sb, key, sb.data[key]) isa Number) || continue
-        all(c -> _sb_df_has_column(df, c), columns) || push!(absent, key)
+        all(c -> _brm_df_has_column(df, c), columns) || push!(absent, key)
     end
     absent
 end
@@ -8936,14 +8823,6 @@ function _sb_kernel_lp_buckets(lp_cols; ragged_cols=())
     end
 end
 
-# Collect `(name, length)` for every row-wise RAW data column reachable from a
-# formula RHS; a scalar column broadcasts and names no row axis. Used to check
-# that a `ragged(x, group)` LP really is declared over the same row axis its
-# grouping column describes. Descent stops at a nested `~`
-# ExprColumn: that is a REFERENCE to another formula's value, not part of this
-# one's design, so its data belongs to the other row axis.
-const _sb_collect_data_lengths! = _brm_collect_data_lengths!
-
 # Substitute a bare symbol inside a do-block cell body. `:kw` names and the
 # field half of `a.b` are syntactic positions, never value references, so they
 # are left alone; a `QuoteNode` is opaque. Dotted calls also use `:.`, but
@@ -9011,9 +8890,9 @@ _sb_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals; observed::B
 # row, or the distinct labels of its one grouping column.
 function _sb_reprocess_kernel_cells(df, column, options; freeze=false)
     labels = options isa NamedTuple && get(options, :distinct_labels, false) ?
-        _brm_kernel_distinct_labels(_sb_df_column(df, column), column;
+        _brm_kernel_distinct_labels(_brm_df_column(df, column), column;
             prefix="sbimpl: reprocess") :
-        _sb_kernel_subject_values(_sb_df_column(df, column), column)
+        _sb_kernel_subject_values(_brm_df_column(df, column), column)
     if freeze && options isa NamedTuple && haskey(options, :fitted_cell_labels)
         fitted = options.fitted_cell_labels
         all(label -> label in fitted, labels) || throw(ArgumentError(
@@ -9029,16 +8908,16 @@ end
 function _sb_reprocess_kernel_rows(df, e::PreprocEntry, freeze::Bool)
     arg_name, event_group, subject_group = e.raw_ref
     subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_; freeze)
-    event_groups = _sb_df_column(df, event_group)
+    event_groups = _brm_df_column(df, event_group)
     event_groups isa AbstractVector || error(
         "sbimpl: reprocess: kernel event grouping column `$event_group` " *
         "must be a vector, got $(typeof(event_groups))")
     rows = _sb_kernel_ragged_partition(
         arg_name, event_group,
-        collect(_sb_group_values(event_groups)), subjects;
+        collect(_brm_group_values(event_groups)), subjects;
         observed=get(e.const_, :observed, false))
     order = get(e.const_, :order, nothing)
-    isnothing(order) || _brm_kernel_order_rows!(rows, _sb_df_column(df, order),
+    isnothing(order) || _brm_kernel_order_rows!(rows, _brm_df_column(df, order),
         order, event_group, length(event_groups); prefix="sbimpl: reprocess")
     (; subjects, event_groups, rows, order)
 end
@@ -9068,8 +8947,8 @@ function _sb_series_replay_data(sb::SBBRMI, df, freeze::Bool)
     for (key, e) in sb.preproc
         e.kind === :kernel_ragged && !e.const_.is_lp || continue
         column = first(e.raw_ref)
-        _sb_df_has_column(df, column) || continue
-        values = _sb_df_column(df, column)
+        _brm_df_has_column(df, column) || continue
+        values = _brm_df_column(df, column)
         values isa AbstractVector && any(ismissing, values) || continue
         isnothing(series) && (series = _sb_scan_series_sources(sb))
         key in series || continue
@@ -9092,7 +8971,7 @@ end
 # a forecast. A step that was not recorded is left out of the rows instead.
 function _sb_check_series_gaps(df, e::PreprocEntry, values, freeze::Bool)
     (; subjects, rows, order) = _sb_reprocess_kernel_rows(df, e, freeze)
-    times = isnothing(order) ? nothing : _sb_df_column(df, order)
+    times = isnothing(order) ? nothing : _brm_df_column(df, order)
     place(row) = isnothing(times) ? "row $row" :
         "row $row (`$order` = $(repr(times[row])))"
     for (label, cell) in zip(subjects, rows)
@@ -9231,7 +9110,7 @@ function _sb_kernel_link_advice(c)::String
     isnothing(found) && return ""
     inner_name, f = found
     inv = try
-        _sb_link_call(InverseFunctions.inverse(f), _sb_lp_emitted_name(inner_name, f))
+        _sb_link_call(InverseFunctions.inverse(f), _brm_lp_emitted_name(inner_name, f))
     catch
         nothing
     end
@@ -9456,7 +9335,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
         # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
         # ROW-ordered vector of length n_rows — it has already mapped level -> row.
-        # Reordering cells to the ranef's LEVEL order (which `_sb_level_index` sorts)
+        # Reordering cells to the ranef's LEVEL order (which `_brm_level_index` sorts)
         # would therefore MIS-align the LP against its own subjects whenever the
         # labels are not sorted. The only thing that must hold is the bijection
         # below: one level per row.
@@ -9698,10 +9577,6 @@ for demo in (sb_group_demo, sb_group_clamped_demo)
         _brm_replay_structured_demo(training, context)
 end
 
-# Normalize a term's declaration (legacy single-block NT or general `fields` NT)
-# into a uniform Vector of field specs, or `nothing` if the term declares none.
-_sb_structured_fields(decl, f) = _brm_structured_fields(decl, f)
-
 # Emit hook for structured-latent terms. `block_info` carries a `fields` map
 # (field-name => (; block_name, idx_name, n_per_group)); for single-field terms
 # the lone field's keys are ALSO spliced at top level so legacy consumers that
@@ -9730,8 +9605,6 @@ end
 # Built-in prior families on a missing-LHS sampling statement (e.g.
 # `coef_a ~ Horseshoe()`). Returns `true` if it consumed the binding,
 # `false` otherwise (then `_sb_linear_predictor!` runs).
-_sb_horseshoe_scale(target, key::Symbol, value) =
-    _sb_effect_prior_arg(_brm_horseshoe_scale(target, key, value; prefix="sbimpl"))
 
 function _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, op)
     spec = _brm_horseshoe_spec(target, getargs(op), getkwargs(op); prefix="sbimpl")
@@ -10613,7 +10486,7 @@ end
 function _sb_joint_mean_reference(target::Symbol, outcome::Symbol, mean_arg::ExprColumn,
                                   data, nobs::Int)
     source_lengths = Tuple{Symbol,Int}[]
-    _sb_collect_data_lengths!(source_lengths, mean_arg)
+    _brm_collect_data_lengths!(source_lengths, mean_arg)
     all(pair -> last(pair) == nobs, source_lengths) || error(
         "sbimpl: joint mean for `$outcome` has data sources on different row axes")
     (; expression=_sb_joint_mean_rows_expr(target, mean_arg, data),
@@ -10662,7 +10535,7 @@ function _sb_joint_mean_reference(target::Symbol, outcome::Symbol, mean_arg,
         _, mean_rhs = getargs(backing, 2)
         if !(mean_rhs isa ExprColumn && getf(mean_rhs) === kernel)
             found = Tuple{Symbol,Int}[]
-            _sb_collect_data_lengths!(found, mean_rhs)
+            _brm_collect_data_lengths!(found, mean_rhs)
             append!(source_lengths, (source => len for (source, len) in found))
         end
     end
@@ -10856,28 +10729,10 @@ _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_loo
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
 
-# The name a linear predictor's population design is EMITTED under. A bare
-# `loc ~ 1 + x` emits under `loc`; an LHS link transformation `log(Vc) ~ 1 + x`
-# emits the LINKED scale under `log_Vc` and then binds `Vc = exp(log_Vc)`. So
-# every emitted artefact of the design carries the LINKED spelling
-# (`X_log_Vc`, `pop_log_Vc`, `pop_log_Vc_beta_pop`, `Z_log_Vc_<id>_<g>`) while
-# the PUBLIC address stays the bare `Vc` that `linear_predictors` reports and
-# `popcoefnames` / `effect(...)` / `ranefcoefnames` take.
-#
-# Mapping the emitted name back to the public one is not derivable by string
-# surgery (`pop_log_Vc` is equally `pop_` + an inert LP literally named
-# `log_Vc`), so it is derived FORWARDS from the formula through this function.
-# `identity` is `linear_predictors`' marker for an UNWRAPPED LHS (`loc ~ 1 + x`),
-# which emits under its own name. A literal `identity(loc) ~ 1 + x` reaches the
-# link path instead and takes the same branch — harmless, because Stan has no
-# `identity` function, so that spelling has never transpiled either way.
-_sb_lp_emitted_name(lp_name::Symbol, link_lhs_fn) =
-    _brm_lp_emitted_name(lp_name, link_lhs_fn)
-
 function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__)
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
-    pre_name = _sb_lp_emitted_name(inner_name, f)
+    pre_name = _brm_lp_emitted_name(inner_name, f)
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key,
                           obs_n, cv_groups, centered_groups, group_block_lookup,
                           effect_overrides, r2d2, mod)
@@ -10968,9 +10823,9 @@ _sb_missing_preproc(plan, observed_key, missing_key) = PreprocEntry(
 
 # A completion's group totals on a replay read the same three data columns.
 _sb_mi_replay_totals(::Nothing, _df) = nothing
-_sb_mi_replay_totals(t, df) = (; group=(; name=t.group, values=_sb_df_column(df, t.group)),
-    cells=(; name=t.cells, values=_sb_df_column(df, t.cells)),
-    total=(; name=t.total, values=_sb_df_column(df, t.total)))
+_sb_mi_replay_totals(t, df) = (; group=(; name=t.group, values=_brm_df_column(df, t.group)),
+    cells=(; name=t.cells, values=_brm_df_column(df, t.cells)),
+    total=(; name=t.total, values=_brm_df_column(df, t.total)))
 # What a frozen replay must keep: which missing entries are free and how the
 # others are grouped (the residuals may change with the data).
 _sb_mi_totals_layout(::Nothing) = nothing
@@ -11662,7 +11517,7 @@ function _sb_cat_entries(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === lhs]
     length(predictors) == 1 || error(
         "sbimpl: expected one linear predictor named `$lhs`, found $(length(predictors))")
-    emitted_lp = _sb_lp_emitted_name(lhs, only(predictors).link_lhs_fn)
+    emitted_lp = _brm_lp_emitted_name(lhs, only(predictors).link_lhs_fn)
     _, rhs = getargs(op, 2)
     pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
     for t in _sb_terms(rhs)
@@ -11684,9 +11539,9 @@ function _sb_cat_entries(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
             get(frozen_preproc, Symbol(name(t), :_idx), nothing)
         frozen = !isnothing(record) && record.kind === :factor
         n_levels = frozen ? length(record.const_) :
-            first(_sb_level_index(_sb_cat_levels(t)))
+            first(_brm_level_index(_sb_cat_levels(t)))
         # The fitted level order, reference first: `_sb_emit_cat!`'s coefficients.
-        levels = frozen ? record.const_ : _sb_fit_levels(_sb_cat_levels(t))
+        levels = frozen ? record.const_ : _brm_fit_levels(_sb_cat_levels(t))
         push!(entries, (; address=name(t),
                           emitted=_sb_cat_block_name(emitted_lp, name(t)),
                           term=t, cellmeans, n_levels, levels))
@@ -11717,11 +11572,6 @@ function _sb_cat_cellmeans_blocks(brmi::BRMI, lhs::Symbol; frozen_preproc=nothin
     Dict{Symbol,Int}(e.emitted => e.n_levels for e in entries if e.cellmeans)
 end
 
-function _sb_cat_coefnames(brmi::BRMI, lhs::Symbol)
-    entries = _sb_cat_entries(brmi, lhs)
-    isnothing(entries) ? nothing : Symbol[e.emitted for e in entries]
-end
-
 # `factor(c; ref=k)` is re-encoded at term-collection time into a synthetic
 # `c__ref_k` NamedColumn (`c__ref_<level>` for a string level; see
 # `_sb_collect_terms_expr!(::typeof(factor), ...)`), and that synthetic name is
@@ -11747,14 +11597,7 @@ end
 # the term as the formula spells it. Resolution walks each linear predictor's
 # own terms, keys them the SAME way, and hands the winning statement to the
 # emitter as a per-predictor `Dict{Symbol,Any}`, exactly like `cat_overrides`.
-
-# Canonical key for a term as the BACKEND sees it. Must agree character for
-# character with `_term_address_key` in `macro.jl`, which builds the same key
-# from surface syntax — that agreement IS the address resolution. Numeric and
-# keyword arguments are excluded on both sides, so `me(x, 0.5)` and `me(x)`
-# name one term.
-_sb_term_key(t) = _brm_prepared_term_key(t)
-_sb_term_address_map(brmi::BRMI, lhs::Symbol) = _brm_term_address_map(brmi, lhs)
+# `_brm_prepared_term_key` builds the key.
 
 # ---- hyper-predictor statements -------------------------------------------
 #
@@ -11876,10 +11719,10 @@ Base.@nospecializeinfer function _sb_collect_hyper_plans(@nospecialize(brmi::BRM
                   "`hsgp(...)` terms, got `$(nameof(f))`")
         end
         kw = getkwargs(term)
-        _sb_gp_cov(kw, :hsgp) === :periodic && error(
+        _brm_gp_cov(kw, :hsgp) === :periodic && error(
             "$prefix: `$spelling` — hyper-predictors do not support " *
             "`hsgp(...; cov=:periodic)`")
-        _sb_gp_iso(kw, :hsgp) || error(
+        _brm_gp_iso(kw, :hsgp) || error(
             "$prefix: `$spelling` — hyper-predictors need one length scale " *
             "per group (`iso=true`); anisotropic `iso=false` is not supported")
         # A distribution RHS confuses a hyper-predictor with a term prior.
@@ -12349,14 +12192,6 @@ function _sb_known_term_sd_submodel(base, cfgs, known; mod::Module, data, stem)
     model = Base.merge(base, Expr(:call, :~, prior.statement.args[2], rhs), scatter)
     (; model, kwargs=(; inputs...,
         (_sb_term_prior_input(d) => d for d in prior.dependencies)...))
-end
-
-function _sb_positive_term_prior_stmt(name::Symbol, index::Int, prior)
-    resolved = isnothing(prior) ? ExprColumn(Normal) : prior
-    stmts = Any[]
-    _sb_emit_prior!(stmts, Expr(:ref, name, index), getf(resolved), resolved) ||
-        error("sbimpl: term SD prior `$(getf(resolved))` has no Stan translation")
-    _sb_apply_positive_prior_bounds!(only(stmts), resolved)
 end
 
 # A monotonic term always keeps the historical `alpha` input because it sizes
@@ -13016,10 +12851,10 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     # carrying only a SUBSET of the training levels keeps the fitted count --
     # and with it the per-level prior vector of a cell-mean block, whose
     # `<c>_lvl_<k>` addresses are positions in that fitted order -- instead of
-    # re-deriving both from the new rows. Mirrors `_sb_mo_levels_for_emission`.
+    # re-deriving both from the new rows.
     raw_ref = _sb_factor_replay_ref(parent(backing), name(t))
     levels = _sb_cat_levels_for_emission(data, idx_name, raw_ref, parent(backing))
-    n_levels, idx = length(levels), _sb_apply_levels(levels, parent(backing))
+    n_levels, idx = length(levels), _brm_apply_levels(levels, parent(backing))
     data[idx_name] = idx
     data[n_name]   = n_levels
     # Frozen level set drives the K-1 treatment-contrast betas; reprocess
@@ -13076,7 +12911,7 @@ end
 
 function _sb_cat_levels_for_emission(data, idx_name::Symbol, raw_ref, raw)
     frozen = _sb_frozen_preproc_entry(data, idx_name, :factor, raw_ref)
-    isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
+    isnothing(frozen) ? _brm_fit_levels(raw) : frozen.const_
 end
 
 function _sb_emit_cat_cells!(stmts, col_name::Symbol, idx_name::Symbol,
@@ -13188,8 +13023,8 @@ function _sb_ranef_factor_dummies!(cols, data, t::NamedColumn, levels, first_lev
     raw_ref = _sb_factor_replay_ref(levels, name(t))
     frozen = _sb_frozen_preproc_entry(
         data, Symbol(name(t), :_dummy_, first_level), :ranef_factor_dummy, raw_ref)
-    fitted_levels = isnothing(frozen) ? _sb_fit_levels(levels) : frozen.const_.levels
-    n_levels, idx = length(fitted_levels), _sb_apply_levels(fitted_levels, levels)
+    fitted_levels = isnothing(frozen) ? _brm_fit_levels(levels) : frozen.const_.levels
+    n_levels, idx = length(fitted_levels), _brm_apply_levels(fitted_levels, levels)
     for lvl in first_level:n_levels
         col_name = Symbol(name(t), :_dummy_, lvl)
         data[col_name] = Float64[l == lvl ? 1.0 : 0.0 for l in idx]
@@ -13270,10 +13105,6 @@ _sb_group_key(g::MultiMembershipTerm) =
     (:mm, Tuple(name(x) for x in getargs(g)),
      isnothing(getfield(g, :weights)) ? nothing : Tuple(name(x) for x in getfield(g, :weights)),
      getfield(g, :normalize))
-
-_sb_mm_group_names(g::MultiMembershipTerm) = _brm_mm_group_names(g)
-_sb_mm_weight_names(g::MultiMembershipTerm) = _brm_mm_weight_names(g)
-_sb_mm_suffix(g::MultiMembershipTerm) = _brm_mm_suffix(g)
 
 # Normalize `(expr | group)` vs `(expr | id | group)` into (id_sym, lhs, descriptor)
 # where id_sym === nothing signals the plain (non-ID'd) case. Surface-level
@@ -13394,7 +13225,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     g = name(group)
     is_cv = g in cv_groups
     is_centered = g in centered_groups
-    n_levels, g_idx = _sb_level_index(parent(g_backing))
+    n_levels, g_idx = _brm_level_index(parent(g_backing))
     idx_name = Symbol(g, :_idx)
     n_name   = Symbol(:n_, g)
     _sb_set_group_index_datum!(data, idx_name, g_idx, g)
@@ -13496,8 +13327,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
     isnothing(r2d2_scale) || error(
         "sbimpl: `r2d2` decompositions over typed `mm(...)` multi-membership " *
         "random effects are not yet supported")
-    group_names = _sb_mm_group_names(term)
-    weight_names = _sb_mm_weight_names(term)
+    group_names = _brm_mm_group_names(term)
+    weight_names = _brm_mm_weight_names(term)
     cv_hit = intersect(Set(group_names), cv_groups)
     isempty(cv_hit) || error(
         "sbimpl: cv-contagious sizing for `mm(...)` is not yet supported ",
@@ -13527,7 +13358,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
     prepared = _sb_prepare_mm(raw_groups, raw_weights, getfield(term, :normalize);
                               group_names, weight_names)
 
-    suffix = _sb_mm_suffix(term)
+    suffix = _brm_mm_suffix(term)
     idx_name = Symbol(suffix, :_idx)
     weight_name = Symbol(suffix, :_weights)
     n_name = Symbol(:n_, suffix)
@@ -13601,8 +13432,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
         "centered variants emit a plate over a single shared covariance and have ",
         "no per-stratum form -- not yet supported. Use a plain `(… | $g)` or ",
         "`(… |ID| $g)` ranef, or leave `$g` non-centered.")
-    n_groups, g_idx = _sb_level_index(parent(g_backing))
-    n_strata, b_idx = _sb_level_index(parent(b_backing))
+    n_groups, g_idx = _brm_level_index(parent(g_backing))
+    n_strata, b_idx = _brm_level_index(parent(b_backing))
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, g, b)
     # Block-local names include both `g` and `b` so this block never clashes
     # with a plain `(… | g)` block against the same group column.
@@ -13839,40 +13670,6 @@ function ranefcoefnames(brmi::BRMI, id::Symbol)
         "ranefcoefnames: `|$id|` identifies $(length(matches)) random-effect " *
         "blocks with different grouping factors; the ID-only address is ambiguous")
     _sb_id_bucket_margins(last(only(matches)))
-end
-
-# Shared by the random-effect margins and the smoothing scales of `s`/`t2`:
-# both sample their SD through the generic vector prior, so both accept the same
-# family. `spelling` is the address as the formula wrote it, so the message
-# names the statement the user can actually edit.
-function _sb_ranef_sd_rate(spec, spelling::AbstractString="sd(:, ...)")
-    spec.expression isa ExprColumn || error(
-        "sbimpl: `$spelling` RHS must be a callable prior expression")
-    spec.expression
-end
-
-function _sb_ranef_lkj(spec, n_terms::Int)
-    T = _as_distribution_type(spec.family)
-    (!isnothing(T) && T <: LKJCholesky) || error(
-        "sbimpl: `cor(:, ID)` expects `LKJCholesky(K, eta)`; " *
-        "got `$(spec.family)`")
-    isempty(spec.keywords) || error(
-        "sbimpl: `cor(:, ID) ~ LKJCholesky(...)` does not accept keywords")
-    args = map(_sb_effect_prior_arg, spec.arguments)
-    length(args) == 2 || error(
-        "sbimpl: `LKJCholesky` correlation priors require dimension K and eta")
-    k, eta = args
-    k isa Integer || error(
-        "sbimpl: `LKJCholesky(K, eta)` dimension K must be an integer " *
-        "formula constant, got $(repr(k))")
-    k == n_terms || error(
-        "sbimpl: `LKJCholesky($k, ...)` does not match the addressed " *
-        "random-effect block width $n_terms")
-    eta isa Real || error(
-        "sbimpl: LKJ eta must be a numeric formula constant, got $(repr(eta))")
-    isfinite(eta) && eta > 0 || error(
-        "sbimpl: LKJ eta must be finite and strictly positive, got $eta")
-    Float64(eta)
 end
 
 # Resolve formula-level random-effect prior statements onto collected ID
@@ -14328,9 +14125,6 @@ end
 # `effect(lp, Intercept) ~ Normal(...)` statement overrides it -- which composes,
 # because a column carrying its own override is likewise excluded from the
 # simplex rather than fought over.
-
-_sb_r2d2_kwarg(::Nothing, _default) = _default
-_sb_r2d2_kwarg(x, _default) = x
 
 _sb_r2d2_prior_statement(target, prior) =
     _sb_r2d2_prior_statement(target, getf(prior), prior)
@@ -14818,7 +14612,7 @@ Base.@nospecializeinfer function _sb_collect_group_block_terms(@nospecialize(brm
         for t in _sb_terms(rhs)
             te = _as_expr_column(t); isnothing(te) && continue
             f = getf(te)
-            fields = _sb_structured_fields(_sb_term_group_block(f, te), f)
+            fields = _brm_structured_fields(_sb_term_group_block(f, te), f)
             isnothing(fields) && continue
             push!(result, (; key, f, rhs_e=te, fields))
         end
@@ -14829,13 +14623,6 @@ end
 # Resolve a field's grouping column from its group spec + the term call.
 _sb_resolve_group_col(gspec, rhs_e, data) =
     _brm_structured_group_column(gspec, rhs_e, data; prefix="sbimpl")
-
-# The grouping column's NAME, without materialising data. Used to build the
-# disambiguating block name (`b_<field>_<gname>`) in BOTH the emit pass and the
-# find pass so they agree on the per-instance block. For a `group_fn` spec this
-# is `fn_name` by construction (the synthesised column is named `fn_name`), so
-# `data` is never needed here — only `_sb_resolve_group_col` (emit) needs it.
-_sb_group_name(gspec, rhs_e) = _brm_structured_group_name(gspec, rhs_e)
 
 # Emit the per-group block draw for one field, dispatching on its prior spec.
 # Each block is an n_groups × n_per_group matrix referenced by row = group.
@@ -14886,7 +14673,7 @@ end
 # when that spelling is taken), so every predictor owns independent weights.
 # The emitter, the descriptor's ownership pass and adaptive centering all read
 # the block names from this one plan.
-_sb_group_block_base(fld, rhs_e) = Symbol(fld.name, :_, _sb_group_name(fld.group, rhs_e))
+_sb_group_block_base(fld, rhs_e) = Symbol(fld.name, :_, _brm_structured_group_name(fld.group, rhs_e))
 function _sb_group_block_plan(gb_terms)
     first_owner = Dict{Symbol,Symbol}()
     for gb in gb_terms, fld in gb.fields
@@ -14898,7 +14685,7 @@ function _sb_group_block_plan(gb_terms)
     for gb in gb_terms, fld in gb.fields
         base = _sb_group_block_base(fld, gb.rhs_e)
         suffix = first_owner[base] === gb.key ? base : get!(scoped, (gb.key, base)) do
-            stem = Symbol(fld.name, :_, gb.key, :_, _sb_group_name(fld.group, gb.rhs_e))
+            stem = Symbol(fld.name, :_, gb.key, :_, _brm_structured_group_name(fld.group, gb.rhs_e))
             candidate, serial = stem, 2
             while candidate in taken
                 candidate = Symbol(stem, :_, serial)
@@ -14966,13 +14753,13 @@ function _sb_emit_group_blocks!(stmts, data, gb_terms; cv_groups=Set{Symbol}())
 end
 
 # Look up block_info for a declaring term call at emit time, or nothing. Rebuilds
-# each field's base block name (via `_sb_group_name`, matching the emit pass) and
+# each field's base block name (via `_brm_structured_group_name`, matching the emit pass) and
 # resolves it against the predictor's block-name-keyed lookup. Returns a NamedTuple carrying
 # a `fields` map (field-name => per-field info); for single-field terms the lone
 # field's keys are also spliced at top level so legacy consumers that destructure
 # `(; block_name, idx_name)` keep working.
 function _sb_find_group_block(f, rhs_e, group_block_lookup)
-    fields = _sb_structured_fields(_sb_term_group_block(f, rhs_e), f)
+    fields = _brm_structured_fields(_sb_term_group_block(f, rhs_e), f)
     isnothing(fields) && return nothing
     fmap = Dict{Symbol,NamedTuple}()
     for fld in fields
@@ -14997,9 +14784,9 @@ _sb_group_desc_matches(_, _) = false
 _sb_ranef_term_ncols(t::Int, _) = t == 0 ? 0 : 1
 _sb_ranef_term_ncols(t::NamedColumn, _data) = _sb_ranef_named_ncols(_sb_ranef_levels(t))
 _sb_ranef_term_ncols(t::_SBCellMeansTerm, _data) =
-    _sb_level_index(_sb_ranef_levels(t.term))[1]
+    _brm_level_index(_sb_ranef_levels(t.term))[1]
 _sb_ranef_named_ncols(::Nothing) = 1
-_sb_ranef_named_ncols(levels) = _sb_level_index(levels)[1] - 1
+_sb_ranef_named_ncols(levels) = _brm_level_index(levels)[1] - 1
 # `a & b` expands to one column per operand-contrast product (the population
 # `_sb_interaction_cols!` rule), so the shared-`|ID|` bucket pre-sizer must
 # count it exactly: the emitter later asserts expanded == reserved.
@@ -15926,7 +15713,7 @@ _sb_joint_redraw_data(redraw, levels) = Dict{Symbol,Any}(
 
 # The labels a replay's redrawn columns of a joined block name together.
 _sb_joint_redraw_levels(redraw, id, df) = _brm_label_union(
-    [c => _sb_df_column(df, c) for c in redraw.columns]; id, prefix="sbimpl: reprocess")
+    [c => _brm_df_column(df, c) for c in redraw.columns]; id, prefix="sbimpl: reprocess")
 
 # Ensure `group_idx` / `n_groups` for a plain-group ranef descriptor are stashed
 # in `data`. Idempotent — safe to call from both the ID pre-pass and the per-
@@ -15937,7 +15724,7 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     gname = name(g)
     idx_name = Symbol(gname, :_idx)
     n_name   = Symbol(:n_, gname)
-    n_levels, g_idx = _sb_level_index(parent(g_backing))
+    n_levels, g_idx = _brm_level_index(parent(g_backing))
     _sb_note_group_column!(data, gname)
     _sb_set_group_index_datum!(data, idx_name, g_idx, gname)
     _sb_set_group_index_datum!(data, n_name, n_levels, gname)
@@ -15955,8 +15742,8 @@ function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     isnothing(g_backing) && error("sbimpl: group `$(name(gcol))` must be a raw data column")
     isnothing(b_backing) && error("sbimpl: `by=$(name(bcol))` must be a raw data column")
     gname, bname = name(gcol), name(bcol)
-    n_groups, g_idx = _sb_level_index(parent(g_backing))
-    n_strata, b_idx = _sb_level_index(parent(b_backing))
+    n_groups, g_idx = _brm_level_index(parent(g_backing))
+    n_strata, b_idx = _brm_level_index(parent(b_backing))
     _sb_note_group_column!(data, gname)
     _sb_note_group_column!(data, bname)
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, gname, bname)
@@ -16128,7 +15915,7 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     block = Symbol(name(inner), :__ref_, ref)
     codes = _sb_relevel_codes(raw, ref)
     push!(acc, NamedColumn(block, DataColumn(_SBReleveledFactor(
-        codes, _sb_fit_levels(codes), _SBFactorSource(block, name(inner), Int(ref))))))
+        codes, _brm_fit_levels(codes), _SBFactorSource(block, name(inner), Int(ref))))))
 end
 # A string `factor(...)` term as the categorical column `_sb_emit_cat!` codes:
 # the backend-neutral string design's `sort(unique)` level order with the
@@ -16311,7 +16098,7 @@ _sb_interaction_operand(t::ExprColumn, data, stmts) = begin
     (; kind=:cont, name=col_name, vec=collect(Float64, rv))
 end
 _sb_interaction_operand_kind(t, v, levels) = begin
-    n_levels, idx = _sb_level_index(levels)
+    n_levels, idx = _brm_level_index(levels)
     # Single-level factor: the expander's `2:n_levels` loops are empty, so this
     # contributes 0 interaction columns uniformly (no shape special-case).
     (; kind=:cat, name=name(t), n_levels, idx)
@@ -16502,16 +16289,6 @@ end
 _predictor_col_for(t, d, _) = error("sbimpl: expected data-backed NamedColumn for `$(name(t))`, got $(typeof(d))")
 _sb_predictor_col(t::ExprColumn, data, stmts, _pop_terms=(); kwargs...) = _sb_predictor_term!(stmts, data, getf(t), t; kwargs...)
 _sb_predictor_col(t, _data, _stmts, _pop_terms=(); kwargs...) = error("sbimpl: unsupported predictor term $(typeof(t)): $t")
-
-# Monotonic-effect increment-simplex level set for emission. During a frozen
-# resample re-emission the FITTED level set — recorded in `PreprocEntry(:mo)` —
-# sizes the simplex, exactly as it freezes the `<c>_idx` codes in
-# `_sb_reprocess_entry!`; a fresh fit or a `freeze_constants=false` re-emission
-# derives it from `raw`. Mirrors `_sb_hsgp_fit_for_emission`.
-function _sb_mo_levels_for_emission(data, idx_name::Symbol, inner_name, raw)
-    frozen = _sb_frozen_preproc_entry(data, idx_name, :mo, inner_name)
-    isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
-end
 
 # Monotonic-effect predictor: emit `<mo> ~ _sb_mo(; x=<c>_idx)` and return
 # `<mo>` as the column. Scope: single NamedColumn inner arg backed by raw
@@ -16723,7 +16500,7 @@ _sb_predictor_term!(stmts, data, ::typeof(t2), t;
         "sbimpl: `t2(x, z)` expects exactly 2 positional margins, got $(length(args))")
     kw = getkwargs(t)
     _check_term_kwargs(t2, kw)
-    k, _, _ = _sb_t2_options(kw)
+    k, _, _ = _brm_t2_options(kw)
     names, axes = _sb_gp_axes(:t2, args)
     axes_suffix = join(string.(names), "_")
     suffix = isnothing(target) ? axes_suffix : string(target, "_", axes_suffix)
@@ -16824,7 +16601,7 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
         length(names) == 1 || error(
             "sbimpl: `gp(...; cov=:periodic)` supports exactly one axis, got " *
             "$(length(names))")
-        _sb_gp_iso(kw, :gp) || error(
+        _brm_gp_iso(kw, :gp) || error(
             "sbimpl: `gp(...; cov=:periodic)` has one axis and one length " *
             "scale; `iso=false` has no meaning here")
         period = prepared.state.period
@@ -16849,7 +16626,7 @@ function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
     frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
     fitted_axes = _brm_hsgp_masked_axes(axes, mask)
     # Fit the fresh basis LAZILY — only when there is no frozen entry to return.
-    # A constant prediction axis (e.g. a fixed future dose) trips `_sb_fit_hsgp`'s
+    # A constant prediction axis (e.g. a fixed future dose) trips `_brm_fit_hsgp`'s
     # degeneracy check, so evaluating it eagerly crashed frozen CV-template
     # re-emission even though `const_.fits` is what gets returned. (`f5a177d`
     # had this lazy; `2e929f7` regressed it while threading in `domain_fits`.)
@@ -16907,8 +16684,8 @@ end
 # compiles the same program.
 function _sb_check_replay_settings(df, term::Symbol, fields)
     for (field, fitted) in fields
-        _sb_df_has_column(df, field) || continue
-        fresh = _sb_df_column(df, field)
+        _brm_df_has_column(df, field) || continue
+        fresh = _brm_df_column(df, field)
         isequal(fresh, fitted) || throw(ArgumentError(
             "sbimpl: `$term(...)` reads `$field`: the new data holds $field = " *
             "$(repr(fresh)), but the fit used $field = $(repr(fitted)). An SBBRMI " *
@@ -17012,7 +16789,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         error("sbimpl: internal error — hyper-predictor plans need the " *
               "owning linear predictor (`target=nothing`)")
     end
-    hyper_plans = _sb_hyper_plans_for(data, target, _sb_term_key(t))
+    hyper_plans = _sb_hyper_plans_for(data, target, _brm_prepared_term_key(t))
     _check_term_kwargs(hsgp, kw)
     haskey(kw, :periodic) &&
         return _sb_hsgp_space_periodic_term!(
@@ -17024,9 +16801,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         "sbimpl: `hsgp(...)` cannot mix raw-data and model-derived axes")
     is_raw = all(raw_flags)
     n_axes = length(args)
-    K, c = _sb_hsgp_options(kw, n_axes)
-    cov = _sb_gp_cov(kw, :hsgp)
-    period = _sb_gp_period(kw, :hsgp, cov)
+    K, c = _brm_hsgp_options(kw, n_axes)
+    cov = _brm_gp_cov(kw, :hsgp)
+    period = _brm_gp_period(kw, :hsgp, cov)
     options = _brm_hsgp_extended_options(kw, n_axes, cov; latent=!is_raw)
     cov === :periodic && return _sb_hsgp_periodic_term!(
         stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides,
@@ -17040,11 +16817,11 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         data=haskey(kw, :by) ? nothing : data, term=t, scope=term_scope)
     centeredness = _brm_hsgp_centeredness(kw, prod(K))
     partial = any(!iszero, centeredness)
-    domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
-    orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
+    domain_fits = _brm_hsgp_domain_fits(kw, n_axes; required=!is_raw)
+    orthogonal_to = _brm_hsgp_orthogonal_to(kw, n_axes)
     !is_raw && partial && error(
         "sbimpl: partial centering currently requires a raw-data HSGP axis")
-    iso = _sb_gp_iso(kw, :hsgp)
+    iso = _brm_gp_iso(kw, :hsgp)
 
     if !is_raw
         isempty(hyper_plans) || error(
@@ -17273,22 +17050,22 @@ function _sb_hsgp_space_periodic_term!(stmts, data, t, term_overrides, target;
         haskey(kw, key) && error(
             "sbimpl: spatial × periodic HSGP does not accept `$key=`")
     end
-    _sb_gp_iso(kw, :hsgp) || error(
+    _brm_gp_iso(kw, :hsgp) || error(
         "sbimpl: spatial × periodic HSGP currently shares one spatial length scale; " *
         "use `iso=true`")
-    isempty(_sb_hyper_plans_for(data, target, _sb_term_key(t))) || error(
+    isempty(_sb_hyper_plans_for(data, target, _brm_prepared_term_key(t))) || error(
         "sbimpl: spatial × periodic HSGP does not accept hyper-predictors")
     for key in (:length_scale, :sd)
         isnothing(_sb_term_cfg(term_overrides, t, key)) || error(
             "sbimpl: spatial × periodic HSGP does not yet accept an explicit `$key` prior")
     end
-    K, _ = _sb_hsgp_options(kw, length(names))
+    K, _ = _brm_hsgp_options(kw, length(names))
     n_space_axes = length(names) - 1
-    fits = _sb_hsgp_domain_fits(kw, n_space_axes; required=true)
-    orthogonal = _sb_hsgp_orthogonal_to(kw, n_space_axes)
+    fits = _brm_hsgp_domain_fits(kw, n_space_axes; required=true)
+    orthogonal = _brm_hsgp_orthogonal_to(kw, n_space_axes)
     orthogonal === :linear && error(
         "sbimpl: spatial × periodic HSGP supports `orthogonal_to=:intercept`")
-    period = _sb_gp_period(kw, :hsgp, :periodic)
+    period = _brm_gp_period(kw, :hsgp, :periodic)
     axes = Tuple(_sb_hsgp_axis_values(names[j], raw[j], nothing)
         for j in 1:n_space_axes)
     n_locations = length(first(axes))
@@ -17344,7 +17121,7 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     is_raw || error(
         "sbimpl: `hsgp(...; cov=:periodic)` currently requires a raw-data axis; " *
         "a model-derived periodic axis is not supported")
-    _sb_gp_iso(kw, :hsgp) || error(
+    _brm_gp_iso(kw, :hsgp) || error(
         "sbimpl: `hsgp(...; cov=:periodic)` has one axis and one length scale; " *
         "`iso=false` has no meaning here")
     any(!iszero, _brm_hsgp_centeredness(kw, 2 * only(K))) && error(
@@ -17400,13 +17177,13 @@ function _sb_term_group_block(::typeof(hsgp), call)
     kw = getkwargs(call)
     haskey(kw, :by) || return nothing
     _check_term_kwargs(hsgp, kw)
-    _sb_gp_cov(kw, :hsgp) === :periodic && error(
+    _brm_gp_cov(kw, :hsgp) === :periodic && error(
         "sbimpl: `hsgp(...; cov=:periodic)` does not accept `by=`: the " *
         "grouped periodic basis is not implemented")
     args = getargs(call)
     isempty(args) && error("sbimpl: `hsgp(x...; by=...)` expects at least one positional axis")
     names = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
-    K, _ = _sb_hsgp_options(kw, length(args))
+    K, _ = _brm_hsgp_options(kw, length(args))
     fname = Symbol(:hsgpw_, join(string.(names), "_"))
     field = (; name=fname, n_per_group=prod(K), group=(; kwarg=:by), prior=:iid_normal)
     # `cor = multigroup(coordinates, lambda; k)` draws its standardized weights
@@ -17615,9 +17392,9 @@ end
 # brms-style `protect(...)` no-op is handled by the generic fallback once
 # `protect(x::Real) = x` is defined in macro.jl.)
 for (fn, kind, fitf, applyf) in (
-        (:zscale,      :zscale,      :_sb_fit_zscale, :_sb_apply_zscale),
-        (:standardize, :standardize, :_sb_fit_zscale, :_sb_apply_zscale),
-        (:center,      :center,      :_sb_fit_center, :_sb_apply_center),
+        (:zscale,      :zscale,      :_brm_fit_zscale, :_brm_apply_zscale),
+        (:standardize, :standardize, :_brm_fit_zscale, :_brm_apply_zscale),
+        (:center,      :center,      :_brm_fit_center, :_brm_apply_center),
     )
     # fit → apply keeps the construct-time column byte-identical to the old
     # one-pass while exposing the fitted constant `c` for the preproc record
@@ -17629,11 +17406,11 @@ for (fn, kind, fitf, applyf) in (
         isnothing(inner) && error(
             "sbimpl: `$($(QuoteNode(fn)))(x)` takes exactly one argument")
         if _sb_term_refs_mi(inner)
-            cn = _sb_wrapper_col_name($(QuoteNode(fn)), inner)
+            cn = _brm_wrapper_col_name($(QuoteNode(fn)), inner)
             return _sb_emit_mi_transform!(stmts, data,
                 $(QuoteNode(Symbol(:missing_, kind))), inner, cn)
         end
-        cn = _sb_wrapper_col_name(Symbol($(QuoteNode(fn))), inner)
+        cn = _brm_wrapper_col_name(Symbol($(QuoteNode(fn))), inner)
         frozen = _sb_frozen_preproc_entry(data, cn, $(QuoteNode(kind)), inner)
         v = collect(Float64, _sb_materialize_vec(inner))
         c = isnothing(frozen) ? $fitf(v) : frozen.const_
@@ -17660,13 +17437,13 @@ end
 # directly), preserving the old "unsupported" diagnostic.
 function _sb_materialize_protect_term!(stmts, data, f, t)
     if _sb_term_refs_mi(t)
-        cn = _sb_wrapper_col_name(Symbol(f), t)
+        cn = _brm_wrapper_col_name(Symbol(f), t)
         _sb_mi_predictor_assignment!(stmts, cn, _sb_scalar_expr(t, data))
         return cn
     end
     try
         v = collect(Float64, _sb_materialize_vec(t))
-        cn = _sb_wrapper_col_name(Symbol(f), t)
+        cn = _brm_wrapper_col_name(Symbol(f), t)
         data[cn] = v
         # Element-wise pure transform: no fitted constant, just re-materialise
         # the same expr tree against the new df (freeze-agnostic).
@@ -17737,11 +17514,11 @@ _sb_term_refs_mi(_) = false
 _sb_mi_training_values(x::Number, _df=nothing) = x
 function _sb_mi_training_values(x::NamedColumn, df=nothing)
     plan = _sb_mi_predictor_plan(x)
-    !isnothing(plan) && return isnothing(df) ? plan.values : _sb_df_column(df, plan.source)
+    !isnothing(plan) && return isnothing(df) ? plan.values : _brm_df_column(df, plan.source)
     rhs = _sb_mi_assignment_rhs(x)
     !isnothing(rhs) && return _sb_mi_training_values(rhs, df)
     if parent(x) isa DataColumn
-        return isnothing(df) ? _sb_materialize_vec(x) : _sb_df_column(df, name(x))
+        return isnothing(df) ? _sb_materialize_vec(x) : _brm_df_column(df, name(x))
     end
     # A complete observed likelihood retains its original data-backed LHS.
     # Its distribution parameters are not inputs to the observed values.
@@ -17749,7 +17526,7 @@ function _sb_mi_training_values(x::NamedColumn, df=nothing)
     if op isa ExprColumn && getf(op) === (~)
         lhs = first(getargs(op, 2))
         if lhs isa NamedColumn && parent(lhs) isa DataColumn
-            return isnothing(df) ? _sb_materialize_vec(lhs) : _sb_df_column(df, name(lhs))
+            return isnothing(df) ? _sb_materialize_vec(lhs) : _brm_df_column(df, name(lhs))
         end
     end
     throw(ArgumentError("sbimpl: cannot fit fixed observed-only transform anchors " *
@@ -17833,27 +17610,6 @@ _materialize_named(x, _) = error(
 _sb_materialize_vec(x::ExprColumn) = _brm_data_call(
     getf(x), map(_sb_materialize_vec, getargs(x)), map(_sb_materialize_vec, getkwargs(x)))
 _sb_materialize_vec(x) = error("sbimpl: cannot materialize $(typeof(x)) inside wrapper predictor")
-
-# Fit/apply split for the vector-wise standardisers. `_sb_fit_*` computes the
-# data-derived constant; `_sb_apply_*` applies a (possibly frozen) constant to
-# a vector. The fused `_sb_zscale`/`_sb_center` keep construct-time behaviour
-# byte-identical (fit∘apply == the old one-pass), and `reprocess` reuses the
-# apply half with a frozen constant for prediction-replay (decision nr3v8n A).
-_sb_fit_zscale(v::AbstractVector{<:Real}) = _brm_fit_zscale(v)
-_sb_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) =
-    _brm_apply_zscale(c, v)
-_sb_zscale(v::AbstractVector{<:Real}) = _sb_apply_zscale(_sb_fit_zscale(v), v)
-
-_sb_fit_center(v::AbstractVector{<:Real}) = _brm_fit_center(v)
-_sb_apply_center(mu::Real, v::AbstractVector{<:Real}) =
-    _brm_apply_center(mu, v)
-_sb_center(v::AbstractVector{<:Real}) = _sb_apply_center(_sb_fit_center(v), v)
-
-# Stable, human-readable column name for a wrapped predictor. When the
-# inner is a single NamedColumn we tag with its name; otherwise we hash
-# the expr structure so multiple `protect(...)` summands don't collide.
-_sb_wrapper_col_name(prefix::Symbol, inner) =
-    _brm_wrapper_col_name(prefix, inner)
 
 _n_obs_name(t::NamedColumn) = _n_obs_named_data(t, parent(t))
 _n_obs_name(_) = nothing
@@ -18156,7 +17912,7 @@ function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data; needs_cdf
             length(args) == 2 && _sb_declares_link(first(args), log)
         # The bare mean remains available wherever another expression reads it.
         mu, phi = args
-        eta = _sb_lp_emitted_name(name(mu), log)
+        eta = _brm_lp_emitted_name(name(mu), log)
         return _sb_lik_stan_exprs!(stmts, target, :neg_binomial_2_log,
                                    (eta, _sb_scalar_expr(phi, data)))
     end
@@ -18180,7 +17936,7 @@ end
 _sb_logit_scale(_arg, _data) = nothing
 function _sb_logit_scale(arg::NamedColumn, data)
     _sb_declares_link(arg, LogExpFunctions.logit) &&
-        return _sb_lp_emitted_name(name(arg), LogExpFunctions.logit)
+        return _brm_lp_emitted_name(name(arg), LogExpFunctions.logit)
     payload = parent(arg)
     payload isa ExprColumn{typeof(assign)} || return nothing
     _sb_logit_scale(last(getargs(payload, 2)), data)
@@ -18403,8 +18159,6 @@ _sb_ordinal_link_code(x) = error(
     "sbimpl: ordinal link must be `LogitLink()`, `ProbitLink()`, or " *
     "`CloglogLink()`, got $(typeof(x))")
 
-_sb_ordinal_has_fixed_intercept(x) = _brm_ordinal_has_fixed_intercept(x)
-
 function _sb_ordinal_threshold_predictors!(data, target, raw, n_obs)
     raw isa Tuple || error(
         "sbimpl: `Ordinal(...; per_threshold=...)` expects a tuple of raw " *
@@ -18518,7 +18272,7 @@ function _sb_ordinal_law!(stmts, target, args::Tuple{Any,Any,Any},
     structure_raw, link_raw, eta_raw = args
     structure = _sb_ordinal_structure_code(structure_raw)
     link = _sb_ordinal_link_code(link_raw)
-    _sb_ordinal_has_fixed_intercept(eta_raw) && error(
+    _brm_ordinal_has_fixed_intercept(eta_raw) && error(
         "sbimpl: `Ordinal($target)` cannot include a fixed intercept in `eta`; " *
         "the estimated thresholds already supply the location. Use `eta ~ 0 + ...`.")
 
@@ -18744,7 +18498,7 @@ end
 function _sb_lik_family!(stmts, target, ::Type{<:CircularVonMises},
                          args::Tuple{Any,Any}, kwargs::NamedTuple, data)
     mu, kappa = map(a -> _sb_scalar_expr(a, data), args)
-    interval = _sb_circular_interval(kwargs)
+    interval = _brm_circular_interval(kwargs)
     _sb_validate_von_mises!(data, target, mu, kappa;
                             interval, principal=true)
     lo, hi = interval
@@ -19039,8 +18793,6 @@ end
 # Composition follows the base distribution's value support. The backend's
 # ordinary translation and StanBlocks' CDF/CCDF dispatch determine whether the
 # requested operation exists; no separate list of approved families is needed.
-_sb_cdf_family_kind(::Type{D}) where {D<:Distribution} =
-    _sb_cdf_support_kind(Distributions.value_support(D))
 _sb_cdf_support_kind(::Type{Distributions.Continuous}) = :continuous
 _sb_cdf_support_kind(::Type{Distributions.Discrete}) = :discrete
 
@@ -19067,10 +18819,6 @@ function _sb_wrapper_bounds(wrapper, args, kwargs::NamedTuple)
         "sbimpl: internal unsupported response modifier `$wrapper`")
     plan.lower, plan.upper
 end
-
-# Compatibility name for downstream/tests that inspect the established
-# StanBlocks lowering helper; semantics now live in the shared core.
-_sb_normalize_bound(x) = _brm_normalize_response_bound(x)
 
 _sb_bound_data(x::Real, _data) = x
 _sb_bound_data(x::AbstractVector{<:Real}, _data) = x

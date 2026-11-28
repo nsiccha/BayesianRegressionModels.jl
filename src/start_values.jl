@@ -909,29 +909,6 @@ function _brm_rk_scale_writes!(writes, r, sd, values)
     writes
 end
 
-# Replace one addressed element (or the whole value) of a declaration in the
-# nested constrained values, copying the leaf rather than mutating it.
-function _brm_rk_set_declaration_value(values, declaration::Symbol, index::Tuple, value)
-    path = hasproperty(values, declaration) ? (declaration,) :
-        Tuple(Symbol.(split(String(declaration), '.')))
-    _brm_rk_set_path(values, path, index, value)
-end
-function _brm_rk_set_path(values::NamedTuple, path::Tuple, index, value)
-    head = first(path)
-    hasproperty(values, head) || error(
-        "brm_start: internal: RK constrained values carry no `$head`")
-    leaf = getproperty(values, head)
-    new = length(path) == 1 ? _brm_rk_set_leaf(leaf, index, value) :
-        _brm_rk_set_path(leaf, Base.tail(path), index, value)
-    merge(values, NamedTuple{(head,)}((new,)))
-end
-_brm_rk_set_leaf(leaf, ::Tuple{}, value) = value
-function _brm_rk_set_leaf(leaf::AbstractArray, index::Tuple{Any,Vararg}, value)
-    out = copy(leaf)
-    out[index...] = value
-    out
-end
-
 # ---------------------------------------------------------------------------
 # StanBlocks: descriptor resolvers + BridgeStan's inverse transform.
 

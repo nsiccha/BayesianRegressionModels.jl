@@ -203,15 +203,15 @@ end
     @test asym.data[:diet_share_alpha] == SIMPLEX_ALPHA2
 
     # A prior declaration is not a population formula. `linear_predictors` reports
-    # every non-data `~` binding, so `_sb_is_prior_declaration` is what keeps the
+    # every non-data `~` binding, so `_brm_is_prior_declaration` is what keeps the
     # `effect(...)` prepass from asking `popcoefnames` about it -- exactly the
     # invariant the scalar `log_F_bottle ~ Normal(0, 0.5)` case already relies on.
     # A Dirichlet declaration behaves identically to a scalar one here, including
     # `popcoefnames` throwing rather than naming a column.
     brmi = sb.parent
     @test :diet_share in Symbol[x.name for x in linear_predictors(brmi)]
-    @test BRM._sb_is_prior_declaration(brmi, :diet_share)
-    @test BRM._sb_is_prior_declaration(brmi, :sigma)
+    @test BRM._brm_is_prior_declaration(brmi, :diet_share)
+    @test BRM._brm_is_prior_declaration(brmi, :sigma)
     # A prior declaration is not a population formula: popcoefnames answers
     # nothing for it (db935467).
     @test isnothing(popcoefnames(brmi, :diet_share))

@@ -15,15 +15,12 @@ function _brm_svi_check_sd_bound(sd_bound; caller="brm_svi_fit")
     sd_bound === nothing ? nothing : Float64(sd_bound)
 end
 
-# The sd of the Gaussian projection of each of `t`'s globals' own prior, `Inf`
-# where it has none: the bound is `sd_bound` times it. It depends on the model's
-# prior only and uses its own random stream, so a fit's draws and a resumed fit
-# are unchanged by it.
-_brm_svi_sd_prior(t; kwargs...) = _brm_svi_own_prior_projection(t; kwargs...).sd
-
-# The same projection's mean and sd: `sd_prior` and `prior_mean` of a target. A
-# `BRMSVINonfiniteError` measures how far each global of a failing point is from
-# its prior in these sds (`_brm_svi_prior_outliers`).
+# The mean and sd of the Gaussian projection of each of `t`'s globals' own prior
+# (`prior_mean` and `sd_prior` of a target), the sd `Inf` where it has none: the
+# bound is `sd_bound` times that sd. It depends on the model's prior only and
+# uses its own random stream, so a fit's draws and a resumed fit are unchanged
+# by it. A `BRMSVINonfiniteError` measures how far each global of a failing
+# point is from its prior in these sds (`_brm_svi_prior_outliers`).
 function _brm_svi_own_prior_projection(t; rng=Random.Xoshiro(0x5370726561640001), pairs=16)
     D = length(t.globals)
     D == 0 && return (; mean=Float64[], sd=Float64[])
@@ -107,7 +104,7 @@ _brm_svi_sd_prior_of(t) = hasproperty(t, :sd_prior) ? getproperty(t, :sd_prior) 
 _brm_svi_prior_mean_of(t) = hasproperty(t, :prior_mean) ? getproperty(t, :prior_mean) : nothing
 
 # q's global factor with every bounded global's marginal sd within `factor` times
-# its `sd` (`_brm_svi_sd_prior`): exp(ρ_k) and the row Β_k shrink by one factor, so
+# its `sd` (the target's `sd_prior`): exp(ρ_k) and the row Β_k shrink by one factor, so
 # its correlations stay. With `sd` or `factor` nothing, q is untouched.
 _brm_svi_bound_sd!(q, bound) = _brm_svi_bound_sd!(q, bound, 1.0)
 function _brm_svi_bound_sd!(q, sd, factor)

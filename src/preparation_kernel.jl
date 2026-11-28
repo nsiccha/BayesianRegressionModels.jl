@@ -54,7 +54,11 @@ _brm_collect_data_columns!(acc, x::Union{Tuple,AbstractVector}) = begin
     for a in x; _brm_collect_data_columns!(acc, a); end
     nothing
 end
-# `(name, length)` of each row-wise data column `x` reads.
+# `(name, length)` of each row-wise raw data column `x` reads; a scalar column
+# broadcasts and names no row axis. Used to check that a `ragged(x, group)` LP
+# is declared over the same row axis its grouping column describes. Descent
+# stops at a nested `~` ExprColumn: that is a reference to another formula's
+# value, so its data belongs to the other row axis.
 function _brm_collect_data_lengths!(acc, x)
     columns = Tuple{Symbol,Any}[]
     _brm_collect_data_columns!(columns, x)

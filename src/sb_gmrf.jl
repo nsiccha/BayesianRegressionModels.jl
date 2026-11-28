@@ -435,12 +435,12 @@ end
 function _sb_gmrf_fresh_count(df, state, option::Symbol)
     source = get(state, Symbol(option, :_source), nothing)
     (source === nothing || !_brm_df_has_column(df, source)) && return getproperty(state, option)
-    _brm_gmrf_count(option, _sb_df_column(df, source))
+    _brm_gmrf_count(option, _brm_df_column(df, source))
 end
 
 function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
     training = e.const_.prepared
-    rows = Dict{Symbol,Any}(s => _sb_df_column(df, s) for s in training.source)
+    rows = Dict{Symbol,Any}(s => _brm_df_column(df, s) for s in training.source)
     if !freeze && get(training.state, :multiresolution, nothing) !== nothing
         state = training.state
         times = _brm_gmrf_times(_brm_gmrf_row_time(training.source, rows))
@@ -472,8 +472,8 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
             merge(state, (; times, channels, footprint, neighbors)), training.dependencies)
     elseif !freeze
         state = training.state
-        vertices = _sb_df_column(df, state.vertices_source)
-        cells = _sb_df_column(df, state.cells_source)
+        vertices = _brm_df_column(df, state.vertices_source)
+        cells = _brm_df_column(df, state.cells_source)
         mesh = _brm_gmrf_mesh(vertices, cells)
         times = _brm_gmrf_times(_brm_gmrf_row_time(training.source, rows))
         channels = _brm_gmrf_has_channel(training.source) ?
