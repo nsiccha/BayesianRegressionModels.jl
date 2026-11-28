@@ -615,7 +615,7 @@ end
 # `omega2`. The scales are a vector over the modes, or levels × modes when a
 # hyper-predictor scales `sd` or `length_scale` by level.
 function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho, z, scales, bindings;
-        group_index=nothing, multigroup=nothing)
+        group_index=nothing, multigroup=nothing, at=nothing, multiply=nothing)
     options = term.options
     D = length(term.columns)
     rho_by_group = any(p -> p.hyper === :length_scale, options.hyper_plans)
@@ -666,6 +666,8 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
 
     # The basis product.
     arguments = [formals..., :scales, :z]
+    at === nothing || push!(arguments, :row_index)
+    multiply === nothing || push!(arguments, :multiplier)
     body = Expr(:block, basis_statements()...)
     # `cor=multigroup(...)`: the group weights of each basis frequency are
     # correlated by its multigroup coherence (src/level_correlation.jl), which
@@ -684,7 +686,10 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
         zw = :z_multigroup
     end
     if group_index === nothing
-        push!(body.args, :(value = PHI * (scales .* z)), :(return value))
+        push!(body.args, :(value = PHI * (scales .* z)))
+        result = at === nothing ? :value : :(value[row_index])
+        multiply === nothing || (result = :($result .* multiplier))
+        push!(body.args, Expr(:return, result))
     else
         push!(arguments, :group_index)
         push!(body.args, by_group ? :(scaled_z = $zw .* scales) :
@@ -705,6 +710,8 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_spectral_graph",
         arguments, body; kernel=true, doc)
     values = Any[last.(inputs)..., scales, z]
+    at === nothing || push!(values, :row_index)
+    multiply === nothing || push!(values, :multiplier)
     multigroup === nothing || push!(values, rho)
     group_index === nothing || push!(values, group_index)
     multigroup === nothing || append!(values, multigroup.values)

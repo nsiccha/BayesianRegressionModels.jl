@@ -445,7 +445,7 @@ function gp end
 
 """
     hsgp(x...; k=20, c=1.5, cov=:exp_quad, iso=true, by=nothing,
-         domain=nothing, orthogonal_to=nothing)
+         domain=nothing, orthogonal_to=nothing, at=nothing, multiply=nothing)
     hsgp(x; k=20, cov=:periodic, period)
 
 Hilbert-space approximate Gaussian-process predictor. The StanBlocks backend
@@ -464,6 +464,17 @@ projections are fitted per level: each group's basis is centered (and, for
 `:linear`, de-trended) over that group's own rows, so every group's field sums
 to zero over its rows. Both projections are fitted on the training rows and
 frozen on replay; neither combines with `anchor=`.
+
+`at=position` reads the finished field at the observation rows named by an
+integer position column. The basis and any `orthogonal_to=` projection are
+evaluated on the original distinct axis rows, so repeated observations do not
+change the centring measure or multiply the basis work. The positions must be
+one-based indices into those axis rows. `at=` is available for ungrouped raw
+data HSGPs, including a one-axis periodic HSGP; it does not combine with `by=`.
+`multiply=column` multiplies the finished field on each output row by a finite
+numeric data column. With `at=`, it is read on the observation rows after the
+field is gathered; the basis and its projection remain on their original rows.
+It also does not combine with `by=`.
 
 `k`, `c`, `domain`, `period` and `anchor` are numbers the model reads: a
 literal, or a data field holding the scalar or per-axis value (or
