@@ -7,7 +7,8 @@
 # `abs2.`, ...). This pass supplies the SB backend's remaining Stan spellings:
 #
 # - a deterministic call whose Julia callable is a differently named Stan
-#   builtin (`logistic` -> `inv_logit`, `normcdf` -> `Phi`, `cumsum` ->
+#   builtin, or a same-named one StanBlocks does not bind (`logistic` ->
+#   `inv_logit`, LogExpFunctions' `logit` -> `logit`, `normcdf` -> `Phi`, `cumsum` ->
 #   `cumulative_sum`, `fill`/`zeros`/`ones` -> `rep_vector`/`rep_matrix`,
 #   `vcat` -> `append_row`, ...);
 # - distribution statistics over an explicit constructor (`mean`/`var` of
@@ -49,6 +50,11 @@ end
 # The Stan builtin and its operands, shared by ordinary calls, broadcasts and links.
 _sb_julia_stan_builtin(callable, args) = (nothing, args)
 _sb_julia_stan_builtin(::typeof(LogExpFunctions.logistic), args) = (:inv_logit, args)
+# Stan's `logit` shares the Julia name, but a lowered call can carry
+# LogExpFunctions' function itself (a model-scope expression, a component
+# member's body), which StanBlocks cannot type; the bare name is StanBlocks'
+# own builtin (snag `member-logit-cal-dda1b06a`).
+_sb_julia_stan_builtin(::typeof(LogExpFunctions.logit), args) = (:logit, args)
 _sb_julia_stan_builtin(::typeof(LogExpFunctions.log1pexp), args) = (:log1p_exp, args)
 # log(exp(x) - exp(0)) stays finite for large finite x and accurate near zero.
 _sb_julia_stan_builtin(::typeof(LogExpFunctions.logexpm1), args) =

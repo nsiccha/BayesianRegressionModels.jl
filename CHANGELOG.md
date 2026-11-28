@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.436
+
+- SBBRMI spells `logit(x)` (LogExpFunctions' function, which BRM exports) as
+  Stan's `logit` in a component member's body and in a model-scope
+  expression, as it spells `logistic` as `inv_logit`. Before, such a model
+  stopped in the StanBlocks transpile with "`tracetype` not defined for
+  logit(::real)", for example `p = logistic.(logit(share) .+ b .* x)`.
+
 ## 0.2.435
 
 - A record member's linked predictor can put its margin in the parent's

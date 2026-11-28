@@ -43,8 +43,8 @@ const LOWERED = union(SPELLED, lowered_links(SPELLED))
 
 @testset "every spelled function and lowered link is exported" begin
     # The reflection must see the seam; a renamed seam would read as empty.
-    for f in (LogExpFunctions.logistic, LogExpFunctions.log1pexp, LogExpFunctions.logexpm1,
-              StatsFuns.normcdf, StatsFuns.norminvcdf)
+    for f in (LogExpFunctions.logistic, LogExpFunctions.logit, LogExpFunctions.log1pexp,
+              LogExpFunctions.logexpm1, StatsFuns.normcdf, StatsFuns.norminvcdf)
         @test f in SPELLED
     end
     @test LogExpFunctions.logit in LOWERED

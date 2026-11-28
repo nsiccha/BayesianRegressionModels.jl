@@ -26,6 +26,11 @@ smooth scale floor used only by the coordinate map. Native differentiation
 uses Enzyme Reverse. No observed bird data or sampling run is required.
 Run `julia --startup-file=no --project=test test/wren_hsgp.jl`.
 
+`sb_logit_calls.jl` checks that SBBRMI spells a deterministic `logit(x)` as
+Stan's `logit` in a component member's body, at model scope and in a plate
+cell, and that `stanc` accepts each program. Run
+`julia --startup-file=no --project=test test/sb_logit_calls.jl`.
+
 `string_ranef.jl` checks plain String random slopes in the Stan backend:
 cell means and treatment contrasts, merged and uncorrelated blocks, shared
 coefficient addresses, and frozen replay. It compares generated programs and
