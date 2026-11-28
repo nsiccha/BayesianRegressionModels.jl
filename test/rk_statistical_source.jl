@@ -270,6 +270,28 @@ end
     @test length(spectral) == 1
 end
 
+# A formula's `hsgp` length scale keeps `LogNormal(0, 1)` on the support above
+# the basis's floor without renormalizing, as SBBRMI's `real<lower=floor>`
+# declaration does (brm-use hsgp-priors.md), and its emitted definition says
+# so. Its docstring used to say "truncated", the normalized law of BRM's
+# separate `rkppl_model(:hsgp_effect)` body (snag hsgp-truncated-v-1f3619d7).
+# The density itself, against an independently computed floor, is pinned by
+# test/rk_component_prior_inputs.jl ("HSGP caller sigma").
+@stestset "an HSGP length scale is restricted to its floor, not renormalized" begin
+    for i in (6, 7)
+        emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(last(CASES[i])()))
+        documented = [d for d in emitted.defs if BRM._brm_is_doc(d) &&
+            occursin("Hilbert-space Gaussian-process", d.args[3])]
+        @test length(documented) == (i == 6 ? 1 : 2)
+        for d in documented
+            @test occursin("not renormalized", d.args[3])
+            @test !occursin("truncated", d.args[3])
+            @test occursin("restricted(LogNormal(0.0, 1.0), rho_floor",
+                string(BRM._brm_undoc(d)))
+        end
+    end
+end
+
 @stestset "main block calls components like SBBRMI" begin
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(last(CASES[1])()))
     main = strip_lines(emitted.main)
