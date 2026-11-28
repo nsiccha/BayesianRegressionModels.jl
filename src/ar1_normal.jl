@@ -76,6 +76,15 @@ observation of `y`. Each entry's pointwise log likelihood is its conditional
 density given the series' earlier entries, and with `y` omitted the cell draws
 whole trajectories.
 
+A fitted SBBRMI forecasts by replay, `reprocess(fit, rows)`. Without a `y`
+column (or with one that holds no values) each series is a new trajectory
+from the stationary law. To continue each series from its last observed
+value, pass its history rows with `y` and the rows to forecast with
+`y = missing`: the first missing entry `k` steps after the last observed one is
+drawn from `Normal(mu + phi^k * (y_last - mu_last), sigma * sqrt((1 - phi^(2k))
+/ (1 - phi^2)))`, and the predictive output holds one value per passed row. A
+`missing` entry before a series' last observed one is refused.
+
 Order 1 only. For another innovation family, a higher order or a different
 start or gap rule, write the `@scan` yourself (see [`kernel`](@ref)).
 """

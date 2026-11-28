@@ -171,3 +171,150 @@ for (label, builder, varying, stepped) in (
         @test isequal(AR1_FUTURE, future_data)
     end
 end
+
+# A replay that continues each series: history rows with their response, then
+# the rows to forecast with `missing` (StanBlocks 0.2.70). Series `b` has two
+# history rows (only its last one conditions the forecast), `c` has none (it
+# starts from the stationary law), and every series has a gap between its
+# last observed row and its first forecast row.
+const AR1_HISTORY = (;
+    group=["b", "a", "b"], time=[6, 5, 3], x=[0.8, -0.6, 0.3], y=[0.92, -0.48, 0.41])
+ar1_continuation(history, future) = (;
+    group=[history.group; future.group], time=[history.time; future.time],
+    x=[history.x; future.x],
+    y=Union{Missing,Float64}[history.y; fill(missing, length(future.x))])
+const AR1_CONTINUE = ar1_continuation(AR1_HISTORY, AR1_FUTURE)
+
+# The standardized innovations of a continued series' `missing` entries. A
+# forecast entry `k` steps after the entry before it (observed or forecast) is
+# `Normal(mu + phi^k * (previous - mu_previous), sigma * sqrt((1 - phi^(2k)) /
+# (1 - phi^2)))`, with the later row's `sigma` and `phi`; a series' first entry
+# is stationary, `Normal(mu, sigma / sqrt(1 - phi^2))`.
+function ar1_forecast_innovations(series, observed, mu, sigma, phi, rows, times; stepped)
+    z = Float64[]
+    position = 0
+    for group in rows, (j, b) in enumerate(group)
+        position += 1
+        observed[position] && continue
+        if j == 1
+            push!(z, (series[position] - mu[b]) * sqrt(1 - phi[b]^2) / sigma[b])
+        else
+            a = group[j-1]
+            gap = stepped ? 1 : times[b] - times[a]
+            persistence = phi[b]^gap
+            scale = sigma[b] * sqrt((1 - persistence^2) / (1 - phi[b]^2))
+            push!(z, (series[position] - mu[b] -
+                persistence * (series[position-1] - mu[a])) / scale)
+        end
+    end
+    z
+end
+
+for (label, builder, varying, stepped) in (
+        ("shared", AR1_SHARED, false, false),
+        ("varying", AR1_VARYING, true, false),
+        ("stepped", AR1_STEPPED, false, true))
+    @stestset "AR1Normal continuation from history rows: $label" begin
+        fit = SBBRMI(builder(AR1_FIT); mod=@__MODULE__)
+        frame = deepcopy(AR1_CONTINUE)
+        forecast = reprocess(fit, AR1_CONTINUE)
+        @test isequal(frame, AR1_CONTINUE)
+        @test StanBlocks.stanc_check(BRM.stan_code(forecast); warn_pedantic=false).ok
+
+        # The fit's draws replay: the same coordinates, and only the history
+        # rows carry densities, as in a replay onto the history rows alone.
+        fit_problem = BRM.stan_instantiate(fit)
+        problem = BRM.stan_instantiate(forecast)
+        @test BridgeStan.param_unc_names(fit_problem.model) ==
+            BridgeStan.param_unc_names(problem.model)
+        n = LogDensityProblems.dimension(fit_problem)
+        q = collect(range(0.35, 0.75; length=n))
+        history = BRM.stan_instantiate(reprocess(fit, AR1_HISTORY))
+        @test BridgeStan.log_density(problem.model, q; propto=false) ≈
+            BridgeStan.log_density(history.model, q; propto=false) atol=1e-10
+
+        # One predictive value per passed row, in series order: the observed
+        # value on a history row, the forecast on a `missing` row.
+        descriptor = brm_descriptor(forecast)
+        @test :predict in [op.name for op in descriptor.operations]
+        predictive = brm_output(descriptor, :y; role=:posterior_predictive)
+        rows = groups(frame.group; order=frame.time)
+        ordered = reduce(vcat, rows)
+        @test predictive.segments == cumsum(length.(rows))
+        @test predictive.generative === :completed
+        @test predictive.name in brm_operation(descriptor, :predict).outputs
+        # The whole new trajectory of every row stays available as the
+        # response's replicate.
+        replicate = brm_output(descriptor, :y; role=:replicate)
+        @test replicate.generative === :draw
+        @test replicate.segments == predictive.segments
+        observed = .!ismissing.(frame.y[ordered])
+        draw = brm_execute(descriptor, :predict; problem, draws=q, seed=517)
+        values = getproperty(draw, predictive.name)
+        @test length(values) == length(frame.x)
+        @test values[observed] == frame.y[ordered][observed]
+        @test all(isfinite, values)
+
+        # The forecast law at fixed fitted coordinates: standardized by the
+        # continuation law, the forecast entries are independent N(0,1),
+        # including each series' first forecast row (conditional mean and
+        # spread), later rows, and series `c`'s stationary start. A forecast
+        # from the stationary law (0.2.421) fails this on the first rows.
+        constrained = ar1_columns(problem.model, q)
+        rowcount = length(frame.x)
+        mu = [constrained["mu.$i"] for i in 1:rowcount]
+        sigma = varying ? [constrained["sigma.$i"] for i in 1:rowcount] :
+            fill(constrained["sigma"], rowcount)
+        phi = varying ? [constrained["phi.$i"] for i in 1:rowcount] :
+            fill(constrained["phi"], rowcount)
+        names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+        indices = [only(findall(==(string(predictive.name, ".", i)), names)) for i in 1:rowcount]
+        rng = BridgeStan.StanRNG(problem.model, 732)
+        errors = Matrix{Float64}(undef, count(!, observed), 6000)
+        history_kept = true
+        for sample in axes(errors, 2)
+            draws = BridgeStan.param_constrain(problem.model, q;
+                include_tp=true, include_gq=true, rng)
+            history_kept &= draws[indices][observed] == frame.y[ordered][observed]
+            errors[:, sample] = ar1_forecast_innovations(draws[indices], observed,
+                mu, sigma, phi, rows, frame.time; stepped)
+        end
+        @test history_kept
+        @test maximum(abs, mean(errors; dims=2)) < 0.06
+        @test maximum(abs, var(errors; dims=2) .- 1) < 0.09
+        @test maximum(abs, [mean(errors[a, :] .* errors[b, :])
+            for a in axes(errors, 1) for b in 1:a-1]) < 0.07
+    end
+end
+
+@stestset "AR1Normal continuation: refusal and a column without values" begin
+    fit = SBBRMI(AR1_SHARED(AR1_FIT); mod=@__MODULE__)
+    # A `missing` entry before a series' last observed one would be a new
+    # parameter (the fit's draws would no longer replay), and its law an
+    # interpolation: refused, naming the series, the row and the reason.
+    gapped = (; group=["b", "b", "b", "b"], time=[3, 6, 8, 9], x=[0.3, 0.8, 0.6, -0.5],
+        y=Union{Missing,Float64}[0.41, missing, 0.5, missing])
+    failure = try
+        reprocess(fit, gapped)
+        nothing
+    catch err
+        err
+    end
+    @test failure isa ErrorException
+    message = sprint(showerror, failure)
+    @test occursin("series \"b\" of `y` is `missing` at row 2 (`time` = 6)", message)
+    @test occursin("observed later, at row 3 (`time` = 8)", message)
+    @test occursin("would be a parameter the fit does not have", message)
+
+    # A response column without values is the forecast without the column.
+    absent = reprocess(fit, AR1_FUTURE)
+    @test isempty(brm_outputs(brm_descriptor(fit); role=:replicate))
+    @test isempty(brm_outputs(brm_descriptor(absent); role=:replicate))
+    for y in (fill(missing, length(AR1_FUTURE.x)),
+              Vector{Union{Missing,Float64}}(missing, length(AR1_FUTURE.x)))
+        replay = reprocess(fit, merge(AR1_FUTURE, (; y)))
+        @test BRM.stan_code(replay) == BRM.stan_code(absent)
+        @test replay.held_out == absent.held_out
+        @test isequal(BRM.stan_data(replay), BRM.stan_data(absent))
+    end
+end

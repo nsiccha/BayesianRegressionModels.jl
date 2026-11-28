@@ -382,13 +382,13 @@ function _brm_powerscale_log_lik(d::BRMDescriptor, draws::AbstractMatrix, names)
     acc
 end
 
-# Default sensitivity variables: every draw column except the predictive and
-# pointwise twins (they are per-observation quantities, not parameters) and
+# Default sensitivity variables: every draw column except the predictive,
+# replicate and pointwise twins (per-observation quantities, not parameters) and
 # Stan sampler diagnostics (`lp__`, ...). Transformed parameters stay in —
 # priorsense likewise scores every variable except its log-density groups.
 function _brm_powerscale_default_variables(d::BRMDescriptor, names)
     twin_idx = Set{Int}()
-    for role in (:posterior_predictive, :pointwise_loglik)
+    for role in (:posterior_predictive, :replicate, :pointwise_loglik)
         for t in brm_outputs(d; role)
             logical = isnothing(t.logical) ? t.source : t.logical
             isnothing(logical) && continue

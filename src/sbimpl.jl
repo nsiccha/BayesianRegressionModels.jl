@@ -7736,19 +7736,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         end
         new_preproc[key] = e
     elseif e.kind === :kernel_ragged
-        arg_name, event_group, subject_group = e.raw_ref
-        subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_; freeze)
-        event_groups = _sb_df_column(df, event_group)
-        event_groups isa AbstractVector || error(
-            "sbimpl: reprocess: kernel event grouping column `$event_group` " *
-            "must be a vector, got $(typeof(event_groups))")
-        rows = _sb_kernel_ragged_partition(
-            arg_name, event_group,
-            collect(_sb_group_values(event_groups)), subjects;
-            observed=get(e.const_, :observed, false))
-        order = get(e.const_, :order, nothing)
-        isnothing(order) || _brm_kernel_order_rows!(rows, _sb_df_column(df, order),
-            order, event_group, length(event_groups); prefix="sbimpl: reprocess")
+        arg_name, event_group, _ = e.raw_ref
+        (; event_groups, rows) = _sb_reprocess_kernel_rows(df, e, freeze)
         if e.const_.is_lp
             new_data[key] = rows
         else
@@ -8287,6 +8276,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         groups = _sb_member_resample_groups(groups, group_sources, sb.preproc)
     end
     new_df = _sb_replay_data(sb, new_df, freeze_constants)
+    new_df, partial_series = _sb_series_replay_data(sb, new_df, freeze_constants)
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
     isempty(covariates) || union!(groups,_sb_covariate_resample_groups(sb.preproc))
@@ -8418,9 +8408,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         k in handled && continue
         k in interaction_keys && continue
         has_column = _sb_df_has_column(new_df, k)
-        # The raw column of a gathered response predicted given the fit: the
-        # program reads only the gathered key step 1 marked.
+        # The raw column of a gathered response predicted given the fit, or
+        # of a series that continues from its observed entries: the program
+        # reads only the gathered key step 1 marked or gathered.
         k in forecast_columns && !has_column && continue
+        k in partial_series && continue
         if isnothing(v) || (!has_column && !(v isa Number) && is_absent_response(k))
             # A forecast replay's response (`nothing`: its values-free mark), or
             # a response the new data lacks: replay the frame's own values, or
@@ -8957,6 +8949,93 @@ function _sb_reprocess_kernel_cells(df, column, options; freeze=false)
         return copy(fitted)
     end
     labels
+end
+
+# A `:kernel_ragged` record's cells on a replayed frame: each cell's label
+# (`subjects`), the event grouping column, each cell's rows of `df` (in the
+# record's `order=` column when it has one) and that column's name.
+function _sb_reprocess_kernel_rows(df, e::PreprocEntry, freeze::Bool)
+    arg_name, event_group, subject_group = e.raw_ref
+    subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_; freeze)
+    event_groups = _sb_df_column(df, event_group)
+    event_groups isa AbstractVector || error(
+        "sbimpl: reprocess: kernel event grouping column `$event_group` " *
+        "must be a vector, got $(typeof(event_groups))")
+    rows = _sb_kernel_ragged_partition(
+        arg_name, event_group,
+        collect(_sb_group_values(event_groups)), subjects;
+        observed=get(e.const_, :observed, false))
+    order = get(e.const_, :order, nothing)
+    isnothing(order) || _brm_kernel_order_rows!(rows, _sb_df_column(df, order),
+        order, event_group, length(event_groups); prefix="sbimpl: reprocess")
+    (; subjects, event_groups, rows, order)
+end
+
+# The data sources of the series an observed scan reads in a plate cell: an
+# `AR1Normal` response, or the series of a cell's own `@scan`.
+function _sb_scan_series_sources(sb::SBBRMI)
+    plan = _generative_plan(sb, nothing, Set{Symbol}())
+    Set{Symbol}(d.data_source for d in plan.declarations
+        if d.role === :observation && d.family in (:AR1Normal, :scan) &&
+           !isnothing(d.data_source))
+end
+
+# A replay's series an observed scan reads may hold `missing` responses
+# (StanBlocks 0.2.70): the observed entries keep their densities, and each
+# `missing` entry after a series' last observed one is drawn from its step,
+# continuing from the last observed value. A column with no values at all is
+# replayed as absent, so its series start from the law of a new run, as
+# without the column. A `missing` entry before a series' last observed entry is
+# refused (`_sb_check_series_gaps`). Returns the replay data and the raw columns
+# that hold some `missing` entries: the program reads them only through their
+# gathered series, so `reprocess` leaves the raw column out of its data.
+function _sb_series_replay_data(sb::SBBRMI, df, freeze::Bool)
+    series = nothing
+    valueless = Symbol[]
+    partial = Set{Symbol}()
+    for (key, e) in sb.preproc
+        e.kind === :kernel_ragged && !e.const_.is_lp || continue
+        column = first(e.raw_ref)
+        _sb_df_has_column(df, column) || continue
+        values = _sb_df_column(df, column)
+        values isa AbstractVector && any(ismissing, values) || continue
+        isnothing(series) && (series = _sb_scan_series_sources(sb))
+        key in series || continue
+        if all(ismissing, values)
+            push!(valueless, column)
+        else
+            _sb_check_series_gaps(df, e, values, freeze)
+            push!(partial, column)
+        end
+    end
+    isempty(valueless) && return df, partial
+    _BRMReplayData(df, Dict{Symbol,Any}(column => _BRMReplayFailure(
+        "sbimpl: reprocess: replay column `$column` holds no values, so its series " *
+        "are forecast as without the column") for column in valueless)), partial
+end
+
+# A `missing` entry before a series' last observed entry would be a parameter
+# of the replay that the fit does not have, so the fit's draws could not be
+# replayed; given the later observation, its law is also an interpolation, not
+# a forecast. A step that was not recorded is left out of the rows instead.
+function _sb_check_series_gaps(df, e::PreprocEntry, values, freeze::Bool)
+    (; subjects, rows, order) = _sb_reprocess_kernel_rows(df, e, freeze)
+    times = isnothing(order) ? nothing : _sb_df_column(df, order)
+    place(row) = isnothing(times) ? "row $row" :
+        "row $row (`$order` = $(repr(times[row])))"
+    for (label, cell) in zip(subjects, rows)
+        last_observed = findlast(row -> !ismissing(values[row]), cell)
+        isnothing(last_observed) && continue
+        gap = findfirst(row -> ismissing(values[row]), view(cell, 1:last_observed))
+        isnothing(gap) && continue
+        error("sbimpl: reprocess: series $(repr(label)) of `$(first(e.raw_ref))` is ",
+            "`missing` at ", place(cell[gap]), " but observed later, at ",
+            place(cell[last_observed]), ". A replay forecasts the `missing` entries ",
+            "after a series' last observed entry, continuing from it. An earlier ",
+            "`missing` entry would be a parameter the fit does not have, and given the ",
+            "later observation its law is an interpolation, not a forecast. Leave a ",
+            "step that was not recorded out of the rows.")
+    end
 end
 
 function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;

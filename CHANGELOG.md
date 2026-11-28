@@ -12,6 +12,33 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.427
+
+- A fitted SBBRMI forecast of a grouped `AR1Normal` response can continue each
+  series from its last observed value. Pass the history rows with their
+  response and the rows to forecast with `missing` in one frame:
+  `reprocess(fit, vcat(history, future))`. Observed entries keep their
+  densities, so the replay keeps the fit's coordinates and the fit's draws feed
+  `:predict`. The first `missing` entry `k` steps after a series' last observed
+  one is drawn from `Normal(mu + phi^k * (y_last - mu_last), sigma * sqrt((1 -
+  phi^(2k)) / (1 - phi^2)))`, and later ones continue the recurrence. The
+  response's predictive output then holds one value per passed row: the
+  observed value on a history row, the draw on a `missing` row. A series with
+  no observed row starts from the stationary law, as before.
+- Descriptor: for a response that holds observed and `missing` entries,
+  `brm_output(d, :y; role=:posterior_predictive)` is its completed series
+  (StanBlocks `generative == :completed`), and the new role `:replicate` names
+  its `<y>_gen` twin, a whole new draw of every entry. Other programs have no
+  `:replicate` output and are unchanged.
+- A frame without the response column, or with a response column that holds
+  no values, forecasts as in 0.2.421: each series starts from the stationary
+  law. A complete response column replays as before.
+- A `missing` response before a series' last observed row is refused, naming
+  the series, the row and the reason: it would be a parameter the fit does not
+  have. Leave an unrecorded step out of the rows.
+- Requires StanBlocks 0.2.70, which forecasts the missing tail of a series an
+  observed `@scan` reads.
+
 ## 0.2.426
 
 - `hsgp(...; at=position)` evaluates its basis and centring projection on a
