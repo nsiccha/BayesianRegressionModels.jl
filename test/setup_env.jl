@@ -483,7 +483,10 @@ const PINS = [
     # RKPPL 0.1.271 binds the cell rank of an omitted ragged response.
     # RKPPL 0.1.272 observes repeated-submodel arguments after a nested
     # deterministic plate (keyed readers of the parent's subject computation).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a710126311c29fbdd0b07339e2fc6ca24dcd10db"),
+    # RK 0.1.410 / RKPPL 0.1.273 runs a scan step's work that reads only shared
+    # values once per scan, so an `AR1Normal` cell's value allocates linearly
+    # in its rows (test/ar1_normal_cost.jl; RK snag scan-step-re-eva-8952ed66).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cd02a022e51a570b8d7e44839efa2b4084390fca"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
