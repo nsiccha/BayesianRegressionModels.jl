@@ -73,7 +73,11 @@ function check_spellings(linked, identity_spelled, name)
     end
     rk, problem = consumer_problem(m)
     ref_rk, ref_problem = consumer_problem(twin)
-    @test coordinate_names(rk.model.layout) == coordinate_names(ref_rk.model.layout)
+    # RK names an intercept-only member's scalar coefficient after the name the
+    # predictor binds, `share` rather than the twin's `logit_share`. The
+    # coordinates are otherwise named and ordered alike.
+    bound(n) = replace(string(n), r"\.share_Intercept\." => ".logit_share_Intercept.")
+    @test bound.(coordinate_names(rk.model.layout)) == string.(coordinate_names(ref_rk.model.layout))
     for x in points(rk.model.layout.total)
         value, grad = LogDensityProblems.logdensity_and_gradient(problem, x)
         expected, ref_grad = LogDensityProblems.logdensity_and_gradient(ref_problem, x)
