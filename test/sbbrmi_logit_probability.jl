@@ -20,6 +20,7 @@
 using Test
 using BayesianRegressionModels
 using Distributions
+using BridgeStan
 using LogDensityProblems
 using SpecialFunctions: loggamma
 using StanBlocks
@@ -209,6 +210,9 @@ end
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 
     # An omitted cell binomial is only drawn, now through `binomial_logit_rng`.
+    # With `y` omitted the program is the prior one: `eta` is drawn in generated
+    # quantities too, so nothing is sampled, and at the prior's wide `eta` each
+    # draw is all failures or all successes.
     omitted_cell = @brm begin
         eta ~ Normal(0, 1000)
         @plate for i in eachindex(n)
@@ -219,8 +223,19 @@ end
     code = stan_code(sb)
     @test occursin("binomial_logit_rng(", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-    draws = StanBlocks.stan_instantiate(sb.model)
-    @test LogDensityProblems.dimension(draws) == 1
+    problem = StanBlocks.stan_instantiate(sb.model)
+    @test LogDensityProblems.dimension(problem) == 0
+    names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+    rng = BridgeStan.StanRNG(problem.model, 3)
+    draws = reduce(hcat, (BridgeStan.param_constrain(problem.model, Float64[];
+        include_tp=true, include_gq=true, rng) for _ in 1:200))
+    eta = draws[findfirst(==("eta"), names), :]
+    for (i, trials) in enumerate(DATA.n)
+        y = draws[findfirst(==("y_cell_y.$i"), names), :]
+        @test all(v -> isinteger(v) && 0 <= v <= trials, y)
+        @test all(y[eta .> 40] .== trials)
+        @test all(y[eta .< -40] .== 0)
+    end
 end
 
 @testset "probability-scale forms stay where the logit forms do not apply" begin
