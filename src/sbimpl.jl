@@ -3194,8 +3194,11 @@ end
 # r = A(C' \ z) transforms the packed curvature to standardized differences.
 # This whitens the prior plus unit curvature in physical field values. The
 # actual prior scores r and includes log|A| - log|C| for the change of measure.
+# `brm_rw2_factors`, `brm_rw2_transform` and `brm_rw2_basis_path` already
+# exist as Julia functions (rw2_walk.jl, which the RK backend calls), so the
+# definitions below add only their Stan form.
 StanBlocks.@deffun begin
-    @juliacompat brm_rw2_factors(sigma::real, m::int)::matrix[m, 6] = begin
+    brm_rw2_factors(sigma::real, m::int)::matrix[m, 6] = begin
         # Columns 1:3 and 4:6 store the diagonal and first two subdiagonals
         # of each lower triangular factor, indexed by row. A is known exactly.
         bands = rep_matrix(0., m, 6)
@@ -3248,7 +3251,7 @@ StanBlocks.@deffun begin
         end
         bands
     end
-    @juliacompat brm_rw2_transform(sigma::real, basis::vector[n])::vector[n + 1] = begin
+    brm_rw2_transform(sigma::real, basis::vector[n])::vector[n + 1] = begin
         m = n - 2
         bands = brm_rw2_factors(sigma, m)
         work = rep_vector(0., m)
@@ -3292,7 +3295,7 @@ StanBlocks.@deffun begin
         reject("brm_rw2_basis_rng: an intrinsic second-order walk has a flat linear trend and no prior draw")
         rep_vector(0., n)
     end
-    @juliacompat brm_rw2_basis_path(sigma::real, basis::vector[n])::vector[n] = begin
+    brm_rw2_basis_path(sigma::real, basis::vector[n])::vector[n] = begin
         x = rep_vector(0., n)
         increment = 0.
         for t in 3:n

@@ -1526,7 +1526,7 @@ _brm_nlme_gaussian_plan(plan::_RKValuePlan) =
     !isempty(plan.observations) && all(_brm_nlme_gaussian_observation, plan.observations)
 _brm_nlme_gaussian_plan(plan) = false
 _brm_nlme_gaussian_observation(o) =
-    o.distribution.callable in (Normal, StanBlocks.normal) &&
+    (o.distribution.callable == Normal || _brm_stan_family(o.distribution.callable) === :normal) &&
         o.modifier === nothing && o.weight === nothing && o.missing_response === nothing
 # A `@scan` observes its series jointly (`AR1Normal`'s AR(1) residuals), not
 # as independent Normal entries.

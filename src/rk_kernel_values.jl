@@ -121,13 +121,15 @@ function _rk_kernel_binding(scope, head)
     name = value isa Function ? nameof(value) : head
     if name isa Symbol && (name in (:ode_adams, :ode_adams_tol, :ode_ckrk, :ode_ckrk_tol) ||
             startswith(string(name), "pmx_solve_"))
-        if value === nothing || (isdefined(StanBlocks.stan, name) &&
-                value === getfield(StanBlocks.stan, name))
+        token = _brm_stan_token(name)
+        if value === nothing || (token !== nothing && value === token)
             throw(ArgumentError("RKBRMI: `$name` is a Stan-only solver. Use SBBRMI for this cell."))
         end
     end
-    head isa Symbol && !isdefined(scope, head) && isdefined(StanBlocks.stan, head) &&
-        return getfield(StanBlocks.stan, head)
+    if head isa Symbol && !isdefined(scope, head)
+        token = _brm_stan_token(head)
+        token === nothing || return token
+    end
     value === nothing && error("RK backend: `$head` names nothing in module `$scope`")
     value
 end
@@ -147,14 +149,16 @@ end
 
 # In-cell distribution combinators take a family token as their first
 # positional (`weighted(normal, w, mu, sigma)`), never a data argument.
-_rk_kernel_weighted(callable) = callable === weighted || callable === StanBlocks.stan.weighted
+_rk_kernel_weighted(callable) = callable === weighted || _brm_stan_family(callable) === :weighted
 _rk_kernel_bounded(callable) = _rk_kernel_bounded_kind(callable) !== nothing
-_rk_kernel_bounded_kind(callable) =
-    callable in (censored, StanBlocks.stan.censored) ? :censored :
-    callable in (truncated, StanBlocks.stan.truncated) ? :truncated :
-    callable in (interval_censored, StanBlocks.stan.interval_censored) ? :interval_censored :
+function _rk_kernel_bounded_kind(callable)
+    stan = _brm_stan_family(callable)
+    callable == censored || stan === :censored ? :censored :
+    callable == truncated || stan === :truncated ? :truncated :
+    callable == interval_censored || stan === :interval_censored ? :interval_censored :
     callable === coarsened ? :coarsened :
     nothing
+end
 
 function _rk_kernel_observation_family(scope, expression, kernel)
     callable = _rk_kernel_observation_callee(scope, expression, kernel)
@@ -166,7 +170,7 @@ function _rk_kernel_observation_family(scope, expression, kernel)
         "supports `censored`, `truncated` or `interval_censored` of a `Normal(...)` " *
         "family with `lower=`/`upper=` bounds only; use `_rk_observation_source!` " *
         "for other bounded laws")
-    callable === StanBlocks.normal && return Normal
+    _brm_stan_family(callable) === :normal && return Normal
     callable
 end
 
@@ -299,7 +303,7 @@ function _rk_kernel_observation_distribution(observation, names=observation.argu
     # StudentT(nu, location, scale) spelling, retaining its argument order.
     # Julia's `LocationScale(location, scale, TDist(nu))` keeps its own order
     # (`_rk_kernel_student_t_values`) and reaches the same law.
-    student_t = observation.callable === StanBlocks.student_t
+    student_t = _brm_stan_family(observation.callable) === :student_t
     if student_t || observation.callable === LocationScale
         length(arguments) == 3 || error("RK backend: student_t needs nu, location and scale")
         nu, location, scale = student_t ? arguments :
@@ -664,10 +668,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             if _rk_kernel_weighted(_rk_kernel_observation_callee(scope, distribution, name))
                 # A weight may call a cell-local helper that `scope` does not bind.
                 binding(head) = head isa Symbol && !isdefined(scope, head) &&
-                    !isdefined(StanBlocks.stan, head) ? nothing : _rk_kernel_binding(scope, head)
+                    _brm_stan_token(head) === nothing ? nothing : _rk_kernel_binding(scope, head)
                 distribution = _brm_cell_typed_weight(binding,
                     distribution, "RK backend: kernel `$name`";
-                    normal=c -> c === Normal || c === StanBlocks.normal)
+                    normal=c -> c === Normal || _brm_stan_family(c) === :normal)
             end
             distribution, weight = _rk_kernel_observation_weight(scope, distribution, name)
             distribution, modifier = _rk_kernel_observation_law(scope, distribution, name)
@@ -971,7 +975,7 @@ function _rk_kernel_latent_family(scope, law, kernel, lhs)
         return _BRMLowerLaw{F,bounded.normalized}
     end
     callable = _rk_kernel_observation_callee(scope, law, kernel)
-    callable === StanBlocks.normal && (callable = Normal)
+    _brm_stan_family(callable) === :normal && (callable = Normal)
     # A simplex per cell (`theta ~ Dirichlet(K, a)`, cell_total_coordinates.jl).
     if spec !== nothing && spec.bijection === :simplex
         _brm_check_cell_bijection_family(:simplex, callable, lhs)
@@ -1525,7 +1529,7 @@ function _rk_kernel_bind_calls(value, scope, bindings, taken; index=false, defs=
             operands = value.args[2:end]
             if _brm_ode_stan_times(operands)
                 # Preserve the fitted RK program's callable for legacy cells.
-                legacy = GlobalRef(StanBlocks.stan.builtin, nameof(solver))
+                legacy = _brm_stan_builtin_ref(nameof(solver))
                 value = Expr(:call, legacy, operands...)
             else
                 value = Expr(:call, head, _brm_ode_operands(solver, operands)...)

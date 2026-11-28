@@ -80,12 +80,13 @@ end
 # Ordinary custom components already register their observation shape and
 # support in StanBlocks. Query typed arguments without evaluating live model
 # values, so bounds remain symbolic and no duplicate BRM shape trait is needed.
+# StanBlocks answers through `_brm_stan_family_support` (stan_vocabulary.jl).
 function _brm_mixture_family_support(component::ExprColumn)
     typed_args = map(enumerate(getargs(component))) do (j, arg)
         arg isa Real && !(arg isa Bool) ? Float64(arg) :
             Expr(:(::), Symbol(:arg, j), :real)
     end
-    StanBlocks.family_support(getf(component), typed_args...)
+    _brm_stan_family_support(getf(component), typed_args...)
 end
 
 function _brm_mixture_component_shape(component::ExprColumn)
