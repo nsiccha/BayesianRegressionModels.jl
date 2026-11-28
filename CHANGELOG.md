@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.427
+
+- A keyed collection whose members return one value for some records and a
+  vector for others (`if entry.re ... (1 | parentblock(:p) | entry.subject)`
+  beside a scalar `Normal` branch) now prepares on RKBRMI under
+  `type_stability = :error`. Joining the members' fields widened to
+  `Vector{Any}` before; each one-value member now becomes a length-one vector,
+  as SBBRMI already stores it, so the gathered field has one concrete element
+  type. **Breaking (RKBRMI, mixed collections only):** reading such a gathered
+  field directly (`rk_draw_values(rk, U, (:values,))`) gives that member a
+  one-element vector instead of a number. Read it with
+  `brm_subject_value(values[j], i)`, which takes either shape, or `only`.
+  Collections whose members all return one shape, and per-member reads with
+  `submodel=(collection, key)`, are unchanged.
+
 ## 0.2.426
 
 - `hsgp(...; at=position)` evaluates its basis and centring projection on a
