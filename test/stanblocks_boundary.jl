@@ -99,7 +99,7 @@ fallback(f, args...) = invoke(f, Tuple{ntuple(_ -> Any, length(args))...}, args.
     @test BRM._brm_stan_value_family_label(Normal) === nothing
 
     message(f, args...) = try fallback(f, args...); "" catch err sprint(showerror, err) end
-    @test occursin("needs StanBlocks", message(BRM._brm_stan_family_support, sum, 1.0))
+    @test occursin("declared by StanBlocks", message(BRM._brm_stan_family_support, sum, 1.0))
     @test occursin("no bound observation", message(BRM._brm_stan_unconditioned_generative, nothing))
     @test occursin("omitted response", message(BRM._brm_stan_unbound_observations, nothing))
     @test occursin("sampled parameters", message(BRM._brm_stan_sampled_parameters, nothing))
