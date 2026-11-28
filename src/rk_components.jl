@@ -733,6 +733,11 @@ end
 # data arguments with their main-block values: the axes of a
 # squared-exponential term, or a periodic term's prepared basis and
 # frequencies. The validity floor is passed in where a prior reads it.
+# `truncated=true` bounds each length scale below by its floor with
+# `restricted`: the prior's density on that support, not renormalized, as
+# SBBRMI's `real<lower=floor>` declaration (brm-use hsgp-priors.md). An
+# explicit prior naming `length_scale_floor` arrives with the floor inside its
+# own law and `truncated=false`, so a `truncated(...)` there keeps its normalizer.
 function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
         floors, rho_priors, sigma_prior, value, extent; scales, truncated=true,
         base="brm_hsgp_effect")
@@ -769,7 +774,9 @@ function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
     periodic = occursin("periodic", base)
     lengths = length(rho_priors) == 1 ? "the length scale `rho_iso`" :
         "one length scale per axis, `rho = [$(join(("rho_$j" for j in eachindex(rho_priors)), ", "))]`"
-    floor = truncated ? ", each truncated below at the floor `rho_floor` the basis resolves" : ""
+    floor = !truncated ? "" : length(rho_priors) == 1 ?
+        ", bounded below by the floor `rho_floor` the basis resolves (its prior's density on that support, not renormalized)" :
+        ", each bounded below by its axis's floor in `rho_floor` the basis resolves (each prior's density on that support, not renormalized)"
     doc = @_rk_definition_doc """
         A $(periodic ? "periodic " : "")Hilbert-space Gaussian-process (HSGP) effect.
 
