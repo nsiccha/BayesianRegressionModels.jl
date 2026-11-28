@@ -536,9 +536,29 @@ mutable struct _RKOnce
 end
 _RKOnce() = _RKOnce(ReentrantLock(), nothing)
 _RKOnce(value) = _RKOnce(ReentrantLock(), value)
-_rk_once!(compute, once::_RKOnce) = lock(once.lock) do
-    once.value === nothing && (once.value = compute())
-    once.value
+# `compute` is usually a closure over a backend, whose type spells the model's
+# columns, so neither form specializes on it: the value is `Any` either way.
+# `_rk_once!(f, x, once)` computes `f(x)`, so a named non-specializing `f`
+# compiles once for every model where a closure over `x` would compile per
+# model (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer function _rk_once!(@nospecialize(compute), once::_RKOnce)
+    lock(once.lock)
+    try
+        once.value === nothing && (once.value = compute())
+        return once.value
+    finally
+        unlock(once.lock)
+    end
+end
+Base.@nospecializeinfer function _rk_once!(@nospecialize(compute), @nospecialize(arg),
+        once::_RKOnce)
+    lock(once.lock)
+    try
+        once.value === nothing && (once.value = compute(arg))
+        return once.value
+    finally
+        unlock(once.lock)
+    end
 end
 
 # What this process prepared from a backend's program and binding, for the next
@@ -712,8 +732,10 @@ function Base.deepcopy_internal(rk::RKBRMI, stackdict::IdDict)
     stackdict[rk] = invoke(Base.deepcopy_internal, Tuple{Any,IdDict}, rk, stackdict)
 end
 
-Base.parent(x::RKBRMI) = x.parent
-brm_source(x::RKBRMI) = x.source
+# Plain `@nospecialize`: one compiled body for every model, while typed
+# callers still infer the field's type.
+Base.parent(@nospecialize(x::RKBRMI)) = x.parent
+brm_source(@nospecialize(x::RKBRMI)) = x.source
 structure_of(x::RKBRMI) = structure_of(parent(x))
 priors_of(x::RKBRMI) = priors_of(parent(x))
 

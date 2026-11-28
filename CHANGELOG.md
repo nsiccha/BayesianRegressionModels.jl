@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.428
+
+- A fitted `RKBRMI`'s per-design entry points compile once per process for
+  every model instead of once per model: `rk_bound_data`, `rk_bound_plan`, a
+  data-free open `RKBRMI(brmi, state)`, `rk_design_binder` with its first and
+  later designs, `reprocess` and `brm_fitted_state`. A process that opens fits
+  of models it has not compiled, as a simulator does, pays only for each
+  model's own program. Their methods no longer specialize on the backend,
+  whose type spells the model's columns, and no closure on that path captures
+  the model or the design. Results, printed models and declaration text are
+  unchanged. `RKDesignBinder` is no longer parametric: code that names
+  `RKDesignBinder{B}` names `RKDesignBinder`.
+
 ## 0.2.427
 
 - A fitted SBBRMI forecast of a grouped `AR1Normal` response can continue each

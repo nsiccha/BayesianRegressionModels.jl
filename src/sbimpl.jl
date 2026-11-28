@@ -13646,7 +13646,7 @@ _sb_bucket_joins_columns(bucket) = length(_sb_bucket_group_columns(bucket)) > 1
 # New labels of one column draw their margins given the other columns' fitted
 # ones; SBBRMI builds that (`_sb_emit_joint_id_bucket!`), RKBRMI does not yet,
 # so it refuses rather than draws wrongly.
-function _brm_refuse_joint_resample(brmi::BRMI, groups; prefix)
+Base.@nospecializeinfer function _brm_refuse_joint_resample(@nospecialize(brmi::BRMI), groups; prefix)
     isempty(groups) && return nothing
     for (key, bucket) in _sb_collect_id_buckets(brmi)
         _sb_bucket_joins_columns(bucket) || continue
@@ -13674,7 +13674,7 @@ end
 
 _sb_collect_id_buckets(context::_BRMBackendContext) =
     _sb_collect_id_buckets(context.group_declarations)
-_sb_collect_id_buckets(brmi::BRMI) =
+Base.@nospecializeinfer _sb_collect_id_buckets(@nospecialize(brmi::BRMI)) =
     _sb_collect_id_buckets(_brm_group_declarations(brmi))
 
 # Expand one collected `|ID|` bucket with the exact ranef-column emitter used

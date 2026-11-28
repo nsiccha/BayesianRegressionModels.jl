@@ -4113,12 +4113,14 @@ end
 # fragment binds for names it only reads are not statements and do not print,
 # so `string(structure_of(m))` and `string(priors_of(m))` are the model's two
 # source cards.
-Base.show(io::IO, brmi::BRMI) = begin
-    operations = brmi.operations
+# It reads the operations through `_brm_operation_entries`, so it compiles
+# once for every model (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer function Base.show(io::IO, @nospecialize(brmi::BRMI))
     documentation = get(io, :brm_documentation, true) ?
         _brm_documentation_owners(brmi.documentation) : Dict{Symbol,Vector{BRMDocumentation}}()
     started = false
-    for (key, value::NamedColumn) in pairs(operations)
+    for (key, value) in _brm_operation_entries(brmi)
+        value = value::NamedColumn
         _brm_is_statement(parent(value)) || continue
         started && print(io, "\n")
         started = true

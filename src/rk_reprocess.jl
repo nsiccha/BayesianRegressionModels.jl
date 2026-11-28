@@ -89,9 +89,10 @@ reads through an assignment. A scalar only a `@plate` cell's values or
 observations read (a dose, a known observation scale) is a design input, and
 takes the design's value.
 """
-function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
-        resample_groups=(), resample_covariates=(), keep_observed::Bool=false,
-        held_out=_rk_held_out_names(rk.plan))
+Base.@nospecializeinfer function reprocess(@nospecialize(rk::RKBRMI), @nospecialize(new_data);
+        freeze_constants::Bool=true, @nospecialize(resample_groups=()),
+        @nospecialize(resample_covariates=()), keep_observed::Bool=false,
+        @nospecialize(held_out=_rk_held_out_names(rk.plan)))
     prefix = "RK reprocess"
     covariates = _rk_forecast_covariates(rk.plan, resample_covariates, keep_observed; prefix)
     isempty(covariates) || freeze_constants || throw(ArgumentError("$prefix: " *
@@ -119,8 +120,12 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariates, car_units, prefix)
 end
 
-function _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariates,
-        car_units, prefix, prior_responses=nothing)
+# Once per design. Neither this nor the helpers below specialize on the fit or
+# its model, whose types spell the model's columns, so a process compiles them
+# once for every model (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer function _rk_frozen_reprocess(@nospecialize(rk::RKBRMI), @nospecialize(new_data);
+        @nospecialize(held_out), @nospecialize(resample_groups), @nospecialize(covariates),
+        @nospecialize(car_units), prefix, @nospecialize(prior_responses=nothing))
     _rk_refuse_level_correlated_resample(parent(rk),
         _rk_resample_group_set(resample_groups; prefix); prefix)
     _rk_refuse_grouped_hsgp_resample(parent(rk),
@@ -128,17 +133,21 @@ function _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariate
     _brm_refuse_joint_resample(parent(rk),
         _rk_resample_group_set(resample_groups; prefix); prefix)
     # A data-free backend (`RKBRMI(brmi, state)`) replays from its fitted state.
-    rk.fitted === nothing || return _rk_fitted_replay(brm_source(rk), new_data,
-        _rk_fitted_state(rk); resample_groups, held_out, previous=rk, prefix)
+    rk.fitted === nothing || return _rk_fitted_replay_of(brm_source(rk), new_data,
+        _rk_fitted_state(rk), resample_groups, held_out, rk, prefix, :fixed)
     groups = _rk_resample_group_set(resample_groups; prefix)
     training = _rk_frozen_training(parent(rk))
     unknown = setdiff(groups, keys(training))
     isempty(unknown) || error(
         "$prefix: `resample_groups` names $(sort!(collect(unknown))), which " *
         "is not a data column of the fitted model")
-    absent = Dict{Symbol,Any}(name => _BRMAbsentResponse{eltype(training[name])}(name)
-        for name in _rk_response_names(rk.plan)
-        if haskey(training, name) && !_brm_df_has_column(new_data, name))
+    # Loops, not comprehensions: a closure over `new_data` compiles once per
+    # model's columns.
+    absent = Dict{Symbol,Any}()
+    for name in _rk_response_names(rk.plan)
+        haskey(training, name) && !_brm_df_has_column(new_data, name) &&
+            (absent[name] = _BRMAbsentResponse{eltype(training[name])}(name))
+    end
     merge!(absent, _rk_car_fitted_edges(parent(rk), new_data, training))
     merge!(absent, _rk_omitted_scalars(_rk_replay_scalars(rk), new_data))
     data = _BRMReplayData(new_data, absent)
@@ -152,11 +161,8 @@ function _rk_frozen_reprocess(rk, new_data; held_out, resample_groups, covariate
         rebound = _brm_rebind_brmi(parent(rk), data)
         _, fitted = _brm_resolve_constants(parent(rk); prefix)
         constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
-        _brm_with_frozen_replay(_BRMFrozenReplay(training, groups)) do
-            _rk_plan_car_units(_rk_plan_completions(_brm_rk_plan(rebound; held_out, prior_responses,
-                fitted_constants=(name, _source) -> get(constants, name, nothing)),
-                _rk_completion_mode(rk.plan)), car_units)
-        end
+        _brm_with_frozen_replay(_RKFrozenPlanning(rebound, held_out, prior_responses,
+            constants, (_rk_completion_mode(rk.plan), car_units)), _BRMFrozenReplay(training, groups))
     end
     retained = _rk_retained_program(rk)
     # This emission's coordinate inventory is the replay's, so preparing the
@@ -482,7 +488,8 @@ _rk_replay_buckets(_plan) = ()
 # Finite level-correlation factors cover the fitted level set; new levels
 # would need a larger one. Coordinate multigroup fields instead share fixed
 # spatial weights and evaluate the field at the new levels' locations.
-function _rk_refuse_level_correlated_resample(brmi, groups::Set{Symbol}; prefix)
+Base.@nospecializeinfer function _rk_refuse_level_correlated_resample(@nospecialize(brmi),
+        groups::Set{Symbol}; prefix)
     isempty(groups) && return nothing
     correlated = Symbol[_brm_grouping_column(d) for d in _brm_group_declarations(brmi)
                         if !isnothing(_brm_declaration_level_cor(d))]
@@ -512,7 +519,8 @@ end
 # its own coordinates, and a design binder takes them in HAVE. An
 # `orthogonal_to=` projection is fitted on each level's training rows, which a
 # new level does not have, so resampling its grouping is refused, as on SBBRMI.
-function _rk_refuse_grouped_hsgp_resample(brmi, groups::Set{Symbol}; prefix)
+Base.@nospecializeinfer function _rk_refuse_grouped_hsgp_resample(@nospecialize(brmi),
+        groups::Set{Symbol}; prefix)
     isempty(groups) && return nothing
     projected = Symbol[]
     for predictor in linear_predictors(brmi)
@@ -560,11 +568,36 @@ struct _BRMReplayFailure
     message::String
 end
 
+# Planning a replay's rebound model under its frozen replay
+# (`_brm_with_frozen_replay`): a value, not a closure over the model, whose type
+# spells its columns, so it compiles once for every model. `extend`, when given,
+# is the fit's `(completions, car_units)` to plan with.
+struct _RKFrozenPlanning
+    brmi::Any
+    held_out::Any
+    prior_responses::Any
+    constants::Dict{Symbol,Any}
+    extend::Any
+end
+_RKFrozenPlanning(brmi, held_out, prior_responses, constants) =
+    _RKFrozenPlanning(brmi, held_out, prior_responses, constants, nothing)
+function (p::_RKFrozenPlanning)()
+    constants = p.constants
+    plan = _brm_rk_plan(p.brmi; held_out=p.held_out, prior_responses=p.prior_responses,
+        fitted_constants=(name, _source) -> get(constants, name, nothing))
+    p.extend === nothing && return plan
+    completions, car_units = p.extend
+    _rk_plan_car_units(_rk_plan_completions(plan, completions), car_units)
+end
+
 # Replay data with some values supplied by the backend: an omitted response
 # standing in as a `_BRMAbsentResponse`, a resolved constant, or a data-only
 # assignment evaluated on the replay rows (`_BRMReplayFailure` when it cannot be).
-struct _BRMReplayData{D}
-    data::D
+# Planning-time only. Its `data` is untyped: the design's type spells the
+# model's columns, and every rebind and closure over this view would compile
+# once per model (snag `brm-methods-spec-39436695`).
+struct _BRMReplayData
+    data::Any
     values::Dict{Symbol,Any}
 end
 function Base.hasproperty(d::_BRMReplayData, key::Symbol)
@@ -592,7 +625,8 @@ end
 # graph and reads only `area`, so edge vectors, and a declared `nodes=` vector,
 # the new data omits keep their fitted values. A fresh replay rebuilds the
 # graph from the new data and needs them.
-function _rk_car_fitted_edges(brmi::BRMI, new_data, training)
+Base.@nospecializeinfer function _rk_car_fitted_edges(@nospecialize(brmi::BRMI),
+        @nospecialize(new_data), training)
     edges = Dict{Symbol,Any}()
     for predictor in linear_predictors(brmi)
         operation = linear_predictor_op(brmi, predictor.name)
@@ -627,24 +661,30 @@ end
 
 # The training data a frozen fit reads, by column name: the materialized
 # columns planning reads, and the raw value of any other data column.
-function _rk_training_columns(brmi::BRMI)
+Base.@nospecializeinfer function _rk_training_columns(@nospecialize(brmi::BRMI))
     columns = Dict{Symbol,Any}()
     for op in _brm_operation_values(brmi)
         _rk_raw_data_columns!(columns, op)
     end
     merge!(columns, _brm_backend_context(brmi; retain_mm_sources=true).data)
+    columns
 end
 
 # A fit's numeric scalar inputs. They carry no training rows and can supply
 # omitted replay fields. A present field cannot silently change a prior: where
 # the fitted program holds it as a literal, the program identity check sees the
 # change; where the program reads it by name, `_rk_check_replay_priors` does.
-_rk_scalar_data(brmi::BRMI) = Dict{Symbol,Any}(name => deepcopy(value)
+Base.@nospecializeinfer _rk_scalar_data(@nospecialize(brmi::BRMI)) = Dict{Symbol,Any}(name => deepcopy(value)
     for (name, value) in _rk_training_columns(brmi) if value isa Real)
-_rk_replay_scalars(rk) = merge(_rk_scalar_data(parent(rk)),
+Base.@nospecializeinfer _rk_replay_scalars(@nospecialize(rk::RKBRMI)) = merge(_rk_scalar_data(parent(rk)),
     _rk_prior_arrays(rk.plan, _rk_training_columns(parent(rk))))
-_rk_omitted_scalars(scalars, new_data) = Dict{Symbol,Any}(name => value
-    for (name, value) in scalars if !_brm_df_has_column(new_data, name))
+Base.@nospecializeinfer function _rk_omitted_scalars(scalars, @nospecialize(new_data))
+    omitted = Dict{Symbol,Any}()
+    for (name, value) in scalars
+        _brm_df_has_column(new_data, name) || (omitted[name] = value)
+    end
+    omitted
+end
 
 # The names the laws of a program's sampled declarations read, directly or
 # through the assignments they read. An observation's law is no prior, and a
@@ -729,7 +769,8 @@ end
 # A scalar the program reads by name is the same program at any value, so the
 # identity check cannot see a design change the law that reads it. Refuse it
 # with that check's error. A scalar no law reads is a design input.
-function _rk_check_replay_priors(emitted, plan, scalars, new_data; prefix)
+Base.@nospecializeinfer function _rk_check_replay_priors(emitted, plan, scalars,
+        @nospecialize(new_data); prefix)
     reads = _rk_prior_reads(emitted, _rk_response_names(plan))
     fitted, replay = String[], String[]
     for name in sort!(collect(intersect(reads, keys(scalars))))
@@ -746,7 +787,7 @@ end
 # What a frozen replay fits from (`_BRMFrozenReplay`): the fit's data columns
 # and each data-only assignment's training value, which a fit
 # (`standardize(tt)`) reads like a column (`_brm_resolve_data_assignments`).
-function _rk_frozen_training(brmi::BRMI)
+Base.@nospecializeinfer function _rk_frozen_training(@nospecialize(brmi::BRMI))
     training = _rk_training_columns(brmi)
     resolved, _ = _brm_resolve_constants(brmi; prefix="RK replay")
     _, assignments = _brm_resolve_data_assignments(resolved; prefix="RK replay")

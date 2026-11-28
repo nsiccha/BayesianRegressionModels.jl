@@ -101,7 +101,7 @@ function _brm_rebind_value(x::MultiMembershipTerm, df)
     MultiMembershipTerm(
         groups...; weights, normalize=getfield(x, :normalize))
 end
-function _brm_rebind_brmi(brmi::BRMI, df)
+Base.@nospecializeinfer function _brm_rebind_brmi(@nospecialize(brmi::BRMI), @nospecialize(df))
     operations = brmi.operations
     BRMI(NamedTuple{keys(operations)}(
         map(value -> _brm_rebind_value(value, df), values(operations))), brmi.documentation)
@@ -2320,8 +2320,21 @@ _BRMFrozenReplay(training, resample) = _BRMFrozenReplay(training, resample, noth
 const _BRM_FROZEN_REPLAY = :BayesianRegressionModels_frozen_replay
 
 _brm_frozen_replay() = get(task_local_storage(), _BRM_FROZEN_REPLAY, nothing)
-_brm_with_frozen_replay(f, frozen::_BRMFrozenReplay) =
-    task_local_storage(f, _BRM_FROZEN_REPLAY, frozen)
+# Base's `task_local_storage(f, key, value)`, written out so that it does not
+# compile once per closure `f`, which captures a model whose type spells its
+# columns (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer function _brm_with_frozen_replay(@nospecialize(f), frozen::_BRMFrozenReplay)
+    storage = task_local_storage()
+    previous = haskey(storage, _BRM_FROZEN_REPLAY) ?
+        Some(storage[_BRM_FROZEN_REPLAY]) : nothing
+    storage[_BRM_FROZEN_REPLAY] = frozen
+    try
+        return f()
+    finally
+        previous === nothing ? delete!(storage, _BRM_FROZEN_REPLAY) :
+            (storage[_BRM_FROZEN_REPLAY] = something(previous))
+    end
+end
 
 # A response the replay data omit (a prediction design). It answers the
 # training column's element type, so planning takes the fit's route, and

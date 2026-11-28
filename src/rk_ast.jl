@@ -165,7 +165,7 @@ function _RKSourceInputs(emitted::_RKEmittedProgram)
 end
 _rk_source_data_columns(plan, emitted::_RKEmittedProgram; frozen=nothing) =
     _rk_source_data_columns(plan, _RKSourceInputs(emitted); frozen)
-_rk_source_data_columns(rk::RKBRMI, emitted::_RKEmittedProgram) =
+Base.@nospecializeinfer _rk_source_data_columns(@nospecialize(rk::RKBRMI), emitted::_RKEmittedProgram) =
     _rk_source_data_columns(rk.plan, emitted;
         frozen=isnothing(rk.fitted) ? nothing : rk.fitted.frozen)
 

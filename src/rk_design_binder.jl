@@ -77,8 +77,11 @@ into that replay's lowered program.
 """
 function rk_design_binder end
 
-struct RKDesignBinder{B<:RKBRMI}
-    rk::B
+# The binder runs once per design. Neither it nor its methods specialize on
+# the fit, whose type spells the model's columns, so a process compiles them
+# once for every model (snag `brm-methods-spec-39436695`).
+struct RKDesignBinder
+    rk::RKBRMI
     resample_groups::Tuple{Vararg{Symbol}}
     held_out::Tuple{Vararg{Symbol}}
     # The fit's data columns: what a design's kind is read from.
@@ -130,8 +133,8 @@ _RKDesignClass(derived::Vector{Symbol}) = _RKDesignClass(Pair{Symbol,Any}[], not
     _RKDesignChecks(), derived, nothing, Pair{Symbol,Any}[])
 _rk_design_planned(class::_RKDesignClass) = !isempty(class.derived)
 
-function rk_design_binder(rk::RKBRMI; resample_groups=(),
-        held_out=_rk_held_out_names(rk.plan))
+Base.@nospecializeinfer function rk_design_binder(@nospecialize(rk::RKBRMI);
+        @nospecialize(resample_groups=()), @nospecialize(held_out=_rk_held_out_names(rk.plan)))
     prefix = "RK design binder"
     groups = _rk_resample_group_set(resample_groups; prefix)
     training = _rk_fit_column_names(rk)
@@ -168,14 +171,14 @@ function rk_new_population_effects end
 
 # The data columns of the fit `rk` replays: its own, or on a data-free backend
 # those of the fit its state was exported from.
-_rk_fit_column_names(rk::RKBRMI) = rk.fitted === nothing ?
+Base.@nospecializeinfer _rk_fit_column_names(@nospecialize(rk::RKBRMI)) = rk.fitted === nothing ?
     Set{Symbol}(keys(_rk_training_columns(parent(rk)))) :
     Set{Symbol}(keys(_rk_fitted_state(rk).columns))
-_rk_fit_constant_names(rk::RKBRMI) = rk.fitted === nothing ?
+Base.@nospecializeinfer _rk_fit_constant_names(@nospecialize(rk::RKBRMI)) = rk.fitted === nothing ?
     Set{Symbol}(c.name for c in last(_brm_resolve_constants(parent(rk)))) :
     Set{Symbol}(keys(_rk_fitted_state(rk).constants))
 
-function (binder::RKDesignBinder)(design)
+Base.@nospecializeinfer function (binder::RKDesignBinder)(@nospecialize(design))
     plan = _rk_design_plan(binder, design)
     _rk_check_fit_coordinates(binder.levels, plan; prefix="RK design binder")
     merge(_rk_plan_columns(plan), binder.levels.values)
@@ -209,7 +212,7 @@ struct _RKFitCoordinateLevels
     inputs::NamedTuple
 end
 
-function _rk_fit_coordinate_levels(rk::RKBRMI, groups)
+Base.@nospecializeinfer function _rk_fit_coordinate_levels(@nospecialize(rk::RKBRMI), groups)
     none = _RKFitCoordinateLevels((;), Set{Symbol}(), String[], Symbol[], (;))
     isempty(groups) && return none
     statements = [_brm_undoc(s) for s in _rk_retained_program(rk).main.args
@@ -235,9 +238,10 @@ function _rk_fit_coordinate_levels(rk::RKBRMI, groups)
     isempty(values) && isempty(uncovered) && return none
     levels = NamedTuple{Tuple(first.(values))}(Tuple(last.(values)))
     # Each block a level set sizes: its value's name, and that level set.
+    level_names = Symbol[first(value) for value in values]
     blocks = [_rk_record_root(s.args[2]) => s.args[3].args[2] for s in statements
         if Meta.isexpr(s, :call, 3) && s.args[1] === :~ && Meta.isexpr(s.args[3], :call) &&
-            length(s.args[3].args) >= 2 && s.args[3].args[2] in keys(levels)]
+            length(s.args[3].args) >= 2 && s.args[3].args[2] in level_names]
     sized = Set{Symbol}(first.(blocks))
     fit_names = rk.fitted === nothing ? Vector{Symbol}(_rk_layout_coordinate_names(rk)) :
         copy(_rk_fitted_state(rk).coordinates)
@@ -351,7 +355,8 @@ end
 # data-free fit holds it among its frozen values. A data-bound backend's own
 # binding holds it when every input its definition reads is the training
 # column; a backend that resampled them itself does not hold the fit's.
-function _rk_fitted_level_set(rk::RKBRMI, name, rhs, twins)
+Base.@nospecializeinfer function _rk_fitted_level_set(@nospecialize(rk::RKBRMI), name,
+        @nospecialize(rhs), twins)
     if rk.fitted !== nothing
         frozen = _rk_fitted_state(rk).fitted.values
         return haskey(frozen, name) ? (frozen[name],) : nothing
@@ -396,18 +401,23 @@ function _rk_plan_coordinate_names end
 # A design's RKPPL plan: bound into the lowered program of its kind, or the
 # planned replay's own binding for the first design of a kind and for a kind
 # whose inputs BRM derives in Julia.
-function _rk_design_plan(binder::RKDesignBinder, design)
+Base.@nospecializeinfer function _rk_design_plan(binder::RKDesignBinder, @nospecialize(design))
     key = _rk_design_key(binder, design)
-    class = lock(() -> get(binder.classes, key, nothing), binder.lock)
+    class = _rk_design_class_of(binder, key)
     class === nothing && return _rk_design_first!(binder, key, design)
     _rk_design_planned(class) && return rk_bound_plan(_rk_design_replay(binder, design))
-    all(scalar -> isequal(_brm_df_column(design, first(scalar)), last(scalar)), class.scalars) ||
-        return rk_bound_plan(_rk_design_replay(binder, design))
+    # Loops, not closures over `design`, whose type spells the model's columns.
+    for (name, value) in class.scalars
+        isequal(_brm_df_column(design, name), value) ||
+            return rk_bound_plan(_rk_design_replay(binder, design))
+    end
     for check in class.checks.raw
         check(design)
     end
-    columns = Dict{Symbol,Any}(name => _rk_design_input(source, design)
-        for (name, source) in class.sources)
+    columns = Dict{Symbol,Any}()
+    for (name, source) in class.sources
+        columns[name] = _rk_design_input(source, design)
+    end
     plan = try
         _rk_bind_design_plan(class.lowering, columns, class.frozen)
     catch err
@@ -428,7 +438,8 @@ function _rk_design_plan(binder::RKDesignBinder, design)
     plan
 end
 
-_rk_design_replay(binder::RKDesignBinder, design) = reprocess(binder.rk, design;
+Base.@nospecializeinfer _rk_design_replay(binder::RKDesignBinder, @nospecialize(design)) =
+    reprocess(binder.rk, design;
     resample_groups=binder.resample_groups, held_out=binder.held_out)
 
 _rk_design_input(source::_RKFixedInput, _design) = source.value
@@ -438,10 +449,13 @@ _rk_design_input(source::_RKDesignInput, design) = _brm_df_column(design, source
 # is empty, whether it holds missing values and whether it holds one array per
 # index — every property of a value that lowering reads (rkppl-use §1) or that
 # routes planning.
-function _rk_design_key(binder::RKDesignBinder, design)
-    Tuple(_brm_df_has_column(design, name) ?
-        _rk_design_value_kind(name, _brm_df_column(design, name)) : (name, :absent)
-        for name in binder.columns)
+Base.@nospecializeinfer function _rk_design_key(binder::RKDesignBinder, @nospecialize(design))
+    key = Vector{Any}(undef, length(binder.columns))
+    for (i, name) in enumerate(binder.columns)
+        key[i] = _brm_df_has_column(design, name) ?
+            _rk_design_value_kind(name, _brm_df_column(design, name)) : (name, :absent)
+    end
+    Tuple(key)
 end
 _rk_design_value_kind(name, value) = (name, typeof(value))
 _rk_design_value_kind(name, value::AbstractArray) = (name, typeof(value), isempty(value),
@@ -449,12 +463,28 @@ _rk_design_value_kind(name, value::AbstractArray) = (name, typeof(value), isempt
 _rk_design_holds_arrays(value::AbstractArray) = !(eltype(value) <: Number) &&
     (isempty(value) ? eltype(value) <: AbstractArray : all(x -> x isa AbstractArray, value))
 
-function _rk_design_first!(binder::RKDesignBinder, key, design)
+Base.@nospecializeinfer function _rk_design_first!(binder::RKDesignBinder, @nospecialize(key),
+        @nospecialize(design))
     replay = _rk_design_replay(binder, design)
     plan = rk_bound_plan(replay)
     class = _rk_design_class(binder, replay, design)
-    lock(() -> get!(binder.classes, key, class), binder.lock)
+    lock(binder.lock)
+    try
+        get!(binder.classes, key, class)
+    finally
+        unlock(binder.lock)
+    end
     plan
+end
+
+# The kind `key`'s class, or `nothing` before its first design.
+Base.@nospecializeinfer function _rk_design_class_of(binder::RKDesignBinder, @nospecialize(key))
+    lock(binder.lock)
+    try
+        get(binder.classes, key, nothing)
+    finally
+        unlock(binder.lock)
+    end
 end
 
 # The fit-role inputs of a plan, by the column each one twins.
@@ -506,7 +536,7 @@ end
 # columns that are not resampled, and fitted `constant(...)` values. A
 # data-free backend binds no fit-role input: its frozen fitted values take
 # their place.
-function _rk_design_fitted(rk::RKBRMI, groups)
+Base.@nospecializeinfer function _rk_design_fitted(@nospecialize(rk::RKBRMI), groups)
     columns = _rk_source_data_columns(rk, _rk_retained_program(rk))
     # Each fitted input, by the column whose resampling refits it.
     fits = merge(_rk_plan_fit_inputs(rk.plan), _rk_plan_graph_inputs(rk.plan))
@@ -522,7 +552,8 @@ function _rk_design_fitted(rk::RKBRMI, groups)
     merge(fitted, _rk_frozen_subset(state, _rk_resampled_fit_inputs(state, groups)).values)
 end
 
-function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
+Base.@nospecializeinfer function _rk_design_class(binder::RKDesignBinder,
+        @nospecialize(replay::RKBRMI), @nospecialize(design))
     rk = binder.rk
     # A provider that emits new callables per design binds its own program;
     # a plan whose value checks the binder cannot read replays in full.
@@ -571,10 +602,15 @@ end
 # change on the cached path: those a prior reads, and those the program binds no
 # input for (a literal, or an input of `constant(...)`). A later design holding
 # another value replays in full, and `reprocess` refuses it or plans it.
-function _rk_design_kept_scalars(rk, replay, design, columns)
+Base.@nospecializeinfer function _rk_design_kept_scalars(@nospecialize(rk::RKBRMI), @nospecialize(replay::RKBRMI),
+        @nospecialize(design), @nospecialize(columns))
     priors = _rk_prior_reads(_rk_retained_program(rk), _rk_response_names(replay.plan))
-    Pair{Symbol,Any}[name => _brm_df_column(design, name) for name in keys(_rk_fitted_scalars(rk))
-        if _brm_df_has_column(design, name) && (name in priors || !haskey(columns, name))]
+    kept = Pair{Symbol,Any}[]
+    for name in keys(_rk_fitted_scalars(rk))
+        _brm_df_has_column(design, name) && (name in priors || !haskey(columns, name)) &&
+            push!(kept, name => _brm_df_column(design, name))
+    end
+    kept
 end
 
 _rk_design_checked(::Union{_RKStructuralPlan,_RKValuePlan}) = true
@@ -583,7 +619,8 @@ _rk_design_checked(_plan) = false
 
 # The design column an input is (by identity: the planner binds raw columns
 # unchanged), or `nothing` when the planner derived it.
-function _rk_design_column_of(binder, design, name, twin, value)
+Base.@nospecializeinfer function _rk_design_column_of(binder, @nospecialize(design), name, twin,
+        @nospecialize(value))
     for column in (something(twin, name), name, binder.columns...)
         _brm_df_has_column(design, column) || continue
         _brm_df_column(design, column) === value && return column
@@ -594,7 +631,8 @@ end
 # The checks `reprocess` applies to a design's values, as closures over the
 # planned terms. A term whose check cannot be read off the plan marks the kind
 # as planned (`derived`).
-function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
+Base.@nospecializeinfer function _rk_design_checks(binder::RKDesignBinder, plan,
+        @nospecialize(design), derived)
     checks = _RKDesignChecks()
     definitions = Dict(spec.label => spec.name for spec in _rk_plan_derived(plan)
         if _rk_fit_twinned(spec.label) === nothing &&

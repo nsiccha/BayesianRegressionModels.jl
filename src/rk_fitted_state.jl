@@ -80,7 +80,7 @@ value the state holds. Otherwise the error names the statement that still
 reads a training column, and that model is replayed with
 [`reprocess`](@ref) on the training fit instead.
 """
-function brm_fitted_state(rk::RKBRMI)
+Base.@nospecializeinfer function brm_fitted_state(@nospecialize(rk::RKBRMI))
     names, reads = _rk_fitted_value_names(rk; prefix="brm_fitted_state")
     emitted = _rk_retained_program(rk)
     fit_inputs = Set{Symbol}(keys(_rk_plan_fit_inputs(rk.plan)))
@@ -94,10 +94,12 @@ function brm_fitted_state(rk::RKBRMI)
         sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
 end
 
-_rk_fitted_scalars(rk::RKBRMI) = rk.fitted === nothing ?
+Base.@nospecializeinfer _rk_fitted_scalars(@nospecialize(rk::RKBRMI)) = rk.fitted === nothing ?
     _rk_replay_scalars(rk) : deepcopy(rk.fitted.state.scalars)
 
-function _rk_fitted_column_types(rk::RKBRMI)
+# The export below compiles once for every model too: a state exported in the
+# process that opens it must not have compiled the open's per-model methods.
+Base.@nospecializeinfer function _rk_fitted_column_types(@nospecialize(rk::RKBRMI))
     columns = rk.fitted === nothing ? Dict{Symbol,Any}() : copy(rk.fitted.state.columns)
     for (name, value) in _rk_training_columns(parent(rk))
         columns[name] = value isa AbstractArray ? eltype(value) : typeof(value)
@@ -107,7 +109,7 @@ end
 
 # Select graph summaries without rerunning the planner's fit collection.
 # A data-free backend already binds those summaries from its fitted record.
-function _rk_fitted_value_names(rk::RKBRMI; prefix)
+Base.@nospecializeinfer function _rk_fitted_value_names(@nospecialize(rk::RKBRMI); prefix)
     _rk_design_checked(rk.plan) || error(
         "$prefix: a $(nameof(typeof(rk.plan))) program has no fitted-state export")
     for predictor in _rk_replay_predictors(rk.plan), term in predictor.terms
@@ -192,7 +194,7 @@ end
 
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).
-function _rk_recorded_fits(rk::RKBRMI)
+Base.@nospecializeinfer function _rk_recorded_fits(@nospecialize(rk::RKBRMI))
     record = Dict{Tuple{Symbol,Symbol},Any}()
     # Re-exporting a data-free replay preserves its original fitted geometry
     # and priors, without evaluating constants on missing training inputs.
@@ -206,14 +208,12 @@ function _rk_recorded_fits(rk::RKBRMI)
     end
     training = _rk_frozen_training(parent(rk))
     constants = _rk_fitted_constants(rk)
-    _brm_with_frozen_replay(_BRMFrozenReplay(training, Set{Symbol}(), nothing, record)) do
-        _brm_rk_plan(parent(rk); held_out=_rk_held_out_names(rk.plan),
-            fitted_constants=(name, _source) -> get(constants, name, nothing))
-    end
+    _brm_with_frozen_replay(_RKFrozenPlanning(parent(rk), _rk_held_out_names(rk.plan), nothing,
+        constants), _BRMFrozenReplay(training, Set{Symbol}(), nothing, record))
     record
 end
 
-function _rk_fitted_constants(rk::RKBRMI)
+Base.@nospecializeinfer function _rk_fitted_constants(@nospecialize(rk::RKBRMI))
     # A data-free replay's declaration holds its new rows. Its constants were
     # bound from the saved state, so evaluating that declaration would refit.
     rk.fitted === nothing || return deepcopy(rk.fitted.state.constants)
@@ -226,9 +226,10 @@ end
 # from `state`, the fit-role inputs bind the replay data's own values (a
 # frozen binding replaces them with `state.fitted`), and the emitted program
 # must be the fit's. `template` is the model on any data (`builder(new_data)`).
-function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
-        resample_groups=(), held_out=state.held_out, prefix="RK data-free replay",
-        record=nothing)
+Base.@nospecializeinfer function _rk_fitted_replay_plan(@nospecialize(template::BRMI),
+        @nospecialize(new_data), state::BRMFittedState; @nospecialize(resample_groups=()),
+        @nospecialize(held_out=state.held_out), prefix="RK data-free replay",
+        @nospecialize(record=nothing))
     state.format == _BRM_FITTED_STATE_FORMAT || error(
         "$prefix: a format-$(state.format) fitted state; this BRM reads format " *
         "$_BRM_FITTED_STATE_FORMAT, so export it again from the fit")
@@ -242,17 +243,17 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
     isempty(unknown) || error(
         "$prefix: `resample_groups` names $(sort!(collect(unknown))), which " *
         "is not a data column of the fitted model")
-    absent = Dict{Symbol,Any}(name => _BRMAbsentResponse{state.columns[name]}(name)
-        for name in state.responses
-        if haskey(state.columns, name) && !_brm_df_has_column(new_data, name))
+    absent = Dict{Symbol,Any}()
+    for name in state.responses
+        haskey(state.columns, name) && !_brm_df_has_column(new_data, name) &&
+            (absent[name] = _BRMAbsentResponse{state.columns[name]}(name))
+    end
     merge!(absent, _rk_omitted_scalars(state.scalars, new_data))
     rebound = _brm_rebind_brmi(_rk_declare_scalars(_brm_resolve_optional_priors(template),
         state.scalars), _BRMReplayData(new_data, absent))
     frozen = _BRMFrozenReplay(state.scalars, groups, state.fits, record)
-    plan = _brm_with_frozen_replay(frozen) do
-        _brm_rk_plan(rebound; held_out,
-            fitted_constants=(name, _source) -> get(state.constants, name, nothing))
-    end
+    plan = _brm_with_frozen_replay(_RKFrozenPlanning(rebound, held_out, nothing,
+        state.constants), frozen)
     documentation = brm_documentation(template)
     emitted = _rk_emit_ast(plan; documentation)
     state = _rk_checked_fitted_state(state, plan, emitted, documentation; prefix)
@@ -339,9 +340,13 @@ end
 # A builder declares a scalar a `@plate` cell reads only when its data holds it,
 # so a model built on a design that omitted one has no data field to rebind, on
 # this replay or on a later one of its backend.
-function _rk_declare_scalars(brmi::BRMI, scalars)
+Base.@nospecializeinfer function _rk_declare_scalars(@nospecialize(brmi::BRMI), scalars)
     operations = brmi.operations
-    names = Tuple(sort!([name for name in keys(scalars) if !haskey(operations, name)]))
+    undeclared = Symbol[]
+    for name in keys(scalars)
+        _brm_has_operation(brmi, name) || push!(undeclared, name)
+    end
+    names = Tuple(sort!(undeclared))
     isempty(names) && return brmi
     BRMI(merge(NamedTuple{names}(map(name -> NamedColumn(name, DataColumn(scalars[name])), names)),
         operations), brmi.documentation)
@@ -360,11 +365,15 @@ bound: the values the program fits from them are bound frozen in their place.
 designs from `state` as well. `brmi` must be the fit's model (the same
 declaration); a design `reprocess` refuses is refused with the same error.
 """
-RKBRMI(brmi::BRMI, state::BRMFittedState; resample_groups=(), held_out=state.held_out) =
+# A data-free open, its replays and their helpers run once per design. None
+# specializes on the model, whose type spells its columns, so a process
+# compiles them once for every model (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer RKBRMI(@nospecialize(brmi::BRMI), state::BRMFittedState;
+        @nospecialize(resample_groups=()), @nospecialize(held_out=state.held_out)) =
     _rk_fitted_replay(brmi, _rk_brmi_data(brmi), state; resample_groups, held_out)
 
 # The data columns of a model, as the replay data they rebind to.
-function _rk_brmi_data(brmi::BRMI)
+Base.@nospecializeinfer function _rk_brmi_data(@nospecialize(brmi::BRMI))
     # Data preparation resolves prior addresses too. Match the training
     # constructor before it sees optional addresses for absent model terms.
     columns = _rk_training_columns(_brm_resolve_optional_priors(brmi))
@@ -380,7 +389,8 @@ struct _RKFittedReplay
     frozen::Any
     resample::Tuple{Vararg{Symbol}}
 end
-_rk_fitted_state(rk::RKBRMI) = rk.fitted === nothing ? nothing : rk.fitted.state
+Base.@nospecializeinfer _rk_fitted_state(@nospecialize(rk::RKBRMI)) =
+    rk.fitted === nothing ? nothing : rk.fitted.state
 
 # The fit-role inputs a resampled grouping's values are refitted from.
 _rk_resampled_fit_inputs(state::BRMFittedState, groups) =
@@ -390,9 +400,17 @@ _rk_resampled_fit_inputs(state::BRMFittedState, groups) =
 # (`_rk_fitted_replay_plan`), bound with the fitted values frozen in place of the
 # fit-role inputs, on the graph of `previous` (a data-free backend this replays)
 # when its program's callables are the same.
-function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
-        resample_groups=(), held_out=state.held_out, previous=nothing,
-        prefix="RK data-free replay", coordinates=:fixed)
+Base.@nospecializeinfer _rk_fitted_replay(@nospecialize(template::BRMI),
+        @nospecialize(new_data), state::BRMFittedState; @nospecialize(resample_groups=()),
+        @nospecialize(held_out=state.held_out), @nospecialize(previous=nothing),
+        prefix="RK data-free replay", coordinates=:fixed) =
+    _rk_fitted_replay_of(template, new_data, state, resample_groups, held_out, previous,
+        prefix, coordinates)
+# Positional, so a replay of a data-free backend passes it without a keyword
+# tuple whose type spells the backend's model (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer function _rk_fitted_replay_of(@nospecialize(template::BRMI),
+        @nospecialize(new_data), state::BRMFittedState, @nospecialize(resample_groups),
+        @nospecialize(held_out), @nospecialize(previous::Union{Nothing,RKBRMI}), prefix, coordinates)
     coordinates in (:fixed, :growing) || throw(ArgumentError(
         "$prefix: unsupported coordinate replay mode $coordinates"))
     coordinates === :growing && !isempty(resample_groups) && throw(ArgumentError(

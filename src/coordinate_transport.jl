@@ -88,10 +88,13 @@ _rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan
 # declaration no response reads (`_rk_drop_unfitted_records!`).
 _rk_coordinate_records(::_RKUnconditionedPlan; term_starts=false, adaptive=false) = Any[]
 # A backend's inventory is its plan's, emitted once (`_BRMPreparedSlot`); each
-# call gets its own vector to filter.
-_rk_coordinate_records(rk::RKBRMI; term_starts=false, adaptive=false) =
-    _rk_select_records!(copy(_rk_once!(() -> _rk_coordinate_records(rk.plan;
-        term_starts=true, adaptive=true), rk.prepared.coordinates)); term_starts, adaptive)
+# call gets its own vector to filter. Neither specializes on the backend, so
+# every model reuses one compilation (snag `brm-methods-spec-39436695`).
+Base.@nospecializeinfer _rk_coordinate_records(@nospecialize(rk::RKBRMI);
+        term_starts=false, adaptive=false) =
+    _rk_select_records!(copy(_rk_once!(_rk_complete_records, rk.plan,
+        rk.prepared.coordinates)); term_starts, adaptive)
+_rk_complete_records(plan) = _rk_coordinate_records(plan; term_starts=true, adaptive=true)
 _rk_coordinate_records(plan; term_starts=false, adaptive=false) =
     _brm_transport_error(:unsupported_coverage,
     "brm_coordinate_transport: an RK plan of kind `$(nameof(typeof(plan)))` has " *
@@ -113,9 +116,9 @@ _rk_emit_with_records(plan::_RKUnconditionedPlan) = (_rk_emit_ast(plan), Any[])
 _rk_emit_with_records(plan) = (_rk_emit_ast(plan), nothing)
 
 # A backend whose inventory came from an emission already made.
-_rk_seed_coordinate_records!(rk::RKBRMI, ::Nothing) = rk
-_rk_seed_coordinate_records!(rk::RKBRMI, records) =
-    (_rk_once!(() -> records, rk.prepared.coordinates); rk)
+Base.@nospecializeinfer _rk_seed_coordinate_records!(@nospecialize(rk::RKBRMI), ::Nothing) = rk
+Base.@nospecializeinfer _rk_seed_coordinate_records!(@nospecialize(rk::RKBRMI), records) =
+    (_rk_once!(identity, records, rk.prepared.coordinates); rk)
 
 # The levels of a random-effect record's grouping, the rows of its
 # standardized draws `z`. A joined `|ID|` block's levels are its columns'

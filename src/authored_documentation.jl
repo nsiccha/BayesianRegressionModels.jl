@@ -193,7 +193,7 @@ _brm_documentation(source::Expr) = _brm_source_documentation(source)
 _brm_documentation(artifact::NamedTuple) = haskey(artifact, :meta) ?
     get(artifact.meta, :documentation, ()) : throw(ArgumentError("not a BRM source artifact"))
 
-function _brm_select_documentation(model, operations)
+Base.@nospecializeinfer function _brm_select_documentation(@nospecialize(model), @nospecialize(operations))
     BRMI(operations, Tuple(d for d in model.documentation if haskey(operations, d.owner)))
 end
 
