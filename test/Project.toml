@@ -475,4 +475,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RKPPL 0.1.265 provides the joint parameter generator used by rk_prior_draws.
 # RKPPL 0.1.268 copies a bound plan for each WarmupHMC chain.
 # RKPPL 0.1.271 binds the cell rank of an omitted ragged response.
-rev = "a710126311c29fbdd0b07339e2fc6ca24dcd10db"
+# RK 0.1.410 runs a scan step's shared-only work once per scan.
+rev = "cd02a022e51a570b8d7e44839efa2b4084390fca"
