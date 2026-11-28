@@ -5518,6 +5518,12 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     # raw-kw gate above refuses `orthogonal_to=` for periodic first).
     orthogonal = get(state, :orthogonal, nothing)
     axes = Tuple(prepared.source)
+    at = get(state, :at, nothing)
+    if at !== nothing
+        # The field axes stay on their own table; only the finished field is
+        # read on the observation table. This preserves per-field centring.
+        columns[at.source] = data[at.source]
+    end
     for axis in axes
         state.latent && continue
         _rk_plan_spline_axis!(axis, target, "hsgp", data, columns)
@@ -5579,7 +5585,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         rho_floor_named, anchor=get(state, :anchor, nothing), mask,
         mask_source=isnothing(rows) ? nothing : rows.source,
         hyper_plans, rho_stated, sigma_stated, fit_axes, fit_mask,
-        extrapolate=get(state, :extrapolate, :error))
+        extrapolate=get(state, :extrapolate, :error),
+        at=at === nothing ? nothing : at.source)
     # The basis sizes and the numeric settings are inputs of the program, never
     # numbers it spells (user principle `0ikeidi`): `modes` holds each axis's
     # basis count, `settings` each axis's boundary factor `c`, then a fixed
@@ -9789,6 +9796,11 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     union!(statistical_inputs, (input for p in predictor_specs
         for t in p.terms if haskey(t.options, :coordinate_columns)
         for input in t.options.coordinate_columns))
+    # `hsgp(...; at=position)` evaluates on a field table and gathers the
+    # finished value to observation rows. Its axes are whole field inputs.
+    union!(statistical_inputs, (axis for p in predictor_specs
+        for t in p.terms if t.kind === :hsgp && get(t.options, :at, nothing) !== nothing
+        for axis in t.columns))
     union!(statistical_inputs, (spec.expression.args[2] for spec in derived
         if spec.expression.head === :_rk_data_preparation &&
             first(spec.expression.args) === :brm_matrix_column))

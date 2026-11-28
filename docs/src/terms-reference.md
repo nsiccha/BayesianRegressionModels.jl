@@ -60,6 +60,15 @@ multiplier. `iso=false` gives one length per axis; the default shares one.
 `cor=Omega` correlates those weights across group levels. `jitter` belongs
 to exact GP; HSGP uses `k`, `c` or an explicit `domain` instead.
 
+When several observations share a field location, `at=position` maps the
+finished HSGP field to observation rows. The position column contains
+one-based indices into the axis table. For example, with `east` and `north`
+on cells and `cell_pos` on observations, use
+`hsgp(east, north; k=(8, 12), at=cell_pos)`. Its basis and any
+`orthogonal_to=:intercept` projection stay on the cell rows, so repeating
+observations does not change the centring measure or duplicate basis work.
+`at=` works on ungrouped raw-data HSGPs, including a one-axis periodic term.
+
 For a periodic kernel the covariance is
 ``\sigma^2\exp[-2\sin^2(\pi(x-x')/p)/\rho^2]``. Its length is in dimensionless
 chord units. Periodic HSGP rejects `c`, `domain`, `by`, anisotropy, latent

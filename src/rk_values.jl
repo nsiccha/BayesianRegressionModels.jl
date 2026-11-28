@@ -627,9 +627,12 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings; collection_cell=
     sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
     rho = axes == 1 ? :rho_iso : :rho
     # The weights' spectral scales are a value of the component (`spectral_scale`).
+    at = get(options, :at, nothing)
     scales, value = _rk_ast_hsgp_value_graph!(definitions, term, taken,
-        [a => a for a in first.(inputs)], :sigma, rho, :beta_raw, :spectral_scale, bindings)
-    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, inputs, floors,
+        [a => a for a in first.(inputs)], :sigma, rho, :beta_raw, :spectral_scale,
+        bindings; at)
+    component_inputs = at === nothing ? inputs : [inputs; :row_index => at]
+    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, component_inputs, floors,
         rho_priors, sigma_prior, value, extent; scales, truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts, nothing, fit
