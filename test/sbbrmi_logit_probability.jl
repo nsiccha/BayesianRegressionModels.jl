@@ -20,6 +20,7 @@
 using Test
 using BayesianRegressionModels
 using Distributions
+using BridgeStan
 using LogDensityProblems
 using SpecialFunctions: loggamma
 using StanBlocks
@@ -113,6 +114,14 @@ const CASES = [
         end
     end), exact_bernoulli, (MODERATE..., EXTREME...),
         ["~ bernoulli_logit(eta);"], ["bernoulli(inv_logit"]),
+    # Its predictive draw is StanBlocks' scalar `binomial_logit_rng` (0.2.71).
+    ("cell Binomial", (@brm begin
+        eta ~ Normal(0, 1000)
+        @plate for i in eachindex(y)
+            y[i] ~ Binomial(n[i], logistic(eta))
+        end
+    end), exact_binomial, (MODERATE..., EXTREME...),
+        ["~ binomial_logit(", "binomial_logit_rng("], ["inv_logit(eta)", "binomial("]),
 ]
 
 # `present` is read in the whole program (a cell's shapes are transformed
@@ -188,6 +197,45 @@ end
     code = stan_code(SBBRMI(broadcast(DATA); mod=@__MODULE__))
     @test occursin("q = inv_logit((-logit_mu));", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # A cell's `BinomialLogit` draws through the same scalar `binomial_logit_rng`.
+    cell_logit = @brm begin
+        eta ~ Normal(0, 1000)
+        @plate for i in eachindex(y)
+            y[i] ~ BinomialLogit(n[i], eta)
+        end
+    end
+    code = stan_code(SBBRMI(cell_logit(DATA); mod=@__MODULE__))
+    @test occursin("~ binomial_logit(", model_block(code))
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # An omitted cell binomial is only drawn, now through `binomial_logit_rng`.
+    # With `y` omitted the program is the prior one: `eta` is drawn in generated
+    # quantities too, so nothing is sampled, and at the prior's wide `eta` each
+    # draw is all failures or all successes.
+    omitted_cell = @brm begin
+        eta ~ Normal(0, 1000)
+        @plate for i in eachindex(n)
+            y[i] ~ Binomial(n[i], logistic(eta))
+        end
+    end
+    sb = SBBRMI(omitted_cell(Base.structdiff(DATA, NamedTuple{(:y,)})); mod=@__MODULE__)
+    code = stan_code(sb)
+    @test occursin("binomial_logit_rng(", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    problem = StanBlocks.stan_instantiate(sb.model)
+    @test LogDensityProblems.dimension(problem) == 0
+    names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+    rng = BridgeStan.StanRNG(problem.model, 3)
+    draws = reduce(hcat, (BridgeStan.param_constrain(problem.model, Float64[];
+        include_tp=true, include_gq=true, rng) for _ in 1:200))
+    eta = draws[findfirst(==("eta"), names), :]
+    for (i, trials) in enumerate(DATA.n)
+        y = draws[findfirst(==("y_cell_y.$i"), names), :]
+        @test all(v -> isinteger(v) && 0 <= v <= trials, y)
+        @test all(y[eta .> 40] .== trials)
+        @test all(y[eta .< -40] .== 0)
+    end
 end
 
 @testset "probability-scale forms stay where the logit forms do not apply" begin
@@ -201,13 +249,11 @@ end
     code = stan_code(SBBRMI(identity_p(DATA); mod=@__MODULE__))
     @test occursin("y ~ binomial(n, p);", code)
     @test occursin("(1 - w)", code)
-    # A cell's binomial stays on the probability scale until StanBlocks draws a
-    # scalar `binomial_logit` (snag StanBlocks `sbbrmi-on-a-brm-234397df`), and
-    # compiles.
+    # A cell's binomial of a probability that is not a logistic keeps its family.
     cell_binomial = @brm begin
-        eta ~ Normal(0, 1000)
+        p ~ Beta(2, 2)
         @plate for i in eachindex(y)
-            y[i] ~ Binomial(n[i], logistic(eta))
+            y[i] ~ Binomial(n[i], p)
         end
     end
     code = stan_code(SBBRMI(cell_binomial(DATA); mod=@__MODULE__))

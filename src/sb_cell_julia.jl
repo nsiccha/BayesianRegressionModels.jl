@@ -91,19 +91,21 @@ _sb_julia_stan_call(::typeof(-), args) =
     length(args) == 2 && first(args) isa Real && isone(first(args)) &&
         _sb_is_inv_logit(last(args)) ?
         _sb_negated_inv_logit(last(args).args[2]) : nothing
-# A cell's Bernoulli observation of `inv_logit(x)` is scored by Stan's
-# logit-native log-pmf of `x`, as a model-scope one is (`_sb_logit_likelihood!`).
-# Only the observation itself: a combinator's family (`censored`, `truncated`)
-# needs a CDF, which the logit forms do not have. A cell's binomial keeps
-# `binomial(n, inv_logit(x))` until StanBlocks draws a scalar `binomial_logit`
-# observation (Stan Math has no `binomial_logit_rng`; snag StanBlocks
-# `sbbrmi-on-a-brm-234397df`).
+# A cell's Bernoulli or binomial observation of `inv_logit(x)` is scored by
+# Stan's logit-native log-pmf of `x`, as a model-scope one is
+# (`_sb_logit_likelihood!`). Only the observation itself: a combinator's family
+# (`censored`, `truncated`) needs a CDF, which the logit forms do not have.
+# A cell's observation is scalar, and Stan Math has no `binomial_logit_rng`:
+# its predictive draw is StanBlocks' own scalar `binomial_logit_rng`
+# (StanBlocks 0.2.71, snag StanBlocks `sbbrmi-on-a-brm-234397df`).
 function _sb_cell_logit_law(law)
     Meta.isexpr(law, :call) || return law
     family, args = first(law.args), law.args[2:end]
     any(a -> Meta.isexpr(a, :parameters) || Meta.isexpr(a, :kw), args) && return law
     family === :bernoulli && length(args) == 1 && _sb_is_inv_logit(only(args)) &&
         return Expr(:call, :bernoulli_logit, only(args).args[2])
+    family === :binomial && length(args) == 2 && _sb_is_inv_logit(last(args)) &&
+        return Expr(:call, :binomial_logit, first(args), last(args).args[2])
     law
 end
 

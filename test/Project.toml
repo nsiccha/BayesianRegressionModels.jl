@@ -77,7 +77,7 @@ OptimizationBase = "5.10.1"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.70"
+StanBlocks = "0.2.71"
 StatsBase = "0.34"
 Treebars = "0.1.5"
 WarmupHMC = "0.3"
@@ -176,7 +176,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 
 # 0.2.53 retains cell-specific sorted indices for repeated grouped time smooths.
 # StanBlocks 0.2.63 reports both endpoint and subject boundaries for nested plate outputs.
-rev = "ab53bce1f10db131ff55b807d5fc10c7ac14d15f"
+# StanBlocks 0.2.71 (bc523c75) draws a scalar `binomial_logit` observation, which a
+# plate cell's `Binomial(n[i], logistic(eta))` lowers to.
+rev = "bc523c7524b88e741e967d2428eafe557edb14f1"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
