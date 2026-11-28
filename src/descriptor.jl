@@ -102,7 +102,8 @@ BRM adds:
   | `:group_block` | a `kernel(...)` / `plate` result and everything declared per cell |
   | `:parameter` | an ordinary declared prior (`sigma ~ Exponential(1)`) |
   | `:linear_predictor` | a formula linear predictor (`mu ~ 1 + x + (1\\|g)`) — an assignment, so no `~` declaration binds it. A linked declaration `f(x) ~ …` (`log(CL) ~ …`, `logit(p) ~ …`) gives the bare `x` on the response scale, `x = inverse(f)(η)`, not the link-scale η: apply the link to its draws (`log.(CL)`) for η |
-  | `:posterior_predictive` | a predictive draw of an observation |
+  | `:posterior_predictive` | a predictive draw of an observation; for a response that holds observed and `missing` entries (a replay continuing an `AR1Normal` series), its completed series: the observed values, and a draw at each `missing` entry |
+  | `:replicate` | the whole new draw (`<y>_gen`) of a response whose `:posterior_predictive` carrier is its completed series |
   | `:covariate_draw` | the selected modeled covariate value consumed by later operations |
   | `:pointwise_loglik` | an observation's per-element log-likelihood |
   | `:membership` | a `MixtureModel` response's `n x K` matrix of per-row component-membership probabilities (`<response>_membership`); `source` and `logical` name the response, `labels` the components, so it is addressed as `logical=<response>, role=:membership` |
@@ -1671,6 +1672,15 @@ function _brm_declaration_outputs(plan, stan, semantics, by_name)
     # --- outputs ------------------------------------------------------------
     outputs = BRMOutput[]
     fresh_covariates = _sb_existing_covariates(plan.preproc)
+    # A response that holds observed and `missing` entries (a replay that
+    # continues an `AR1Normal` series from its history rows) has a completed
+    # series: its observed values, and a draw at each `missing` entry
+    # (StanBlocks `generative == :completed`, stanblocks-use §35). That series
+    # is the response's predictive draw. Its `<y>_gen` twin, a whole new draw
+    # of every entry, is the response's `:replicate`.
+    completed = Set{Symbol}(o.source for o in stan.outputs
+        if o.generative === :completed && !isnothing(o.source) &&
+           !isnothing(get(logical_outputs, o.name, nothing)))
     for o in stan.outputs
         membership = o.kind === :generated_quantity ? get(memberships, o.name, nothing) :
             nothing
@@ -1707,6 +1717,10 @@ function _brm_declaration_outputs(plan, stan, semantics, by_name)
             :pointwise_loglik
         else
             :stan_derived
+        end
+        if o.source in completed
+            o.generative === :completed && (role = :posterior_predictive)
+            o.generative === :draw && role === :posterior_predictive && (role = :replicate)
         end
         push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
                                  o.generative, o.source, role, decl,
