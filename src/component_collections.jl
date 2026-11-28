@@ -81,6 +81,29 @@ _brm_record_field(record::AbstractDict, key::Symbol) =
 
 _brm_concat_members(left, right) = vcat(left, right)
 
+# Joined declaration variants keep one result per member, in member order. A
+# scalar member's cells are numbers and a vector member's cells are vectors;
+# `vcat` of the two widens to `Vector{Any}`, which RK refuses under strict type
+# stability. When the shapes differ, give each scalar member a length-one
+# vector, as SBBRMI's ragged join does (`brm_member_vectors`), so the gathered
+# field has one concrete element type. `brm_subject_value` reads either shape.
+const _BRMScalarMembers = AbstractVector{<:Real}
+const _BRMVectorMembers = AbstractVector{<:AbstractVector{<:Real}}
+_brm_concat_members(left::_BRMScalarMembers, right::_BRMVectorMembers) =
+    _brm_concat_member_vectors(left, right)
+_brm_concat_members(left::_BRMVectorMembers, right::_BRMScalarMembers) =
+    _brm_concat_member_vectors(left, right)
+_brm_concat_members(left::_BRMVectorMembers, right::_BRMVectorMembers) =
+    _brm_concat_member_vectors(left, right)
+function _brm_concat_member_vectors(left, right)
+    T = promote_type(_brm_member_eltype(left), _brm_member_eltype(right))
+    vcat(_brm_member_vectors(T, left), _brm_member_vectors(T, right))
+end
+_brm_member_eltype(x::_BRMScalarMembers) = eltype(x)
+_brm_member_eltype(x::_BRMVectorMembers) = eltype(eltype(x))
+_brm_member_vectors(::Type{T}, x::_BRMScalarMembers) where {T} = Vector{T}[T[v] for v in x]
+_brm_member_vectors(::Type{T}, x::_BRMVectorMembers) where {T} = convert(Vector{Vector{T}}, x)
+
 # A numeric cell axis is also the provenance for rebuilding columns from a new
 # table of records. It is an ordinary integer vector to the two emitters.
 struct _BRMCollectionAxis <: AbstractVector{Int}

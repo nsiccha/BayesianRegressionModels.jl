@@ -83,10 +83,15 @@ function check_gather(label, data)
         constrained = BridgeStan.param_constrain(stan.model, stan_u; include_tp=true)
         draws = rk_draw_values(rk, reshape(u, :, 1), (:values, :shared))
         @test only(draws.shared) ≈ means(stan_u)
+        # Beside a vector member, a scalar member's gathered value is a
+        # length-one vector, as in SBBRMI's ragged join.
+        mixed = length(unique(record.series for record in data.records)) > 1
         for (j, record) in enumerate(data.records)
             expected_value = stan_u[indices[record.id]] .+
                 (record.series ? record.grid : record.level)
-            @test only(draws.values)[j] ≈ expected_value
+            gathered_value = only(draws.values)[j]
+            @test gathered_value isa (record.series || mixed ? AbstractVector : Real)
+            @test gathered_value ≈ (mixed && !record.series ? [expected_value] : expected_value)
             member = rk_draw_values(rk, reshape(u, :, 1), (:value,);
                 submodel=(:channels, record.id))
             @test only(member.value) ≈ expected_value
@@ -118,14 +123,14 @@ function check_gather(label, data)
         means(brm_rk_point_to_stan(transport, point), changed)
 end
 
-@stestset "A parent gathers keyed values at its subject index" begin
-    vector_b = (; id=:b, series=true, grid=[.5, 1.2, -.3], level=0.)
-    vector_a = (; id=:a, series=true, grid=[1.1, -.2, .7], level=0.)
-    scalar_b = (; id=:b, series=false, grid=Float64[], level=.4)
-    scalar_a = (; id=:a, series=false, grid=Float64[], level=-.3)
+# One testset per layout, so a filter can select a single one.
+let vector_b = (; id=:b, series=true, grid=[.5, 1.2, -.3], level=0.),
+        vector_a = (; id=:a, series=true, grid=[1.1, -.2, .7], level=0.),
+        scalar_b = (; id=:b, series=false, grid=Float64[], level=.4),
+        scalar_a = (; id=:a, series=false, grid=Float64[], level=-.3)
     for (label, records) in (("mixed", [vector_b, scalar_a]),
             ("vectors", [vector_b, vector_a]), ("scalars", [scalar_b, scalar_a]))
-        @testset "$label" begin
+        @stestset "A parent gathers keyed values at its subject index ($label)" begin
             check_gather(label, (; records, weights=[.3, .8], y=[.2, -.1, .3]))
         end
     end
@@ -136,10 +141,11 @@ end
     vector_a = (; id=:a, series=true, grid=[1.1, -.2, .7], level=0.)
     scalar_b = (; id=:b, series=false, grid=Float64[], level=.4)
     scalar_a = (; id=:a, series=false, grid=Float64[], level=-.3)
-    # A heterogeneous collection deliberately exposes a Vector{Any} on RK;
-    # its density and gradients are checked above under the normal setting.
+    # A mixed collection gives each scalar member a length-one vector, so its
+    # gathered field has one concrete element type.
     for (label, records) in (("scalars", [scalar_b, scalar_a]),
-            ("vectors", [vector_b, vector_a]))
+            ("vectors", [vector_b, vector_a]), ("mixed", [vector_b, scalar_a]),
+            ("mixed reversed", [scalar_b, vector_a]))
         @testset "$label" begin
             ReactiveKernels._with_type_stability(:error, :all) do
                 brmi = gathered((; records, weights=[.3, .8], y=[.2, -.1, .3]))
@@ -319,7 +325,11 @@ end
                  (; id=:left, weight=.2, y=[-.2, .3, .1])]
     data = (; subject, subjects=collect(1:3), records, endpoints)
     brmi = parent_pipeline(data)
-    rk, problem = consumer_problem(brmi)
+    # One member per subject from the shared block beside a scalar member,
+    # prepared under strict type stability.
+    rk, problem = ReactiveKernels._with_type_stability(:error, :all) do
+        consumer_problem(brmi)
+    end
     sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
     @test only(ranef_blocks(sb)).n_terms == 2
     stan = consumer_stan(brmi, "collection-parent-pipeline"; mod=@__MODULE__)
