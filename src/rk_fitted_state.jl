@@ -410,7 +410,7 @@ Base.@nospecializeinfer _rk_fitted_replay(@nospecialize(template::BRMI),
 # tuple whose type spells the backend's model (snag `brm-methods-spec-39436695`).
 Base.@nospecializeinfer function _rk_fitted_replay_of(@nospecialize(template::BRMI),
         @nospecialize(new_data), state::BRMFittedState, @nospecialize(resample_groups),
-        @nospecialize(held_out), @nospecialize(previous), prefix, coordinates)
+        @nospecialize(held_out), @nospecialize(previous::Union{Nothing,RKBRMI}), prefix, coordinates)
     coordinates in (:fixed, :growing) || throw(ArgumentError(
         "$prefix: unsupported coordinate replay mode $coordinates"))
     coordinates === :growing && !isempty(resample_groups) && throw(ArgumentError(
