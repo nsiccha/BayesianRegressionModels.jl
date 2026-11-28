@@ -25,9 +25,11 @@ instead of failing at run time.
   cells of a fit, so the stored statement is now read in the current form. A
   state those versions exported replays as before.
 - A fitted state that is refused names its first statement that differs in
-  the spelling its program was exported in. For a state that binds the cell
-  arithmetic helpers of 0.2.358 and earlier, the message before named the
-  `stan_add` definition this BRM adds, whatever statement differed.
+  the spelling its program was exported in. Before, the message named a
+  definition this BRM writes differently, whatever statement differed: the
+  `stan_add` definition for a state that binds the cell arithmetic helpers of
+  0.2.358 and earlier, and the `brm_grouped_hsgp` definition for a state with
+  a grouped HSGP (`hsgp(x; by=g)`) exported before 0.2.363.
 
 ## 0.2.426
 

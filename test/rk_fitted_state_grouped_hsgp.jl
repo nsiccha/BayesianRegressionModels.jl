@@ -51,6 +51,23 @@ const plate_data = (; subject=["s1", "s2", "s3"], weight=[61.0, 75.0, 68.0],
     time=[[0.5, 1.0], [0.5], [1.0, 2.0, 3.0]], y=[[0.9, 0.7], [1.4], [0.6, 0.3, 0.2]])
 plate_fixture(name) = joinpath(@__DIR__, "fitted_state_programs", "labelled_plate_$(name)_0.2.351.jls")
 
+# A subject plate that observes its rows of a long table through a `groups`
+# binding, under a grouped HSGP over those rows whose index 0.2.351 wrote with
+# its labels: the spelling before 0.2.363.
+readings(d) = @brm d begin
+    sigma ~ Exponential(1)
+    base ~ 1 + (1 | subject)
+    drift ~ 0 + hsgp(visit_time; by=visit_subject, k=2)
+    visit_rows = groups(visit_subject => subject)
+    @plate for i in eachindex(base)
+        level[visit_rows[i]] ~ Normal(base[i] .+ drift[visit_rows[i]], sigma)
+    end
+end
+const readings_data = (; subject=["a", "b", "c", "d"],
+    visit_subject=["a", "b", "a", "c", "d", "b", "c", "a", "d", "c", "b", "d"],
+    visit_time=[0.0, 0.5, 1.0, 0.2, 0.1, 1.5, 1.8, 2.5, 2.2, 3.0, 2.9, 3.4],
+    level=[0.1, 0.9, 0.4, -0.2, 1.4, 0.6, 0.0, 0.8, 1.7, -0.4, 1.1, 1.5])
+
 if ARGS == ["--write-fixture"]
     @assert pkgversion(BRM) == v"0.2.351"
     serialize(fixture, brm_fitted_state(RKBRMI(curves(training))))
@@ -58,6 +75,7 @@ if ARGS == ["--write-fixture"]
     for (name, build) in pairs(plate_models)
         serialize(plate_fixture(name), brm_fitted_state(RKBRMI(build(plate_data))))
     end
+    serialize(plate_fixture(:readings), brm_fitted_state(RKBRMI(readings(readings_data))))
     exit()
 end
 
@@ -209,5 +227,44 @@ end
             @test occursin("fitted: " * first(split(changed.program[k], '\n')), e.msg)
             @test !occursin("stan_add(x, y)", e.msg)
         end
+    end
+
+    # A state that also holds a grouped HSGP in the spelling before 0.2.363 is
+    # compared with that spelling re-emitted, and its plate is read there too.
+    # Refused for its plate, such a state named the `brm_grouped_hsgp`
+    # definition, which this BRM writes with one more argument.
+    @testset "with a grouped HSGP" begin
+        old = deserialize(plate_fixture(:readings))
+        current = brm_fitted_state(RKBRMI(readings(readings_data)))
+        @test any(contains("brm_grouped_hsgp(axis, "), old.program)
+        @test any(contains("brm_grouped_hsgp(fitted_levels, axis, "), current.program)
+        # The observation is the one plate this BRM writes differently: the
+        # same cell, looped over the subjects.
+        plate = "statement: #= line 0 =# @plate(for i = eachindex("
+        k = findfirst(s -> startswith(s, plate) && !(s in current.program), old.program)
+        @test k !== nothing
+        @test !startswith(old.program[k], over_cells)
+        @test over_cells * last(split(old.program[k], '\n'; limit=2)) in current.program
+
+        # Two of the fitted subjects in another order, with other visits.
+        design = (; subject=["c", "a"], visit_subject=["a", "c", "a"],
+            visit_time=[0.4, 1.2, 2.0], level=[0.3, -0.1, 0.7])
+        replay = RKBRMI(readings(design), old)
+        oracle = RKBRMI(readings(design), current)
+        @test BRM._rk_layout_coordinate_names(replay) == old.coordinates
+        draw = collect(range(-0.6, 0.9; length=length(old.coordinates)))
+        @test value_at(replay, draw, :base) == value_at(oracle, draw, :base)
+        @test value_at(replay, draw, :drift) == value_at(oracle, draw, :drift)
+        @test brm_fitted_state(replay).program == current.program
+        @test old.program == deserialize(plate_fixture(:readings)).program
+
+        changed = deepcopy(old)
+        changed.program[k] = replace(changed.program[k], "Normal.(" => "Cauchy.("; count=1)
+        @test changed.program[k] != old.program[k]
+        e = refusal(() -> RKBRMI(readings(design), changed))
+        @test e isa ErrorException
+        @test occursin("changes the fitted RK program", e.msg)
+        @test occursin("fitted: " * first(split(changed.program[k], '\n')), e.msg)
+        @test !occursin("brm_grouped_hsgp(", e.msg)
     end
 end
