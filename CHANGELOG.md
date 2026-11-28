@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.427
+
+- `hsgp(east, north, month; periodic=:month, period=12, k=(kx, ky, kh),
+  domain=box, at=cell_pos)` adds a separable spatial squared-exponential ×
+  periodic-season prior. The spatial basis and optional intercept projection
+  are evaluated on distinct locations; observation rows read those fields
+  through `at=` and combine them with a small Fourier basis. This avoids an
+  observation-sized tensor-product basis. The term has separate spatial and
+  periodic length scales, supports adaptive centring of its basis weights,
+  and works in the RK and Stan backends. It is a new prior, so it does not
+  reproduce two independent first-harmonic spatial fields.
+
 ## 0.2.426
 
 - `hsgp(...; at=position)` evaluates its basis and centring projection on a
