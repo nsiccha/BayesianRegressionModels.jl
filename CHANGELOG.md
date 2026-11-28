@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.427
+
+- `RKBRMI(builder(design), state)` replays a fitted state exported before
+  0.2.416 for a model whose `@plate` observes one response array per cell
+  (`y[i] ~ normal(loc[i], sigma)`) and has labelled cells, for example
+  because it reads a per-subject predictor or a `groups(...)` join. 0.2.416
+  and every later version before this one refused such a state: 0.2.416 made
+  that observation loop over the column that labels the cells
+  (`eachindex(subject)`) where it looped over the response (`eachindex(y)`),
+  and the replay compares the stored program text. Both loops visit the same
+  cells of a fit, so the stored statement is now read in the current form. A
+  state those versions exported replays as before.
+- A fitted state that is refused names its first statement that differs in
+  the spelling its program was exported in. For a state that binds the cell
+  arithmetic helpers of 0.2.358 and earlier, the message before named the
+  `stan_add` definition this BRM adds, whatever statement differed.
+
 ## 0.2.426
 
 - `hsgp(...; at=position)` evaluates its basis and centring projection on a

@@ -25,10 +25,39 @@ offsets(d) = @brm d begin
 end
 const cell_data = (; x=[[0.1, 0.2], [1.0]], y=[[0.3, 0.4], [0.8]])
 
+# One response array per subject, observed in a plate the per-subject predictor
+# labels by `subject`. `shifted_visits` adds an undotted `+`, which 0.2.351
+# emitted as a bound helper.
+visits(d) = @brm d begin
+    sigma ~ Exponential(1)
+    rate ~ 1 + weight + (1 | subject)
+    effect(rate, Intercept) ~ Normal(0, 1)
+    @plate for i in eachindex(time)
+        loc[i] = exp.(-exp(rate[i]) .* time[i])
+        y[i] ~ normal(loc[i], sigma)
+    end
+end
+shifted_visits(d) = @brm d begin
+    sigma ~ Exponential(1)
+    rate ~ 1 + weight + (1 | subject)
+    effect(rate, Intercept) ~ Normal(0, 1)
+    @plate for i in eachindex(time)
+        loc[i] = exp.(-exp(rate[i] + 0.5) .* time[i])
+        y[i] ~ normal(loc[i], sigma)
+    end
+end
+const plate_models = (; visits, shifted_visits)
+const plate_data = (; subject=["s1", "s2", "s3"], weight=[61.0, 75.0, 68.0],
+    time=[[0.5, 1.0], [0.5], [1.0, 2.0, 3.0]], y=[[0.9, 0.7], [1.4], [0.6, 0.3, 0.2]])
+plate_fixture(name) = joinpath(@__DIR__, "fitted_state_programs", "labelled_plate_$(name)_0.2.351.jls")
+
 if ARGS == ["--write-fixture"]
     @assert pkgversion(BRM) == v"0.2.351"
     serialize(fixture, brm_fitted_state(RKBRMI(curves(training))))
     serialize(cell_fixture, brm_fitted_state(RKBRMI(offsets(cell_data))))
+    for (name, build) in pairs(plate_models)
+        serialize(plate_fixture(name), brm_fitted_state(RKBRMI(build(plate_data))))
+    end
     exit()
 end
 
@@ -125,4 +154,60 @@ end
     changed.program[i] = replace(changed.program[i], "_rk_kernel_stan_sub(" =>
         "_rk_kernel_stan_add("; count=1)
     @test_throws "changes the fitted RK program" RKBRMI(offsets(design), changed)
+end
+
+# 0.2.416 made a labelled plate's observation of one response array per cell
+# loop over the column that labels the cells, where it looped over the response
+# (snag `data-free-replay-5d3abb2c`: a downstream simulator's saved fits stopped
+# loading). Both loops visit the same cells of a fit, so the stored statement is
+# read in this BRM's form (`_rk_stored_program`), alone and together with the
+# cell arithmetic helpers of the same export.
+@testset "format-2 labelled plates from BRM 0.2.351" begin
+    refusal(f) = try
+        f(); nothing
+    catch e
+        e
+    end
+    over_response = "statement: #= line 0 =# @plate(for i = eachindex(y)\n"
+    over_cells = "statement: #= line 0 =# @plate(for i = eachindex(subject)\n"
+    for (name, build) in pairs(plate_models)
+        old = deserialize(plate_fixture(name))
+        current = brm_fitted_state(RKBRMI(build(plate_data)))
+        @test old.format == current.format == 2
+        # Only the loop of the observation differs, and the helpers where the
+        # cell adds.
+        k = findfirst(startswith(over_response), old.program)
+        @test k !== nothing
+        @test !any(startswith(over_response), current.program)
+        @test replace(old.program[k], over_response => over_cells) in current.program
+        @test ("binding: _rk_kernel_stan_add" in old.program) == (name === :shifted_visits)
+        @test any(contains("stan_add(x, y)"), current.program) == (name === :shifted_visits)
+
+        # Two of the fitted subjects in another order, with other visits.
+        design = (; subject=["s3", "s1"], weight=[68.0, 61.0],
+            time=[[0.25], [1.5, 2.5]], y=[[0.8], [0.5, 0.1]])
+        replay = RKBRMI(build(design), old)
+        oracle = RKBRMI(build(design), current)
+        @test BRM._rk_layout_coordinate_names(replay) == old.coordinates
+        @test isequal(rk_bound_data(replay), rk_bound_data(oracle))
+        draw = collect(range(-0.6, 0.9; length=length(old.coordinates)))
+        @test value_at(replay, draw, :loc) == value_at(oracle, draw, :loc)
+        @test brm_fitted_state(replay).program == current.program
+        # Replay does not modify the caller's saved state.
+        @test old.program == deserialize(plate_fixture(name)).program
+
+        # The observation is still compared: another law, or a loop over a
+        # column that does not label the cells, is refused by that statement,
+        # in the spelling the state was exported in.
+        for (before, after) in (("Normal.(", "Cauchy.("), ("eachindex(y)", "eachindex(time)"))
+            changed = deepcopy(old)
+            @test occursin(before, changed.program[k])
+            changed.program[k] = replace(changed.program[k], before => after; count=1)
+            e = refusal(() -> RKBRMI(build(design), changed))
+            @test e isa ErrorException
+            @test occursin("changes the fitted RK program", e.msg)
+            @test occursin("fitted: " * first(split(changed.program[k], '\n')), e.msg)
+            @test !occursin("stan_add(x, y)", e.msg)
+        end
+    end
 end
