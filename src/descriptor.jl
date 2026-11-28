@@ -2798,6 +2798,12 @@ function _brm_term_owner_matches(plan, ::typeof(hsgp), t, output)
     owner = output.declaration
     isnothing(owner) && return false
     axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
+    if haskey(getkwargs(t), :periodic)
+        phi_space = get(owner.keywords, :PHI_space, nothing)
+        preproc = get(plan.preproc, phi_space, nothing)
+        return !isnothing(preproc) &&
+            preproc.kind === :space_periodic_hsgp && preproc.raw_ref == axes
+    end
     phi = get(owner.keywords, :PHI, nothing)
     if phi isa Symbol
         preproc = get(plan.preproc, phi, nothing)
@@ -2813,6 +2819,8 @@ _brm_term_parameter_bindings(::typeof(mo), _t) =
 _brm_term_parameter_bindings(::typeof(mo1), _t) =
     (; simplex=:simplex_incr)
 function _brm_term_parameter_bindings(::typeof(hsgp), t)
+    haskey(getkwargs(t), :periodic) &&
+        return (; length_scale=:rho, sd=:sigma, basis_weights=:beta_raw)
     rho = _sb_gp_iso(getkwargs(t), :hsgp) ? :rho_iso : :rho
     haskey(getkwargs(t), :by) && return (; length_scale=rho, sd=:sigma)
     n_basis = _brm_term_coordinate_count(hsgp, t, Val(:basis_weights), nothing)
@@ -2931,13 +2939,15 @@ _brm_output_coordinate_count(output::BRMOutput) =
 _brm_term_coordinate_count(_f, _t, _parameter, output) =
     _brm_output_coordinate_count(output)
 _brm_term_coordinate_count(::typeof(hsgp), t, ::Val{:length_scale}, _output) =
-    _sb_gp_iso(getkwargs(t), :hsgp) ? 1 : length(getargs(t))
+    haskey(getkwargs(t), :periodic) ? 2 :
+    (_sb_gp_iso(getkwargs(t), :hsgp) ? 1 : length(getargs(t)))
 _brm_term_coordinate_count(::typeof(hsgp), _t, ::Val{:sd}, _output) = 1
 function _brm_term_coordinate_count(::typeof(hsgp), t,
                                     ::Val{:basis_weights}, _output)
     kw = getkwargs(t)
     K, _ = _sb_hsgp_options(kw, length(getargs(t)))
     # The periodic basis carries a cosine AND a sine column per harmonic.
+    haskey(kw, :periodic) && return 2 * prod(K)
     _sb_gp_cov(kw, :hsgp) === :periodic ? 2 * only(K) : prod(K)
 end
 

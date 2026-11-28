@@ -756,9 +756,13 @@ function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
     for r in _rk_coordinate_records(rk)
         r.kind === :hsgp && !_rk_hsgp_level_mapped(rk, r) || continue
         o = _rk_adaptive_hsgp_term(rk, r.declaration).options
-        periodic = get(o, :cov, :exp_quad) === :periodic
+        covariance = get(o, :cov, :exp_quad)
+        periodic = covariance === :periodic
+        space_periodic = covariance === :space_periodic
         modes = Int.(rk.plan.columns[o.modes])
-        B = periodic ? 2 * only(modes) : prod(modes)
+        B = periodic ? 2 * only(modes) :
+            space_periodic ? prod(modes) * 2 * only(Int.(rk.plan.columns[o.period_modes])) :
+            prod(modes)
         G = r.grouped ? length(r.levels) : 1
         weight_names = r.grouped ?
             [string(r.declaration, ".", r.locals.weights, ".", g, ".", b) for b in 1:B, g in 1:G] :
@@ -778,7 +782,7 @@ function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
         sd_carrier = r.grouped ? r.locals.scales.sd : :sigma
         rho_carriers = r.grouped ? r.locals.scales.length_scale :
             _rk_hsgp_length_carriers(_rk_adaptive_hsgp_term(rk, r.declaration))
-        axes_n = r.iso ? 1 : length(r.axes)
+        axes_n = _rk_hsgp_length_axes(_rk_adaptive_hsgp_term(rk, r.declaration))
         # A known length scale leaves no carrier; its value is the term's prior.
         rho_carriers = rho_carriers === nothing ?
             (axes_n == 1 ? (:rho_iso,) : Tuple(Symbol(:rho_, j) for j in 1:axes_n)) :
@@ -791,7 +795,13 @@ function _rk_adaptive_hsgp_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_na
         rhos = [_rk_adaptive_hsgp_hyper(pos, bounds, names, r, rho_carriers[j],
                     o.rho_prior, j, "length scale") for j in 1:axes_n]
         (sigma === nothing || any(isnothing, rhos)) && continue
-        omega2, harmonics = if periodic
+        omega2, harmonics = if space_periodic
+            period_modes = Int.(rk.plan.columns[o.period_modes])
+            widths = [last(fit) for fit in o.fixed_fits]
+            spatial_omega = _rk_adaptive_hsgp_omega2(modes, widths)
+            h = _brm_hsgp_periodic_harmonics(only(period_modes))
+            repeat(spatial_omega, length(h), 1), repeat(Float64.(h); inner=prod(modes))
+        elseif periodic
             Matrix{Float64}(undef, 0, 0), Vector{Float64}(_brm_hsgp_periodic_harmonics(only(modes)))
         else
             _rk_adaptive_hsgp_omega2(modes, _rk_adaptive_hsgp_widths(rk, r, o)), Float64[]

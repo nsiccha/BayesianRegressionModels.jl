@@ -74,6 +74,7 @@ include("level_correlation.jl")
 include("preparation_terms.jl")
 include("car_separation.jl")
 include("preparation_gp.jl")
+include("preparation_space_periodic.jl")
 include("preparation_gmrf.jl")
 include("preparation_cell_formulas.jl")
 include("preparation_structured.jl")
@@ -91,6 +92,7 @@ include("rk_values.jl")
 include("rk_r2d2.jl")
 include("rk_hsgp_graph.jl")
 include("rk_components.jl")
+include("rk_space_periodic.jl")
 include("rk_observation_source.jl")
 include("rk_callable_terms.jl")
 include("rk_kernel_values.jl")
@@ -489,7 +491,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        _sb_hsgp_by_multigroup_coordinates_lambda, _sb_hsgp_by_aniso_multigroup_coordinates_lambda,
        _sb_hsgp_by_multigroup_inducing_lambda, _sb_hsgp_by_aniso_multigroup_inducing_lambda,
        _sb_hsgp_latent, _sb_hsgp_latent_orthogonal, _sb_hsgp_latent_centered,
-       _sb_gp_periodic, _sb_hsgp_periodic,
+       _sb_gp_periodic, _sb_hsgp_periodic, _sb_hsgp_space_periodic,
        brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_log_sqrt_spd, brm_hsgp_multigroup_weights,
        brm_hsgp_multigroup_coordinate_weights, brm_multigroup_coordinate_grid,
        brm_hsgp_multigroup_inducing_weights, brm_multigroup_inducing_resolution,
@@ -499,6 +501,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        brm_hsgp_orthogonalize_linear, brm_hsgp_center_columns,
        brm_hsgp_by_hyper_sqrt_spd, brm_hsgp_by_level_rows,
        brm_periodic_cov, brm_hsgp_periodic_sqrt_spd,
+       brm_hsgp_space_periodic_rows,
        _sb_horseshoe, _sb_horseshoe_scaled,
        _sb_mi_normal, mi_merge,
        zero_inflated_poisson, zero_inflated_poisson_lpmf,

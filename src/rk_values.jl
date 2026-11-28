@@ -551,8 +551,10 @@ _rk_ast_replace_floor_marker(value, _floor) = value
 # periodic or has a single axis, and otherwise one scalar `rho_j` per axis
 # (`_rk_ast_hsgp_component!`). Its `rho` vector only assembles those scalars,
 # so a start or transport addresses these carriers, never `rho`.
-_rk_hsgp_length_axes(term) = get(term.options, :cov, :exp_quad) === :periodic ||
-    term.options.iso ? 1 : length(term.columns)
+_rk_hsgp_length_axes(term) = get(term.options, :cov, :exp_quad) === :space_periodic ?
+    (term.options.iso ? 2 : length(term.columns)) :
+    (get(term.options, :cov, :exp_quad) === :periodic || term.options.iso ?
+        1 : length(term.columns))
 
 function _rk_hsgp_length_carriers(term)
     axes = _rk_hsgp_length_axes(term)
@@ -564,6 +566,8 @@ end
 # and the name of its fitted interval (`_rk_ast_hsgp_fit!`; `nothing` when it
 # has none).
 function _rk_ast_value_hsgp(definitions, term, taken, bindings; collection_cell=false)
+    get(term.options, :cov, :exp_quad) === :space_periodic &&
+        return _rk_ast_value_space_periodic_hsgp(definitions, term, taken, bindings)
     stmts = Expr[]
     term = _rk_ast_hsgp_settings!(stmts, term, taken)
     options = term.options

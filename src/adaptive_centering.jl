@@ -1458,6 +1458,11 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
             getf(entry.value) === hsgp || continue
             _adaptive_term_generated(hsgp, descriptor, logical, entry) && continue
             kw = getkwargs(entry.value)
+            if haskey(kw, :periodic)
+                _adaptive_space_periodic_hsgp_block!(
+                    out, descriptor, plan, unc_names, logical, entry, kw)
+                continue
+            end
             covariance = _sb_gp_cov(kw, :hsgp)
             if covariance === :periodic
                 _adaptive_periodic_hsgp_block!(
@@ -1537,6 +1542,38 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
         "BRM adaptive centering: emitted HSGP blocks claim overlapping " *
         "unconstrained coordinates; refusing an ambiguous transform.",
     )
+    out
+end
+
+function _adaptive_space_periodic_hsgp_block!(
+        out, descriptor, plan, unc_names, logical, entry, kw)
+    weights = brm_term_coordinates(descriptor, logical, unc_names;
+        term=entry.term, parameter=:basis_weights)
+    owner = weights.output.declaration
+    isnothing(owner) && error(
+        "BRM adaptive centering: spatial × periodic HSGP has no declaration owner")
+    owner.family === :_sb_hsgp_space_periodic || error(
+        "BRM adaptive centering: unexpected spatial × periodic HSGP family")
+    isempty(weights.output.constraints) || error(
+        "BRM adaptive centering: spatial × periodic weights are constrained")
+    rho, sigma = _adaptive_hsgp_hypers(
+        descriptor, logical, unc_names, entry, owner)
+    length(rho.coordinates) == 2 || error(
+        "BRM adaptive centering: spatial × periodic HSGP needs two length scales")
+    omega = get(plan.data, owner.keywords.omega2_space, nothing)
+    h = get(plan.data, owner.keywords.harmonics, nothing)
+    omega isa AbstractMatrix{<:Real} && h isa AbstractVector{<:Real} || error(
+        "BRM adaptive centering: spatial × periodic spectral data are missing")
+    M = size(omega, 1)
+    B = M * length(h)
+    length(weights.coordinates) == B || error(
+        "BRM adaptive centering: spatial × periodic weight count differs from basis")
+    push!(out, _HSGPAdaptiveCenteringBlock(logical, entry.term,
+        _brm_hsgp_centeredness(kw, B), collect(weights.coordinates),
+        rho.coordinates, rho.lower, rho.upper,
+        only(sigma.coordinates), only(sigma.lower), only(sigma.upper),
+        repeat(Matrix{Float64}(omega), length(h), 1),
+        repeat(Float64.(h); inner=M)))
     out
 end
 
@@ -2070,6 +2107,22 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
                                   block::_HSGPAdaptiveCenteringBlock,
                                   basis::Int)
     1 <= basis <= length(block.effects) || throw(BoundsError(block.effects, basis))
+    if !isempty(block.harmonics) && !isempty(block.omega2)
+        length(block.length_scales) == 2 || error(
+            "BRM adaptive centering: spatial × periodic HSGP needs two length scales")
+        sigma = _adaptive_hsgp_hyper(x, block.sd, block.sd_lower, block.sd_upper)
+        rho_space = _adaptive_hsgp_hyper(x, block.length_scales[1],
+            block.length_scale_lower[1], block.length_scale_upper[1])
+        rho_period = _adaptive_hsgp_hyper(x, block.length_scales[2],
+            block.length_scale_lower[2], block.length_scale_upper[2])
+        value = log(sigma)
+        for axis in axes(block.omega2, 2)
+            value = _adaptive_hsgp_axis_log_scale(
+                value, rho_space, block.omega2[basis, axis])
+        end
+        return _adaptive_hsgp_floor(value +
+            _brm_hsgp_periodic_log_scale(block.harmonics[basis], 1.0, rho_period))
+    end
     if !isempty(block.harmonics)
         length(block.length_scales) == 1 || error(
             "BRM adaptive centering: periodic HSGP `$(block.term)` owns " *

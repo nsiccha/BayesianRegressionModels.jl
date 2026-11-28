@@ -8,6 +8,7 @@ and the predictions you need.
 | :--- | :--- | :--- |
 | Areas with known neighbors | `car(area; edges=(from,to), type=:bym2)` | Graph field plus independent area effects |
 | Smooth continuous coordinates | `hsgp(east,north; k=(kx,ky))` | Fixed Hilbert basis with `kx*ky` weights |
+| Spatial field through a repeating season | `hsgp(east,north,month; periodic=:month, period=12, k=(kx,ky,kh), domain=box, at=cell_pos)` | Separable spatial and Fourier bases with `2kx*ky*kh` weights |
 | Points without a time axis | `gmrf((east,north); mesh=...)` | Triangular-mesh Matérn field |
 | Points evolving over time | `gmrf((east,north),time; mesh=...)` | Triangular-mesh Matérn field with OU evolution |
 | Sparse irregular position–time reads | `gmrf((east,north),time; neighbors=m)` | Local Gaussian conditionals on the observed states |
