@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.421
+
+- `hsgp(...; at=position)` evaluates its basis and centring projection on a
+  distinct field table, then reads the finished field at observation rows.
+  `multiply=column` scales those output rows by a numeric varying coefficient.
+  Both options work in RKBRMI and SBBRMI, including the periodic one-axis HSGP;
+  they keep the field's basis size and centring measure independent of repeated
+  observations.
+
 ## 0.2.420
 
 - `reprocess(::SBBRMI, new_data)` can forecast an `Ordinal` response with

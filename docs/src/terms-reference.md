@@ -68,6 +68,9 @@ on cells and `cell_pos` on observations, use
 `orthogonal_to=:intercept` projection stay on the cell rows, so repeating
 observations does not change the centring measure or duplicate basis work.
 `at=` works on ungrouped raw-data HSGPs, including a one-axis periodic term.
+`multiply=column` scales each output row by a finite numeric data column,
+after the `at=` lookup if present. This spells a numeric varying-coefficient
+smooth while keeping the basis and its centring on the field's own rows.
 
 For a periodic kernel the covariance is
 ``\sigma^2\exp[-2\sin^2(\pi(x-x')/p)/\rho^2]``. Its length is in dimensionless

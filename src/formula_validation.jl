@@ -61,13 +61,13 @@ end
 
 function _check_term_kwargs(::typeof(hsgp), kw)
     allowed = (:cov, :iso, :k, :c, :by, :cor, :domain, :orthogonal_to, :period,
-               :centeredness, :extrapolate, :anchor, :rows, :at)
+               :centeredness, :extrapolate, :anchor, :rows, :at, :multiply)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
         "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
         "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `cor`, `domain`, " *
         "`orthogonal_to`, `period`, `centeredness`, `extrapolate`, `anchor`, " *
-        "`rows`, and `at`")
+        "`rows`, `at`, and `multiply`")
     # `cor=` correlates the levels of `by` (src/level_correlation.jl).
     haskey(kw, :cor) && !haskey(kw, :by) && error(
         "hsgp: `cor=` correlates the levels of the `by=` grouping; give " *

@@ -5519,11 +5519,13 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     orthogonal = get(state, :orthogonal, nothing)
     axes = Tuple(prepared.source)
     at = get(state, :at, nothing)
+    multiply = get(state, :multiply, nothing)
     if at !== nothing
         # The field axes stay on their own table; only the finished field is
         # read on the observation table. This preserves per-field centring.
         columns[at.source] = data[at.source]
     end
+    multiply === nothing || (columns[multiply.source] = data[multiply.source])
     for axis in axes
         state.latent && continue
         _rk_plan_spline_axis!(axis, target, "hsgp", data, columns)
@@ -5586,7 +5588,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         mask_source=isnothing(rows) ? nothing : rows.source,
         hyper_plans, rho_stated, sigma_stated, fit_axes, fit_mask,
         extrapolate=get(state, :extrapolate, :error),
-        at=at === nothing ? nothing : at.source)
+        at=at === nothing ? nothing : at.source,
+        multiply=multiply === nothing ? nothing : multiply.source)
     # The basis sizes and the numeric settings are inputs of the program, never
     # numbers it spells (user principle `0ikeidi`): `modes` holds each axis's
     # basis count, `settings` each axis's boundary factor `c`, then a fixed

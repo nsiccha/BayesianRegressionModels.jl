@@ -16819,10 +16819,25 @@ function _sb_hsgp_at(kw, n::Int)
     source
 end
 
-_sb_hsgp_gather!(stmts, field::Symbol, at::Nothing) = field
-function _sb_hsgp_gather!(stmts, field::Symbol, at::Symbol)
-    result = Symbol(field, :_at)
-    push!(stmts, Expr(:(=), result, Expr(:ref, field, at)))
+function _sb_hsgp_multiply(kw, n::Int)
+    haskey(kw, :multiply) || return nothing
+    source, raw = _sb_inner_data(:hsgp, kw.multiply)
+    raw isa AbstractVector{<:Real} && length(raw) == n && all(isfinite, raw) || error(
+        "sbimpl: `hsgp(...; multiply=$source)` needs $n finite numeric values")
+    source
+end
+
+function _sb_hsgp_gather!(stmts, field::Symbol, at, multiply)
+    result = field
+    if at !== nothing
+        result = Symbol(field, :_at)
+        push!(stmts, Expr(:(=), result, Expr(:ref, field, at)))
+    end
+    if multiply !== nothing
+        scaled = Symbol(field, :_multiplied)
+        push!(stmts, Expr(:(=), scaled, Expr(:call, :.*, result, multiply)))
+        result = scaled
+    end
     result
 end
 
@@ -16921,9 +16936,11 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     all(v -> length(v) == n, axes) || error(
         "sbimpl: `hsgp(x...)` axes must have equal lengths (got $(length.(axes)))")
     at = _sb_hsgp_at(kw, n)
+    multiply = _sb_hsgp_multiply(kw, isnothing(at) ? n : length(data[at]))
 
     if haskey(kw, :by)
-        at === nothing || error("sbimpl: `hsgp(...; at=...)` with `by=` is not supported")
+        (at === nothing && multiply === nothing) || error(
+            "sbimpl: `hsgp(...; at=.../multiply=...)` with `by=` is not supported")
         partial && error(
             "sbimpl: partial centering is an ungrouped HSGP weight geometry " *
             "and cannot be combined with `by=`")
@@ -17071,7 +17088,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         _sb_term_model_call(submodel, term_overrides, t; data, stem=col_name, PHI=PHI_name,
                             omega2=omega2_name, rho_lower=rho_lower_name)
     push!(stmts, Expr(:call, :~, col_name, call))
-    _sb_hsgp_gather!(stmts, col_name, at)
+    _sb_hsgp_gather!(stmts, col_name, at, multiply)
 end
 
 # `hsgp(x; cov=:periodic, period=...)`: one raw axis, `2k` cosine/sine
@@ -17108,6 +17125,8 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     axis = _sb_hsgp_axis_values(x, only(raw), mask)
     all(isfinite, axis) || error("sbimpl: `hsgp($x)` requires finite values")
     at = _sb_hsgp_at(kw, length(axis))
+    multiply = _sb_hsgp_multiply(kw,
+        isnothing(at) ? length(axis) : length(data[at]))
 
     # Carrier disambiguation follows the mainline `hsgp` path: the first
     # `hsgp(x; cov=:periodic)` keeps `hsgp_<x>`; a repeat over the same axis
@@ -17136,7 +17155,7 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; data, stem=col_name, PHI=PHI_name,
         harmonics=harmonics_name, rho_lower=rho_lower_name)))
-    _sb_hsgp_gather!(stmts, col_name, at)
+    _sb_hsgp_gather!(stmts, col_name, at, multiply)
 end
 
 function _sb_term_group_block(::typeof(hsgp), call)

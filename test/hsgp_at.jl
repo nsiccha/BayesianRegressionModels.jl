@@ -24,6 +24,17 @@ const periodic_explicit = @brm begin
     mu = field[month_pos]
     y ~ Normal(mu, 1.0)
 end
+const multiplied_mapped = @brm begin
+    mu ~ 0 + hsgp(x, z; k=(3, 4), domain=((-2.0, 2.0), (-2.0, 2.0)),
+                  orthogonal_to=:intercept, at=pos, multiply=wave)
+    y ~ Normal(mu, 1.0)
+end
+const multiplied_explicit = @brm begin
+    field ~ 0 + hsgp(x, z; k=(3, 4), domain=((-2.0, 2.0), (-2.0, 2.0)),
+                     orthogonal_to=:intercept)
+    mu = field[pos] .* wave
+    y ~ Normal(mu, 1.0)
+end
 
 function compare_mapped(a, b, data)
     ra, rb = RKBRMI(a(data)), RKBRMI(b(data))
@@ -63,6 +74,14 @@ end
 @testset "periodic HSGP position map" begin
     data = (; month=[1.0, 4.0, 7.0, 10.0], month_pos=[1, 2, 4, 3, 1, 3], y=zeros(6))
     compare_mapped(periodic_mapped, periodic_explicit, data)
+end
+
+@testset "observation multiplier preserves field density and gradient" begin
+    data = (; x=[-1.0, -0.2, 0.4, 1.1], z=[0.5, -0.7, 0.9, -0.2],
+        pos=[1, 2, 1, 4, 3, 2, 4],
+        wave=cos.(2pi .* [1.0, 2.0, 4.0, 5.0, 7.0, 9.0, 11.0] ./ 12),
+        y=zeros(7))
+    compare_mapped(multiplied_mapped, multiplied_explicit, data)
 end
 
 const one_formula = @brm begin

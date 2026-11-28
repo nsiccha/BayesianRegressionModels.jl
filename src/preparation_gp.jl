@@ -125,7 +125,7 @@ function _brm_hsgp_extended_options(kw, n_axes::Int, cov::Symbol;
     anchor = _brm_hsgp_anchor(kw, n_axes)
     rows = _brm_hsgp_rows_column(kw)
     if latent
-        for key in (:anchor, :rows, :extrapolate, :at)
+        for key in (:anchor, :rows, :extrapolate, :at, :multiply)
             haskey(kw, key) && error(
                 "sbimpl: `hsgp(...; $key=...)` is not built for a model-derived " *
                 "axis; it is available on raw-data axes")
@@ -154,6 +154,14 @@ function _brm_hsgp_at(kw, context, n::Int)
     all(i -> 1 <= i <= n, raw) || error(
         "BRM term preparation: `hsgp(...; at=$source)` positions must lie in 1:$n")
     (; source, idx=collect(Int, raw))
+end
+
+function _brm_hsgp_multiply(kw, context, n::Int)
+    haskey(kw, :multiply) || return nothing
+    source, raw = _brm_term_data(:hsgp, kw.multiply, context)
+    raw isa AbstractVector{<:Real} && length(raw) == n && all(isfinite, raw) || error(
+        "BRM term preparation: `hsgp(...; multiply=$source)` needs $n finite numeric values")
+    (; source, values=raw)
 end
 
 function _brm_prepare_term(term::ExprColumn{typeof(gp)}, target::Symbol, context)
@@ -222,13 +230,15 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
     sources, axes = _brm_gp_axes(term, context, :hsgp;
         allow_empty=cov === :periodic || haskey(kw, :domain), mask)
     at = _brm_hsgp_at(kw, context, length(first(axes)))
+    multiply = _brm_hsgp_multiply(kw, context,
+        isnothing(at) ? length(first(axes)) : length(at.idx))
     iso = _brm_gp_iso(kw, :hsgp)
     K, c = _brm_hsgp_options(kw, length(axes))
     period = _brm_gp_period(kw, :hsgp, cov)
     fitted_axes = _brm_hsgp_masked_axes(axes, mask)
     by = get(kw, :by, nothing)
-    isnothing(at) || isnothing(by) || error(
-        "BRM term preparation: `hsgp(...; at=...)` with `by=` is not supported")
+    (isnothing(at) && isnothing(multiply)) || isnothing(by) || error(
+        "BRM term preparation: `hsgp(...; at=.../multiply=...)` with `by=` is not supported")
     by_state = if isnothing(by)
         nothing
     else
@@ -261,7 +271,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         )))
         state = (; target, latent=false, explicit_domain=false, K, c, centeredness,
                  cov, iso, period, prepared..., by=by_state,
-                 anchor, extrapolate, support=nothing, rows, at,
+                 anchor, extrapolate, support=nothing, rows, at, multiply,
                  _brm_gp_priors(term, target, context)...)
     else
         domain_fits = _brm_hsgp_domain_fits(kw, length(axes))
@@ -300,12 +310,14 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         )))
         state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
                  K, c, centeredness, cov, iso, period, prepared...,
-                 orthogonal, by=by_state, anchor, extrapolate, support, rows, at,
+                 orthogonal, by=by_state, anchor, extrapolate, support, rows,
+                 at, multiply,
                  _brm_gp_priors(term, target, context)...)
     end
     deps = (sources..., (isnothing(by_state) ? () : (by_state.source,))...,
             (isnothing(rows) ? () : (rows.source,))...,
-            (isnothing(at) ? () : (at.source,))...)
+            (isnothing(at) ? () : (at.source,))...,
+            (isnothing(multiply) ? () : (multiply.source,))...)
     _BRMPreparedTerm(hsgp, sources, state, deps)
 end
 
