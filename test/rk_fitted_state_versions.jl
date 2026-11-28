@@ -11,7 +11,12 @@
 # (`brm_ragged_rows(names, group, cell, (a,))` for `…, cell, a)`), which refused
 # every state of a model with a grouped read exported by 0.2.269 or earlier.
 # `_rk_stored_statement` (src/rk_reprocess.jl) writes a stored statement in this
-# BRM's form, one rewrite per such change.
+# BRM's form, one rewrite per such change. 0.2.416 made the observation of one
+# response array per cell loop over the column that labels the plate's cells
+# (`eachindex(subject)` for `eachindex(y)`), which refused every state of a
+# model with such a plate exported by 0.2.415 or earlier (snag
+# `data-free-replay-5d3abb2c`). No statement names that column, so
+# `_rk_stored_program` reads it from the program this BRM emits.
 #
 # `test/fitted_state_programs/<version>.txt` holds the fitted-state program of
 # each model of `fitted_state_version_models.jl` as that released version
@@ -21,8 +26,9 @@
 #
 # When an emission change fails this test: if it changes only how a statement
 # reads, not what the program computes, add its rewrite to
-# `_rk_stored_statement` and keep the stored files, so states exported before it
-# keep replaying. If it changes what the program computes, states exported
+# `_rk_stored_statement` (or, when the statement alone does not say how this BRM
+# writes it, to `_rk_stored_program`) and keep the stored files, so states
+# exported before it keep replaying. If it changes what the program computes, states exported
 # before it must be exported again, and the replay refuses them by their first
 # differing statement, naming this version: write the new version's file
 # (`BRM_WRITE_FITTED_PROGRAMS=1`), remove the files that no longer read as this
@@ -47,9 +53,16 @@ const STORED = Dict(VersionNumber(first(splitext(file))) => read_fitted_programs
     for file in readdir(PROGRAMS) if endswith(file, ".txt"))
 const RAGGED = (:flat_pk, :flat_pk_two, :flat_pk_ordered)
 
-fitted(name) = let (build, data) = VM.MODELS[name]
-    brm_fitted_state(RKBRMI(build(data)))
+backend(name) = let (build, data) = VM.MODELS[name]
+    RKBRMI(build(data))
 end
+fitted(name) = brm_fitted_state(backend(name))
+# A stored program as this BRM writes it for the model's own program.
+stored_program(program, rk) = BRM._rk_stored_program(program, BRM._rk_retained_program(rk))
+# The observation of one response array per cell, looping over its response as
+# BRM wrote it before 0.2.416.
+response_looped(statement) = startswith(statement,
+    "statement: #= line 0 =# @plate(for i = eachindex(y)\n        y[i] .~ ")
 # A state as an earlier version exported it: this BRM's export with that
 # version's program.
 with_program(state, program) = BRM.BRMFittedState(map(f -> f === :program ? program :
@@ -82,20 +95,26 @@ end
     for (version, programs) in STORED
         @test sort!(collect(keys(programs))) == sort!(collect(keys(VM.MODELS)))
         for (name, program) in programs
-            current = fitted(name).program
-            migrated = map(BRM._rk_stored_statement, program)
+            rk = backend(name)
+            current = brm_fitted_state(rk).program
+            migrated = stored_program(program, rk)
             same = migrated == current
             same || @info "the program $version stored for $name differs" first_difference=something(
                 findfirst(i -> get(migrated, i, nothing) != get(current, i, nothing),
                     1:max(length(migrated), length(current))), 0)
             @test same
             # This BRM's own statements are already in its form.
-            @test map(BRM._rk_stored_statement, current) == current
+            @test stored_program(current, rk) == current
+            # The statement's own rewrites leave only the observation's loop,
+            # which the program supplies.
+            left = setdiff(map(BRM._rk_stored_statement, program), current)
+            @test all(response_looped, left)
+            @test length(left) == (name in RAGGED)
         end
     end
 end
 
-@stestset "0.2.264 differs from this BRM only in its ragged joins" begin
+@stestset "0.2.264 differs from this BRM only in its ragged joins and its observation's loop" begin
     old = STORED[v"0.2.264"]
     for (name, program) in old
         current = fitted(name).program
@@ -103,11 +122,14 @@ end
         differing = [stored for (stored, now) in zip(program, current) if stored != now]
         if name in RAGGED
             # Negative control: the stored text is not this BRM's, and every
-            # difference is a join's partition, as the earlier helper read it.
-            @test !isempty(differing)
+            # difference is a join's partition, as the earlier helper read it,
+            # or the one observation, looping over its response.
+            joins = filter(!response_looped, differing)
+            @test !isempty(joins)
+            @test length(differing) == length(joins) + 1
             @test all(s -> occursin(r"^statement: \w+ = brm_ragged_rows(_ordered|_shared)?\(", s),
-                differing)
-            @test !any(s -> occursin(r", \([^()]*\)\)$", s), differing)
+                joins)
+            @test !any(s -> occursin(r", \([^()]*\)\)$", s), joins)
         else
             @test isempty(differing)
         end

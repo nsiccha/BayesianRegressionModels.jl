@@ -813,12 +813,13 @@ _rk_raw_data_columns!(columns, x::ExprColumn) =
 # every macro call at `LineNumberNode(0)`, as the emitter's generated calls
 # already are; a program without such a call keeps its text.
 function _rk_program_statements(emitted::_RKEmittedProgram)
-    text(x) = sprint(Base.show_unquoted,
-        _rk_unlocated(Base.remove_linenums!(_brm_strip_docs(x))))
-    vcat(["definition: " * text(d) for d in emitted.defs],
-        ["statement: " * text(s) for s in emitted.main.args if !(s isa LineNumberNode)],
+    vcat(["definition: " * _rk_program_text(d) for d in emitted.defs],
+        [_rk_statement_text(s) for s in emitted.main.args if !(s isa LineNumberNode)],
         ["binding: " * string(first(b)) for b in emitted.bindings])
 end
+_rk_program_text(x) = sprint(Base.show_unquoted,
+    _rk_unlocated(Base.remove_linenums!(_brm_strip_docs(x))))
+_rk_statement_text(statement) = "statement: " * _rk_program_text(statement)
 
 _rk_unlocated(x) = x
 function _rk_unlocated(x::Expr)
@@ -837,7 +838,8 @@ _rk_unlocated_statement(statement::AbstractString) =
 # that only rewrote how a statement reads, not what the program computes, adds
 # its rewrite here, so a state exported before the change still replays (snag
 # `simulator-bundle-fa889214`): macro calls without their places (0.2.228) and a
-# ragged join's columns as one tuple (0.2.270). A change of what the program
+# ragged join's columns as one tuple (0.2.270). A rewrite that needs more than
+# the statement goes in `_rk_stored_program`. A change of what the program
 # computes adds none, and the replay refuses a state exported before it by its
 # first differing statement. `test/rk_fitted_state_versions.jl` holds the
 # programs released versions exported.
@@ -868,6 +870,49 @@ function _rk_tupled_ragged_axes(statement::AbstractString)
     "statement: " * sprint(Base.show_unquoted, Expr(:(=), ex.args[1], tupled))
 end
 
+# A stored program as this BRM writes it for `emitted`: each statement's own
+# rewrites (`_rk_stored_statement`), then the one rewrite that needs the
+# program, since no statement says which column labels its plate's cells.
+_rk_stored_program(program, emitted::_RKEmittedProgram) =
+    _rk_cell_looped_observations(map(_rk_stored_statement, program), emitted)
+
+# A labelled plate's observation of one response array per cell as BRM wrote it
+# before 0.2.416, looping over the response (`@plate for i = eachindex(y)`), read
+# as `_rk_observation_statement` writes it: looping over the plate's cell column
+# (`eachindex(subject)`), which a design without the response still holds. A
+# fit holds one response array per cell, so both loops visit the same cells and
+# the statement computes what it did. A stored statement is read this way only
+# when it is, apart from that loop, the statement `emitted` holds.
+function _rk_cell_looped_observations(stored::Vector{String}, emitted::_RKEmittedProgram)
+    reads = Dict{String,String}()
+    for statement in emitted.main.args
+        earlier = _rk_response_looped_observation(statement)
+        earlier === nothing ||
+            (reads[_rk_statement_text(earlier)] = _rk_statement_text(statement))
+    end
+    isempty(reads) ? stored : String[get(reads, statement, statement) for statement in stored]
+end
+
+# An emitted observation plate (`@plate for i = eachindex(axis); y[i] .~ law; end`)
+# with its loop over the response `y`. `nothing` for any other statement, and
+# for a plate that loops over its response already.
+function _rk_response_looped_observation(statement)
+    plate = _brm_undoc(statement)
+    body = _rk_plate_body(plate)
+    body !== nothing && length(body) == 1 || return nothing
+    loop = last(plate.args)
+    range, observed = first(loop.args), only(body)
+    Meta.isexpr(range, :(=), 2) && Meta.isexpr(range.args[2], :call, 2) &&
+        range.args[2].args[1] === :eachindex || return nothing
+    index, axis = range.args[1], range.args[2].args[2]
+    Meta.isexpr(observed, :call, 3) && observed.args[1] in (:~, :.~) || return nothing
+    response = observed.args[2]
+    Meta.isexpr(response, :ref, 2) && response.args[1] isa Symbol &&
+        response.args[2] === index && response.args[1] !== axis || return nothing
+    Expr(:macrocall, plate.args[1:end-1]..., Expr(:for,
+        Expr(:(=), index, Expr(:call, :eachindex, response.args[1])), last(loop.args)))
+end
+
 # The program's text no longer holds its generated inputs (a literal `lkj_eta`, a
 # known correlation factor, a factor's fitted levels), so a frozen replay
 # compares them beside it.
@@ -888,13 +933,17 @@ function _rk_identity_statements(rk)
             for name in sort!(collect(intersect(reads, keys(scalars))))])
 end
 
+# Where two programs first differ: one past the shorter when it opens the other.
+_rk_first_program_difference(fitted, replay) =
+    something(findfirst(i -> i > length(replay) || fitted[i] != replay[i],
+        eachindex(fitted)), length(fitted) + 1)
+
 # `exported`: `fitted` is a fitted state's stored program, which a BRM that
 # emits the model differently also explains.
 function _rk_check_replay_program(fitted::Vector{String}, replay::Vector{String}; prefix,
         exported=false)
     fitted == replay && return nothing
-    k = something(findfirst(i -> i > length(replay) || fitted[i] != replay[i],
-        eachindex(fitted)), length(fitted) + 1)
+    k = _rk_first_program_difference(fitted, replay)
     difference = "First difference:\n" *
         "  fitted: $(get(fitted, k, "(end of program)"))\n" *
         "  replay: $(get(replay, k, "(end of program)"))\n"

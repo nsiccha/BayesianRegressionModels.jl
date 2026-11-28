@@ -268,9 +268,12 @@ end
 # the entire saved program. Bind the current program, so subsequent binders,
 # resampling and exports all use the in-graph level set.
 function _rk_checked_fitted_state(state, plan, emitted, documentation; prefix)
-    stored = map(_rk_stored_statement, state.program)
-    current = _rk_replay_statements(emitted, plan)
+    # The saved program read as `candidate` writes it, beside `candidate`'s own.
+    compared(candidate) = (_rk_stored_program(state.program, candidate),
+        _rk_replay_statements(candidate, plan))
+    stored, current = compared(emitted)
     stored == current && return state
+    closest = (stored, current)
     literals = Dict{Symbol,Any}()
     by_input = Dict{Symbol,Symbol}()
     for predictor in _rk_replay_predictors(plan), term in predictor.terms
@@ -289,21 +292,26 @@ function _rk_checked_fitted_state(state, plan, emitted, documentation; prefix)
     # HSGP spelling as well when the helper alone doesn't identify the era.
     if any(s -> startswith(s, "binding: _rk_kernel_stan_add") ||
             startswith(s, "binding: _rk_kernel_stan_sub"), stored)
-        legacy = task_local_storage(_RK_LEGACY_CELL_ARITHMETIC, true) do
+        legacy = compared(task_local_storage(_RK_LEGACY_CELL_ARITHMETIC, true) do
             _rk_emit_ast(plan; documentation, options...)
-        end
-        if stored == _rk_replay_statements(legacy, plan)
+        end)
+        ==(legacy...) &&
             return _rk_restore_hsgp_levels(state, emitted, current, by_input; prefix)
-        end
+        closest = _rk_closer_program(closest, legacy)
     end
     if !isempty(literals)
-        legacy = _rk_emit_ast(plan; documentation, options...)
-        if stored == _rk_replay_statements(legacy, plan)
+        legacy = compared(_rk_emit_ast(plan; documentation, options...))
+        ==(legacy...) &&
             return _rk_restore_hsgp_levels(state, emitted, current, by_input; prefix)
-        end
+        closest = _rk_closer_program(closest, legacy)
     end
-    _rk_check_replay_program(stored, current; prefix, exported=true)
+    # Refuse by the spelling the saved program shares the most statements with.
+    # Against this BRM's own, a program of an earlier spelling differs first
+    # where the definitions end, whatever statement keeps it from replaying.
+    _rk_check_replay_program(closest...; prefix, exported=true)
 end
+_rk_closer_program(a, b) =
+    _rk_first_program_difference(b...) > _rk_first_program_difference(a...) ? b : a
 
 function _rk_restore_hsgp_levels(state, emitted, program, by_input; prefix)
     values, inputs = state.fitted.values, state.fitted.inputs
