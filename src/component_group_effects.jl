@@ -27,16 +27,22 @@ function _brm_parent_block(term)
     (; id=marker.args[2].value, group)
 end
 
+# The name a member predictor binds: `x` for `x ~ ...` and for a linked
+# `f(x) ~ ...`, which binds `x` on the response scale.
+_brm_parent_target(lhs::Symbol) = lhs
+_brm_parent_target(lhs) = Meta.isexpr(lhs, :call, 2) && lhs.args[2] isa Symbol ? lhs.args[2] : nothing
+
 function _brm_parent_margins!(out, columns, occupied, loop, records, positions, keys, variant,
         selected, index, df, group_sources)
     declarations, ports, arguments = Any[], Symbol[], Any[]
     record = loop.component.inputs[loop.record]
     for stmt in selected
-        if !isxcall(stmt, :~) || !(stmt.args[2] isa Symbol)
+        if !isxcall(stmt, :~) || isnothing(_brm_parent_target(stmt.args[2]))
             push!(declarations, stmt)
             continue
         end
-        target, formula = stmt.args[2:end]
+        lhs, formula = stmt.args[2:end]
+        target = _brm_parent_target(lhs)
         terms = isxcall(formula, :+) ? formula.args[2:end] : Any[formula]
         shared = map(_brm_parent_block, terms)
         if all(isnothing, shared)
@@ -47,8 +53,12 @@ function _brm_parent_margins!(out, columns, occupied, loop, records, positions, 
         local_terms = terms[isnothing.(shared)]
         # A member with terms of its own keeps its authored predictor. Each
         # margin then enters as a fixed summand gathered at the member's own
-        # rows, which also give the predictor its row axis.
+        # rows, which also give the predictor its row axis. A linked predictor
+        # is kept the same way, with `0` for its own terms when it has none,
+        # so it still binds `x` on the response scale.
         own = !isempty(local_terms) && local_terms != [0]
+        predictor = own || !(lhs isa Symbol)
+        own || (local_terms = Any[0])
         summands = Any[]
         for spec in filter(!isnothing, shared)
             field = _brm_observer_field(spec.group, record)
@@ -70,7 +80,7 @@ function _brm_parent_margins!(out, columns, occupied, loop, records, positions, 
             ends = cumsum(length.(slices))
             columns[rows] = [collect(stop-length(x)+1:stop) for (stop,x) in zip(ends,slices)]
             push!(out, :($effect ~ 0 + (0 + $margin | $(spec.id) | $group)))
-            if own
+            if predictor
                 member_rows = fresh(:input_rows)
                 append!(ports, (port, member_rows))
                 append!(arguments, (effect, :($rows[$index])))
@@ -81,8 +91,8 @@ function _brm_parent_margins!(out, columns, occupied, loop, records, positions, 
                 push!(summands, port)
             end
         end
-        if own
-            push!(declarations, Expr(:call, :~, target, Expr(:call, :+, local_terms..., summands...)))
+        if predictor
+            push!(declarations, Expr(:call, :~, lhs, Expr(:call, :+, local_terms..., summands...)))
         else
             value = length(summands) == 1 ? only(summands) : Expr(:call, :+, summands...)
             push!(declarations, Expr(:(=), target, value))

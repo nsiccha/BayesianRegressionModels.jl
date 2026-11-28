@@ -348,7 +348,13 @@ member's population coefficients by its key against the model that writes
 each member out, and checks the coordinate transport of member coefficients,
 including the scalar coefficient of an intercept-only member and a member
 whose intercept sits beside its margin in the parent's block, addressed by
-unconstrained and constrained names. `component_collection_observations.jl` checks
+unconstrained and constrained names. `component_member_linked_parentblock.jl`
+checks a member's linked predictor beside its parent-block margin
+(`logit(share) ~ 1 + (1 | parentblock(:p) | g)`, also with a covariate, and
+`log(rate) ~ 0 + (1 | parentblock(:p) | g)`) against the identity spelling of
+the same member: compiled Stan and native RK densities and gradients, the
+RK-Stan coordinate transport, and each member coefficient's address.
+`component_collection_observations.jl` checks
 Gaussian, Student-t and censored readings of a shared subject trajectory,
 including readings indexed into each instrument's fitted curve.
 `component_length_scale_floor.jl` checks `length_scale_floor` in a record

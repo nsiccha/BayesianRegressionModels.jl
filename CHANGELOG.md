@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.435
+
+- A record member's linked predictor can put its margin in the parent's
+  correlation block: `logit(share) ~ 1 + (1 | parentblock(:p) | entry.subject)`
+  builds in SBBRMI and RKBRMI and binds `share` on the response scale, as the
+  identity spelling `logit_share ~ ...` followed by
+  `share = logistic.(logit_share)` does. It failed with
+  `UndefVarError: parentblock not defined` before. A linked predictor that is
+  only its margin, `log(rate) ~ 0 + (1 | parentblock(:p) | entry.subject)`,
+  works too.
+
 ## 0.2.434
 
 - On SBBRMI, a `@plate for` cell's `Binomial(n[i], p)` whose `p` is the
